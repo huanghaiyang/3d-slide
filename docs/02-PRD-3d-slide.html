@@ -1,0 +1,1448 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>3d-slide 产品需求文档 · P0 MVP</title>
+<style>
+  :root{
+    --paper:#F5F2EC;
+    --card:#FFFDF9;
+    --ink:#1E2126;
+    --ink-2:#3D434D;
+    --muted:#68707E;
+    --dim:#8C94A2;
+    --line:#DED8CC;
+    --line-soft:#EAE5DB;
+    --teal:#0F766E;
+    --teal-2:#14B8A6;
+    --teal-soft:rgba(15,118,110,.07);
+    --amber:#B45309;
+    --amber-soft:rgba(180,83,9,.07);
+    --dark:#0B1017;
+    --sans:"Inter","Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+    --serif:"Songti SC","Noto Serif SC","Source Han Serif SC",Georgia,serif;
+    --mono:"SFMono-Regular",Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{
+    background:var(--paper);color:var(--ink);font-family:var(--sans);
+    font-size:15px;line-height:1.85;-webkit-font-smoothing:antialiased;
+  }
+  code{font-family:var(--mono);font-size:.88em;background:rgba(30,33,38,.06);border-radius:4px;padding:1px 5px}
+  a{color:var(--teal);text-decoration:none;border-bottom:1px solid rgba(15,118,110,.25)}
+  a:hover{border-bottom-color:var(--teal)}
+
+  /* 顶部进度 */
+  .progress{position:fixed;left:0;top:0;height:3px;width:0;z-index:50;background:linear-gradient(90deg,var(--teal),var(--amber))}
+
+  /* 侧栏 */
+  .sidebar{
+    position:fixed;left:0;top:0;bottom:0;width:264px;background:#10151D;color:#C9D2DF;
+    padding:34px 26px 28px;display:flex;flex-direction:column;z-index:20;overflow-y:auto;
+  }
+  .side-brand{display:flex;align-items:center;gap:11px;margin-bottom:6px}
+  .side-mark{position:relative;width:26px;height:26px;flex:0 0 auto}
+  .side-mark i{position:absolute;width:15px;height:15px;border:1px solid #5DE3FF;border-radius:3px;display:block}
+  .side-mark i:nth-child(1){left:0;top:8px;opacity:.25}
+  .side-mark i:nth-child(2){left:5px;top:4px;opacity:.55}
+  .side-mark i:nth-child(3){left:10px;top:0;background:rgba(93,227,255,.14)}
+  .side-name{font-family:var(--mono);font-size:13px;letter-spacing:.12em;color:#E7EEF7}
+  .side-sub{font-family:var(--mono);font-size:9px;letter-spacing:.16em;color:#5D6A80;margin-bottom:28px}
+  .side-nav{list-style:none;display:flex;flex-direction:column;gap:1px}
+  .side-nav a{
+    display:flex;align-items:center;gap:10px;color:#93A0B4;font-size:12.5px;
+    padding:8px 10px;border-radius:6px;border-bottom:0;transition:background .2s,color .2s;
+  }
+  .side-nav a .n{font-family:var(--mono);font-size:9px;color:#4E5C72;width:16px}
+  .side-nav a:hover{background:rgba(148,163,184,.08);color:#DDE6F2}
+  .side-nav a.active{background:rgba(93,227,255,.08);color:#E9F3FF}
+  .side-nav a.active .n{color:#5DE3FF}
+  .side-nav .sub{padding-left:36px;font-size:11.5px;padding-top:5px;padding-bottom:5px;color:#77859A}
+  .side-meta{margin-top:auto;padding-top:24px;border-top:1px solid rgba(148,163,184,.14);font-family:var(--mono);font-size:9.5px;letter-spacing:.08em;color:#59677C;line-height:2}
+  .side-meta b{color:#93A0B4;font-weight:400}
+  .side-meta .st{display:inline-flex;align-items:center;gap:6px;color:#FFB86B}
+  .side-meta .st::before{content:"";width:5px;height:5px;border-radius:50%;background:#FFB86B;box-shadow:0 0 8px rgba(255,184,107,.7)}
+
+  /* 主文档 */
+  .doc{margin-left:264px;max-width:1040px;padding:70px 68px 110px}
+  .hero{padding-bottom:42px;border-bottom:1px solid var(--line)}
+  .hero .eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:.18em;color:var(--teal);display:flex;align-items:center;gap:10px;margin-bottom:22px}
+  .hero .eyebrow::before{content:"";width:26px;height:1px;background:var(--teal);opacity:.6}
+  h1{font-family:var(--serif);font-size:clamp(34px,4vw,48px);line-height:1.28;font-weight:600;letter-spacing:-.01em;margin-bottom:18px}
+  h1 em{font-style:normal;color:var(--teal)}
+  .hero .sub{font-size:16px;color:var(--ink-2);max-width:62ch;margin-bottom:30px}
+  .meta-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+  .meta-cell{border:1px solid var(--line);border-radius:9px;padding:12px 14px;background:rgba(255,253,249,.55)}
+  .meta-cell .k{font-family:var(--mono);font-size:9px;letter-spacing:.12em;color:var(--dim);display:block;margin-bottom:3px}
+  .meta-cell .v{font-size:12.5px;color:var(--ink-2);font-weight:500}
+  .meta-cell .v.hot{color:var(--amber)}
+
+  .review-card{
+    margin-top:28px;border:1px solid rgba(15,118,110,.22);border-left:3px solid var(--teal);
+    background:linear-gradient(120deg,rgba(15,118,110,.055),rgba(255,253,249,.4) 60%);
+    border-radius:0 12px 12px 0;padding:22px 26px;
+  }
+  .review-card .rc{font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;color:var(--teal);margin-bottom:10px}
+  .review-card ul{list-style:none;display:flex;flex-direction:column;gap:6px}
+  .review-card li{font-size:13.5px;color:var(--ink-2);display:grid;grid-template-columns:22px 1fr;gap:6px}
+  .review-card li .rn{font-family:var(--mono);font-size:9.5px;color:var(--teal);padding-top:5px}
+  .review-card li b{font-weight:600;color:var(--ink)}
+
+  /* 章节 */
+  .doc-section{padding-top:56px;margin-top:56px;border-top:1px solid var(--line)}
+  .doc-section:first-of-type{margin-top:52px;border-top:0}
+  .section-head{display:flex;align-items:baseline;gap:14px;margin-bottom:22px}
+  .section-head .no{font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;color:var(--dim);padding-top:2px}
+  .section-head h2{font-family:var(--serif);font-size:29px;font-weight:600;line-height:1.35;letter-spacing:-.005em}
+  .section-head .en{margin-left:auto;font-family:var(--mono);font-size:9px;letter-spacing:.13em;color:var(--dim);white-space:nowrap}
+  .section-lede{font-size:14px;color:var(--muted);max-width:70ch;margin-bottom:26px}
+  h3{font-size:19px;font-weight:600;line-height:1.45;margin:32px 0 12px}
+  h3 .h3id{font-family:var(--mono);font-size:10px;color:var(--teal);letter-spacing:.08em;margin-right:9px;font-weight:400}
+  h4{font-size:14.5px;font-weight:600;color:var(--ink-2);margin:24px 0 8px}
+  p{color:var(--ink-2);margin-bottom:12px}
+  p.lead{font-size:15.5px;color:var(--ink)}
+  .muted{color:var(--muted)}
+  .small{font-size:12.5px;color:var(--muted)}
+
+  /* 标签 */
+  .chip{display:inline-flex;align-items:center;font-family:var(--mono);font-size:9px;letter-spacing:.06em;border-radius:4px;padding:2px 6px;margin-left:6px;vertical-align:2px;white-space:nowrap}
+  .chip.assume{color:var(--amber);background:var(--amber-soft);border:1px solid rgba(180,83,9,.22)}
+  .chip.tbd{color:#7C3AED;background:rgba(124,58,237,.07);border:1px solid rgba(124,58,237,.22)}
+  .chip.p0{color:var(--teal);background:var(--teal-soft);border:1px solid rgba(15,118,110,.22)}
+  .chip.p1{color:#64748B;background:rgba(100,116,139,.06);border:1px solid rgba(100,116,139,.2)}
+  .chip.decision{color:var(--ink-2);background:rgba(30,33,38,.05);border:1px solid var(--line)}
+
+  /* 卡片 */
+  .req-card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:32px 34px 26px;margin:26px 0 30px;box-shadow:0 1px 0 rgba(30,33,38,.03),0 14px 40px -26px rgba(30,33,38,.18)}
+  .req-head{display:flex;align-items:flex-start;gap:14px;margin-bottom:18px;padding-bottom:16px;border-bottom:1px solid var(--line-soft)}
+  .req-id{font-family:var(--mono);font-size:10px;letter-spacing:.08em;color:var(--teal);border:1px solid rgba(15,118,110,.28);background:var(--teal-soft);padding:3px 7px;border-radius:5px;white-space:nowrap;margin-top:3px}
+  .req-head h3{margin:0;font-size:22px;letter-spacing:-.005em}
+  .req-head .role{margin-left:auto;font-family:var(--mono);font-size:9px;letter-spacing:.1em;color:var(--dim);white-space:nowrap;padding-top:8px}
+  .req-card h4:first-of-type{margin-top:8px}
+  .req-card p:last-child{margin-bottom:0}
+
+  /* 表格 */
+  .tbl{width:100%;border-collapse:collapse;margin:16px 0 22px;font-size:12.8px}
+  .tbl thead th{font-family:var(--mono);font-size:9px;letter-spacing:.1em;color:var(--dim);text-align:left;font-weight:400;padding:8px 12px;border-bottom:1px solid var(--line);background:rgba(30,33,38,.025)}
+  .tbl td{padding:10px 12px;border-bottom:1px solid var(--line-soft);vertical-align:top;color:var(--ink-2);line-height:1.7}
+  .tbl tbody tr:nth-child(even) td{background:rgba(30,33,38,.012)}
+  .tbl td b{color:var(--ink);font-weight:600}
+  .tbl .id{font-family:var(--mono);font-size:10px;color:var(--teal);white-space:nowrap}
+  .tbl .nowrap{white-space:nowrap}
+  .tbl-compact td{padding:8px 11px}
+
+  /* 提示条 */
+  .callout{border:1px solid var(--line);background:rgba(255,253,249,.6);border-radius:10px;padding:15px 18px;margin:16px 0 20px;font-size:13px;color:var(--ink-2);display:grid;grid-template-columns:auto 1fr;gap:12px;align-items:start}
+  .callout .k{font-family:var(--mono);font-size:9px;letter-spacing:.1em;color:var(--teal);padding-top:3px;white-space:nowrap}
+  .callout.warn{border-color:rgba(180,83,9,.24);background:var(--amber-soft)}
+  .callout.warn .k{color:var(--amber)}
+
+  /* 流程 */
+  .flow{display:flex;flex-wrap:wrap;gap:8px;align-items:stretch;margin:18px 0 24px}
+  .flow-step{flex:1 1 0;min-width:120px;border:1px solid var(--line);background:var(--card);border-radius:9px;padding:11px 12px;position:relative}
+  .flow-step .fs-n{font-family:var(--mono);font-size:9px;letter-spacing:.08em;color:var(--teal);margin-bottom:4px}
+  .flow-step .fs-t{font-size:12.5px;font-weight:600;color:var(--ink);line-height:1.45}
+  .flow-step .fs-d{font-size:11px;color:var(--muted);line-height:1.55;margin-top:3px}
+  .flow-arrow{display:flex;align-items:center;color:var(--dim);font-size:12px;flex:0 0 14px;justify-content:center}
+  .flow-note{font-size:11px;color:var(--dim);font-family:var(--mono);margin-top:-10px;margin-bottom:20px;letter-spacing:.04em}
+
+  /* 对象模型 */
+  .model{display:grid;grid-template-columns:1fr auto 1.05fr auto 1.15fr;gap:12px;align-items:stretch;margin:22px 0 26px}
+  .model-box{border:1px solid var(--line);border-radius:12px;background:var(--card);padding:16px 16px 14px}
+  .model-box.primary{border-color:rgba(15,118,110,.34);background:linear-gradient(150deg,var(--teal-soft),var(--card) 70%)}
+  .model-box .mb-k{font-family:var(--mono);font-size:9px;letter-spacing:.12em;color:var(--dim);margin-bottom:5px}
+  .model-box .mb-t{font-size:14.5px;font-weight:600;color:var(--ink);margin-bottom:6px}
+  .model-box .mb-d{font-size:11.5px;color:var(--muted);line-height:1.6}
+  .model-box .mb-list{list-style:none;margin-top:8px}
+  .model-box .mb-list li{font-size:11.5px;color:var(--ink-2);padding:3px 0;border-top:1px dashed var(--line-soft)}
+  .model-link{align-self:center;font-family:var(--mono);font-size:10px;color:var(--dim);text-align:center;line-height:1.4}
+
+  /* 范围 */
+  .scope-tbl td:first-child{white-space:nowrap}
+  .scope-tbl .tier{font-family:var(--mono);font-size:9.5px;padding:2px 6px;border-radius:4px}
+  .tier.p0{color:var(--teal);background:var(--teal-soft);border:1px solid rgba(15,118,110,.22)}
+  .tier.p1{color:#64748B;background:rgba(100,116,139,.06);border:1px solid rgba(100,116,139,.2)}
+  .tier.no{color:#9A3412;background:rgba(154,52,18,.05);border:1px solid rgba(154,52,18,.18)}
+
+  /* 概念卡 */
+  .concept-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:20px 0 26px}
+  .concept{border:1px solid var(--line);border-radius:11px;padding:14px 15px;background:rgba(255,253,249,.55)}
+  .concept .c-k{font-family:var(--mono);font-size:9px;letter-spacing:.1em;color:var(--teal);margin-bottom:4px}
+  .concept .c-t{font-size:13px;font-weight:600;color:var(--ink);margin-bottom:4px}
+  .concept .c-d{font-size:11.5px;color:var(--muted);line-height:1.6}
+
+  /* ---------- 内嵌原型 ---------- */
+  .demo{background:var(--dark);border-radius:16px;padding:16px;margin:20px 0 8px;color:#DCE6F2;box-shadow:0 24px 60px -34px rgba(11,16,23,.55)}
+  .demo-top{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:2px 4px 12px}
+  .demo-tag{font-family:var(--mono);font-size:9px;letter-spacing:.13em;color:#5DE3FF;display:flex;align-items:center;gap:9px}
+  .demo-tag::before{content:"";width:5px;height:5px;border-radius:50%;background:#5DE3FF;box-shadow:0 0 10px rgba(93,227,255,.7)}
+  .demo-top .demo-hint{font-family:var(--mono);font-size:9px;color:#5C6B80;letter-spacing:.05em}
+  .demo-foot{display:flex;justify-content:space-between;gap:12px;padding:10px 4px 0;font-family:var(--mono);font-size:9px;color:#5C6B80;letter-spacing:.04em}
+  .demo-foot b{color:#9FB0C6;font-weight:400}
+
+  .mock{border:1px solid rgba(148,163,184,.14);border-radius:11px;overflow:hidden;background:#0A0E14}
+  .mock-bar{display:flex;align-items:center;gap:6px;padding:9px 10px;border-bottom:1px solid rgba(148,163,184,.12);background:#0D131B;flex-wrap:wrap}
+  .mock-title{font-size:10.5px;color:#A9B7C9;margin-right:auto;font-family:var(--mono);letter-spacing:.03em;white-space:nowrap}
+  .mbtn{appearance:none;border:1px solid rgba(148,163,184,.2);background:rgba(148,163,184,.06);color:#B8C6D8;font-family:var(--sans);font-size:10.5px;padding:4px 9px;border-radius:5px;cursor:pointer;transition:background .15s,border-color .15s}
+  .mbtn:hover{background:rgba(93,227,255,.1);border-color:rgba(93,227,255,.34);color:#E7F0FA}
+  .mbtn.on{background:rgba(93,227,255,.14);border-color:rgba(93,227,255,.4);color:#E7F0FA}
+  .mbtn:focus-visible{outline:2px solid #5DE3FF;outline-offset:1px}
+  .mock-body{display:grid;grid-template-columns:142px minmax(0,1fr) 196px;gap:1px;background:rgba(148,163,184,.12);height:340px}
+  .mock-pane{background:#0A0E14;min-width:0;display:flex;flex-direction:column}
+  .mock-pane-k{font-family:var(--mono);font-size:8.5px;letter-spacing:.1em;color:#57657A;padding:8px 10px 6px}
+  .obj-list{list-style:none;padding:0 6px 8px;overflow:auto;flex:1}
+  .obj-row{display:grid;grid-template-columns:16px 1fr 14px;gap:5px;align-items:center;padding:6px 6px;border-radius:5px;cursor:pointer;font-size:10.5px;color:#AEBCCE;border:1px solid transparent}
+  .obj-row:hover{background:rgba(148,163,184,.07)}
+  .obj-row.sel{background:rgba(93,227,255,.1);border-color:rgba(93,227,255,.28);color:#EAF4FF}
+  .obj-row .oi{font-family:var(--mono);font-size:8.5px;color:#5DE3FF;text-align:center}
+  .obj-row.t-image .oi{color:#FFB86B}
+  .obj-row.t-shape .oi{color:#A78BFA}
+  .obj-row .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .obj-row .eye{appearance:none;background:none;border:0;color:#5D6A7D;cursor:pointer;font-size:10px;padding:0;line-height:1}
+  .obj-row .eye:hover{color:#C7D5E6}
+  .obj-row.hidden-obj{opacity:.38}
+  .mock-stage{position:relative;overflow:hidden;background:
+    radial-gradient(420px 280px at 50% 46%,rgba(93,227,255,.07),transparent 70%),
+    #080C11;perspective:1050px;perspective-origin:50% 44%}
+  .mock-stage.grid{background-image:
+    linear-gradient(rgba(148,163,184,.07) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(148,163,184,.07) 1px,transparent 1px),
+    radial-gradient(420px 280px at 50% 46%,rgba(93,227,255,.07),transparent 70%);
+    background-size:28px 28px,28px 28px,auto}
+  .world{position:absolute;inset:0;transform-style:preserve-3d;transform:rotateX(6deg) rotateY(-6deg)}
+  .mobj{position:absolute;left:50%;top:50%;transform-style:preserve-3d;cursor:grab;user-select:none;will-change:transform}
+  .mobj:active{cursor:grabbing}
+  .mobj.sel::after{content:"";position:absolute;inset:-8px;border:1px dashed rgba(93,227,255,.8);border-radius:6px;box-shadow:0 0 24px rgba(93,227,255,.16)}
+  .mobj .tag{position:absolute;left:0;bottom:-19px;font-family:var(--mono);font-size:8px;letter-spacing:.06em;color:rgba(93,227,255,.65);white-space:nowrap}
+  .mo-text{width:250px;font-size:22px;line-height:1.35;font-weight:600;color:#F1F6FC;letter-spacing:.01em}
+  .mo-image{width:132px;height:92px;border-radius:7px;background:
+    radial-gradient(70px 50px at 30% 32%,rgba(255,184,107,.55),transparent 70%),
+    linear-gradient(140deg,#1D2C3E,#0E1621 65%);
+    border:1px solid rgba(148,163,184,.24);display:flex;align-items:flex-end;padding:7px;font-size:9px;color:#C7D5E6}
+  .mo-shape{width:92px;height:92px;border-radius:50%;background:radial-gradient(circle at 32% 28%,rgba(93,227,255,.9),rgba(15,118,110,.55) 62%,rgba(15,118,110,.15));box-shadow:0 0 34px rgba(93,227,255,.22)}
+  .mock-insp{padding:0 10px 10px;overflow:auto}
+  .insip{display:flex;flex-direction:column;gap:8px;margin-top:2px}
+  .field{display:flex;flex-direction:column;gap:3px}
+  .field .fk{display:flex;justify-content:space-between;font-size:9.5px;color:#7C8A9E;font-family:var(--mono)}
+  .field .fk b{color:#C0CEDF;font-weight:400}
+  .field input[type=range]{-webkit-appearance:none;appearance:none;height:3px;border-radius:2px;background:rgba(148,163,184,.25);outline:none;cursor:pointer}
+  .field input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:10px;height:10px;border-radius:50%;background:#5DE3FF;box-shadow:0 0 10px rgba(93,227,255,.5)}
+  .field input[type=range]::-moz-range-thumb{width:10px;height:10px;border:0;border-radius:50%;background:#5DE3FF}
+  .mock-note{font-size:9.5px;line-height:1.65;color:#5F6D81;margin-top:12px;border-top:1px solid rgba(148,163,184,.12);padding-top:8px}
+  .mock-note b{color:#9FB0C6;font-weight:400}
+  .mock-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#5D6A7E;font-size:11px;pointer-events:none}
+
+  /* 演示原型 */
+  .flight-stage{position:relative;height:400px;border-radius:11px;overflow:hidden;background:
+    radial-gradient(90% 80% at 50% 40%,rgba(24,40,60,.55),#070B10 72%);outline:none}
+  .flight-stage:focus-visible{box-shadow:inset 0 0 0 2px rgba(93,227,255,.55)}
+  .stars,.stars::after{content:"";position:absolute;inset:0;background-image:radial-gradient(rgba(148,163,184,.5) 1px,transparent 1px);background-size:96px 96px;opacity:.16}
+  .stars::after{background-position:48px 48px;background-size:130px 130px;opacity:.1}
+  .flight-world{position:absolute;inset:0;transform-origin:50% 50%;transition:transform 1.15s cubic-bezier(.22,1,.36,1);will-change:transform}
+  .flight-world.no-anim{transition-duration:0ms}
+  .fp{position:absolute;border:1px solid rgba(148,163,184,.2);border-radius:9px;background:linear-gradient(155deg,rgba(19,29,42,.85),rgba(9,14,21,.9));padding:13px 15px;box-shadow:0 16px 40px rgba(0,0,0,.35);color:#DCE6F2}
+  .fp .fp-k{font-family:var(--mono);font-size:8px;letter-spacing:.12em;color:#5DE3FF;margin-bottom:7px;display:flex;justify-content:space-between}
+  .fp .fp-k em{font-style:normal;color:#5C6B80}
+  .fp h5{font-size:14px;font-weight:600;letter-spacing:.01em;margin-bottom:5px;color:#F0F6FD}
+  .fp p{font-size:9.5px;line-height:1.6;color:#8D9DB3;margin:0}
+  .fp .mini{display:flex;gap:4px;margin-top:9px}
+  .fp .mini i{display:block;height:3px;border-radius:2px;background:rgba(148,163,184,.22);flex:1}
+  .fp .mini i:first-child{background:rgba(93,227,255,.55);flex:1.6}
+  .fp-hero{left:28%;top:26%;width:44%;height:32%;border-color:rgba(93,227,255,.34)}
+  .fp-hero h5{font-size:21px}
+  .fp-a{left:7%;top:10%;width:22%;height:23%}
+  .fp-b{left:70%;top:10%;width:22%;height:23%;border-color:rgba(255,184,107,.28)}
+  .fp-c{left:7%;top:64%;width:25%;height:24%}
+  .fp-d{left:69%;top:62%;width:23%;height:26%;border-color:rgba(167,139,250,.3)}
+  .fp-e{left:40%;top:78%;width:19%;height:15%}
+  .fp-e h5{font-size:12px}
+  .flight-overlay{position:absolute;inset:0;pointer-events:none;display:flex;flex-direction:column;justify-content:space-between;padding:12px 14px}
+  .fo-top{display:flex;justify-content:space-between;align-items:center;font-family:var(--mono);font-size:8.5px;letter-spacing:.1em;color:#6A7A90}
+  .fo-top .live{display:flex;align-items:center;gap:6px;color:#5DE3FF}
+  .fo-top .live::before{content:"";width:5px;height:5px;border-radius:50%;background:#5DE3FF;box-shadow:0 0 8px rgba(93,227,255,.7)}
+  .fo-bot{display:flex;justify-content:space-between;align-items:flex-end}
+  .fo-frame{font-family:var(--mono);font-size:9px;letter-spacing:.08em;color:#9FB0C6}
+  .fo-frame b{color:#5DE3FF;font-weight:400}
+  .fo-count{font-family:var(--mono);font-size:11px;letter-spacing:.1em;color:#7C8B9F}
+  .flight-controls{display:flex;align-items:center;gap:6px;padding:10px 4px 0;flex-wrap:wrap}
+  .flight-dots{display:flex;gap:5px;margin-left:auto;align-items:center}
+  .fdot{width:6px;height:6px;border-radius:50%;background:rgba(148,163,184,.25);border:0;padding:0;cursor:pointer;transition:background .2s,transform .2s}
+  .fdot.on{background:#5DE3FF;transform:scale(1.35);box-shadow:0 0 8px rgba(93,227,255,.6)}
+  .fdot:focus-visible{outline:1px solid #5DE3FF;outline-offset:2px}
+  .demo-toggle{display:flex;align-items:center;gap:5px;font-size:9.5px;color:#7C8B9F;margin-left:8px;cursor:pointer;user-select:none}
+  .demo-toggle input{accent-color:#5DE3FF;width:11px;height:11px}
+
+  /* 状态与术语 */
+  .state-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:14px;margin:18px 0 24px}
+  .state-card{border:1px solid var(--line);border-radius:10px;background:rgba(255,253,249,.6);padding:15px 16px}
+  .state-card .sk{font-family:var(--mono);font-size:9px;letter-spacing:.1em;color:var(--dim);margin-bottom:6px}
+  .state-card .sv{display:flex;flex-wrap:wrap;gap:5px;align-items:center}
+  .sv-step{font-size:10.5px;border:1px solid var(--line);background:var(--card);border-radius:20px;padding:2px 9px;color:var(--ink-2);white-space:nowrap}
+  .sv-step.hot{border-color:rgba(15,118,110,.3);background:var(--teal-soft);color:var(--teal)}
+  .sv-step.err{border-color:rgba(180,83,9,.3);background:var(--amber-soft);color:var(--amber)}
+  .sv-arrow{color:var(--dim);font-size:10px}
+
+  .glossary{display:grid;grid-template-columns:repeat(2,1fr);gap:0 30px;border-top:1px solid var(--line);margin-top:16px}
+  .gl-item{padding:12px 0;border-bottom:1px solid var(--line-soft);font-size:12.5px;color:var(--muted);display:grid;grid-template-columns:112px 1fr;gap:10px}
+  .gl-item dt{font-weight:600;color:var(--ink);font-size:12.5px}
+  .gl-item dd{margin:0}
+
+  .doc-foot{margin-top:64px;padding-top:22px;border-top:1px solid var(--line);display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;font-family:var(--mono);font-size:9.5px;letter-spacing:.08em;color:var(--dim)}
+  .doc-foot b{color:var(--muted);font-weight:400}
+
+  @media (max-width:1180px){
+    .doc{margin-left:0;max-width:none;padding:52px 40px 80px}
+    .sidebar{position:static;width:auto;padding:18px 24px;flex-direction:row;align-items:center;gap:18px;overflow-x:auto}
+    .side-brand{margin:0}.side-sub{display:none}.side-nav{flex-direction:row;overflow-x:auto;margin:0}
+    .side-nav .sub{display:none}.side-meta{display:none}
+    .model{grid-template-columns:1fr;gap:8px}
+    .model-link{transform:rotate(90deg)}
+  }
+  @media (max-width:860px){
+    .doc{padding:40px 22px 64px}
+    .meta-grid{grid-template-columns:1fr 1fr}
+    .concept-grid,.state-grid,.glossary{grid-template-columns:1fr}
+    .flow-step{flex:1 1 45%}
+    .flow-arrow{display:none}
+    .mock-body{grid-template-columns:1fr;height:auto}
+    .mock-pane.mock-left{display:none}
+    .mock-insp{border-top:1px solid rgba(148,163,184,.12);max-height:180px}
+    .mock-stage{height:280px}
+    .flight-stage{height:300px}
+    .fp p{display:none}
+    .tbl{display:block;overflow-x:auto;white-space:nowrap}
+    .req-card{padding:24px 20px 20px}
+    .req-head{flex-wrap:wrap}
+    .req-head .role{display:none}
+  }
+  @media (max-width:560px){
+    .meta-grid{grid-template-columns:1fr}
+    .section-head .en{display:none}
+    .review-card li{grid-template-columns:1fr}
+    .flight-stage{height:240px}
+    .fp h5{font-size:11px}
+    .fp-hero h5{font-size:15px}
+  }
+  @media print{
+    .sidebar,.progress,.demo,.flight-controls,.demo-toggle{display:none !important}
+    .doc{margin:0;padding:20px;max-width:none}
+    body{background:#fff}
+    .req-card{break-inside:avoid;box-shadow:none}
+    .doc-section{break-before:auto}
+    a{color:inherit;border:0}
+  }
+  @media (prefers-reduced-motion:reduce){
+    html{scroll-behavior:auto}
+    .flight-world{transition-duration:0ms}
+  }
+</style>
+</head>
+<body>
+<div class="progress" id="progress"></div>
+
+<aside class="sidebar">
+  <div class="side-brand">
+    <span class="side-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+    <span class="side-name">3d-slide</span>
+  </div>
+  <p class="side-sub">PRODUCT REQUIREMENTS · P0</p>
+  <ul class="side-nav" id="sideNav">
+    <li><a href="#overview"><span class="n">00</span>文档概览</a></li>
+    <li><a href="#background"><span class="n">01</span>背景与目标</a></li>
+    <li><a href="#scope"><span class="n">02</span>范围</a></li>
+    <li><a href="#model"><span class="n">03</span>产品模型与流程</a></li>
+    <li><a href="#fr"><span class="n">04</span>功能需求</a></li>
+    <li><a class="sub" href="#fr-01">FR-01 作品管理</a></li>
+    <li><a class="sub" href="#fr-02">FR-02 编辑器</a></li>
+    <li><a class="sub" href="#fr-03">FR-03 内容对象</a></li>
+    <li><a class="sub" href="#fr-04">FR-04 视点路径</a></li>
+    <li><a class="sub" href="#fr-05">FR-05 演示模式</a></li>
+    <li><a class="sub" href="#fr-06">FR-06 保存恢复</a></li>
+    <li><a class="sub" href="#fr-07">FR-07 导入导出</a></li>
+    <li><a href="#rules"><span class="n">05</span>共享规则</a></li>
+    <li><a href="#states"><span class="n">06</span>状态与异常</a></li>
+    <li><a href="#open"><span class="n">07</span>待确认问题</a></li>
+    <li><a href="#glossary"><span class="n">08</span>术语表</a></li>
+  </ul>
+  <div class="side-meta">
+    <div>VERSION <b>v1.0</b></div>
+    <div>DATE <b>2026-10-31</b></div>
+    <div>SCOPE <b>P0 MVP</b></div>
+    <div class="st">待评审</div>
+  </div>
+</aside>
+
+<main class="doc">
+  <header class="hero" id="overview">
+    <p class="eyebrow">PRODUCT REQUIREMENTS · P0 MVP · SPATIAL PRESENTATION</p>
+    <h1>3d-slide 产品需求文档<br><em>空间演示，从取景开始</em></h1>
+    <p class="sub">
+      本文档定义 3d-slide P0 的产品行为与业务规则：用户如何在一个连续的三维场景中放置内容、
+      用相机视点组织叙事、进入演示，以及工作如何被保存、恢复与带走。
+      技术架构、接口与实现方案不在本文范围内。
+    </p>
+    <div class="meta-grid">
+      <div class="meta-cell"><span class="k">DOC TYPE</span><span class="v">产品需求文档（PRD）</span></div>
+      <div class="meta-cell"><span class="k">VERSION</span><span class="v">v1.0 · 初稿</span></div>
+      <div class="meta-cell"><span class="k">STATUS</span><span class="v hot">待评审</span></div>
+      <div class="meta-cell"><span class="k">COMPANION</span><span class="v"><a href="./01-目标与范围.html">目标与范围 →</a></span></div>
+    </div>
+
+    <div class="review-card">
+      <div class="rc">REVIEW SUMMARY / 评审摘要</div>
+      <ul>
+        <li><span class="rn">01</span><div><b>一条闭环：</b>新建作品 → 放置文本 / 图片 / 形状 → 捕获视点 → 演示 → 自动保存并可导出。</div></li>
+        <li><span class="rn">02</span><div><b>两条硬规则：</b>所有内容共享同一个连续空间；视点只移动相机，不改变内容的存在与层级。</div></li>
+        <li><span class="rn">03</span><div><b>三个关键交互：</b>视点捕获当前视图、演示中自由浏览后回到路径、任何时刻可重置视图或聚焦选中对象。</div></li>
+      </ul>
+    </div>
+  </header>
+
+  <section class="doc-section" id="background">
+    <div class="section-head"><span class="no">01</span><h2>背景与目标</h2><span class="en">BACKGROUND &amp; GOALS</span></div>
+    <p class="lead">
+      线性演示把空间关系压平成页面顺序：层级、对比、流程被切成同样大小的卡片。
+      空间演示工具本来可以保留这些关系，却把门槛放在了相机与路径编辑上。
+      3d-slide 的取舍是：<strong>内容共同存在于一个连续空间，叙事只由相机视点负责。</strong>
+      用户不需要建模，也不需要写动画时间轴，只需要摆放内容、取好景、按顺序记录。
+    </p>
+
+    <h3>我们观察到的三件事</h3>
+    <table class="tbl">
+      <thead><tr><th style="width:22%">观察</th><th style="width:38%">对用户的影响</th><th>产品含义</th></tr></thead>
+      <tbody>
+        <tr><td><b>关系被切成页</b></td><td>观众记住了顺序，却记不住结构；讲完后脑中缺少一张完整地图。</td><td>内容必须能同时出现在视野里，缩放与移动应成为主要叙事手段。</td></tr>
+        <tr><td><b>相机比画布更吓人</b></td><td>非设计用户在三维视图里容易迷路，不知道该飞向哪里、怎么回来。</td><td>取景必须可捕获、可重置、可聚焦；不要求用户输入相机坐标。</td></tr>
+        <tr><td><b>素材与交付常被当作附加项</b></td><td>图片、中文排版、离线演示需要用户自己找办法妥协。</td><td>素材与工程文件是 P0 主路径的一部分，而不是导出时才考虑的事。</td></tr>
+      </tbody>
+    </table>
+
+    <h3>目标</h3>
+    <table class="tbl">
+      <thead><tr><th style="width:12%">ID</th><th style="width:32%">目标</th><th>可观察结果</th></tr></thead>
+      <tbody>
+        <tr><td class="id">G1</td><td><b>首次使用者完成闭环</b></td><td>不依赖教程，完成「新建 → 加内容 → 设视点 → 演示」四步，并在每一步知道下一步该做什么。</td></tr>
+        <tr><td class="id">G2</td><td><b>观众感知到连续空间</b></td><td>视点切换是相机飞行而非页面淡入淡出；观众能说出「从全景到了局部」。</td></tr>
+        <tr><td class="id">G3</td><td><b>工作不会消失</b></td><td>刷新、关闭标签页、重新打开浏览器后，内容与上次编辑视图都可恢复。</td></tr>
+        <tr><td class="id">G4</td><td><b>作品可以带走</b></td><td>导出一个 <code>.slide</code> 工程文件，在另一台浏览器中完整打开。</td></tr>
+        <tr><td class="id">G5</td><td><b>用户不会迷路</b></td><td>编辑中可一键重置视图或聚焦选中对象；演示中可随时回到当前视点。</td></tr>
+      </tbody>
+    </table>
+    <div class="callout">
+      <span class="k">NOTE</span>
+      <span>P0 不设定留存、时长、转化等量化指标。目标以「闭环是否走通、结果是否可观察」为准；指标设计不在本阶段范围内。</span>
+    </div>
+  </section>
+
+  <section class="doc-section" id="scope">
+    <div class="section-head"><span class="no">02</span><h2>范围</h2><span class="en">SCOPE · P0 / P1 / OUT</span></div>
+    <p class="section-lede">P0 只包含让一次空间演示从开始到交付所需的最小完整旅程。凡不参与该旅程的能力，一律不进入 P0。</p>
+
+    <div class="flow">
+      <div class="flow-step"><div class="fs-n">STEP 01</div><div class="fs-t">新建作品</div><div class="fs-d">从首页进入空白场景</div></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step"><div class="fs-n">STEP 02</div><div class="fs-t">放置内容</div><div class="fs-d">文本 / 图片 / 形状</div></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step"><div class="fs-n">STEP 03</div><div class="fs-t">布置与取景</div><div class="fs-d">深度、缩放、相机</div></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step"><div class="fs-n">STEP 04</div><div class="fs-t">捕获视点</div><div class="fs-d">形成有序路径</div></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step"><div class="fs-n">STEP 05</div><div class="fs-t">演示</div><div class="fs-d">全屏飞行</div></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step"><div class="fs-n">STEP 06</div><div class="fs-t">保存 / 导出</div><div class="fs-d">本地恢复与带走</div></div>
+    </div>
+    <p class="flow-note">完成证据：演示模式下从首视点走到末视点并退出；刷新页面后作品与编辑视图仍在。</p>
+
+    <table class="tbl scope-tbl">
+      <thead><tr><th style="width:10%">层级</th><th style="width:26%">能力</th><th>边界与说明</th></tr></thead>
+      <tbody>
+        <tr><td><span class="tier p0">P0</span></td><td><b>作品与入口</b></td><td>新建、重命名、最近作品列表、删除二次确认；免登录，作品保存在本地。</td></tr>
+        <tr><td><span class="tier p0">P0</span></td><td><b>空间编辑</b></td><td>平移 / 环绕 / 缩放视图、重置视图、聚焦选中对象、16:9 取景安全框。</td></tr>
+        <tr><td><span class="tier p0">P0</span></td><td><b>内容对象</b></td><td>文本、图片、矩形 / 椭圆 / 直线；位置、深度、尺寸、旋转、透明度、可见性、图层顺序。</td></tr>
+        <tr><td><span class="tier p0">P0</span></td><td><b>视点与路径</b></td><td>捕获当前视图、更新、命名、拖拽排序、删除、单视点过渡时长。</td></tr>
+        <tr><td><span class="tier p0">P0</span></td><td><b>演示模式</b></td><td>全屏、前进 / 后退、自由浏览、回到当前视点、退出回编辑器；不支持自动播放。</td></tr>
+        <tr><td><span class="tier p0">P0</span></td><td><b>持久化</b></td><td>自动保存、重新打开恢复、撤销 / 重做；不做跨设备同步。</td></tr>
+        <tr><td><span class="tier p0">P0</span></td><td><b>迁移</b></td><td><code>.slide</code> 工程文件导出与导入；内含全部素材，可离线打开。</td></tr>
+        <tr><td><span class="tier p1">P1</span></td><td>模板与预设路径</td><td>降低空白画布的启动成本；P0 先验证基础取景模型是否成立。</td></tr>
+        <tr><td><span class="tier p1">P1</span></td><td>分享链接 / 自包含 HTML</td><td>需要服务端或额外打包能力，单独定义发布与权限。</td></tr>
+        <tr><td><span class="tier p1">P1</span></td><td>自动播放、演讲者备注、双屏</td><td>P0 的讲解节奏由讲述者手动控制。</td></tr>
+        <tr><td><span class="tier p1">P1</span></td><td>3D 倾斜（X / Y 轴）、视频素材</td><td>增加空间表现力，但不是连续空间叙事的必要条件。</td></tr>
+        <tr><td><span class="tier p1">P1</span></td><td>移动端演示、多选批量编辑</td><td>P0 只保证桌面浏览器；选择模型保持单项选择。</td></tr>
+        <tr><td><span class="tier no">不做</span></td><td>PPTX / PDF 互转</td><td>空间布局无法在平面幻灯片中保真，不承诺降级转换规则。</td></tr>
+        <tr><td><span class="tier no">不做</span></td><td>3D 建模、光照与材质</td><td>本产品是演示工具，不是三维编辑器。</td></tr>
+        <tr><td><span class="tier no">不做</span></td><td>账号、云同步、实时协作</td><td>P0 本地优先；协作依赖完整的权限与服务端模型，另行定义。</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout">
+      <span class="k">ENV</span>
+      <span>桌面浏览器最近两个大版本；视口建议 ≥ 1280×720。P0 编辑与演示固定 16:9 取景，保证编辑所见与演示所得一致。全屏请求被拒绝时降级为全窗口演示并提示退出方式。</span>
+    </div>
+  </section>
+
+  <section class="doc-section" id="model">
+    <div class="section-head"><span class="no">03</span><h2>产品模型与核心流程</h2><span class="en">MODEL &amp; FLOW</span></div>
+    <p class="lead">
+      3d-slide 不是「每页一个场景」的幻灯片。一个作品只有<strong>一个连续空间</strong>，所有内容对象同时存在；
+      视点只是相机在空间中的一次取景快照。翻页不改变内容，只改变你从哪里看。
+    </p>
+
+    <h3>对象关系</h3>
+    <div class="model">
+      <div class="model-box primary">
+        <div class="mb-k">ROOT</div>
+        <div class="mb-t">演示作品 Deck</div>
+        <div class="mb-d">一次演示的全部内容与设置。</div>
+        <ul class="mb-list">
+          <li>标题 · 画布背景</li>
+          <li>默认过渡时长</li>
+          <li>演示进度显示开关</li>
+        </ul>
+      </div>
+      <div class="model-link">包含<br>1 : N</div>
+      <div class="model-box">
+        <div class="mb-k">CONTENT</div>
+        <div class="mb-t">内容对象</div>
+        <div class="mb-d">存在于同一场景，可被任意视点看到。</div>
+        <ul class="mb-list">
+          <li>文本 · 图片 · 形状</li>
+          <li>位置 X / Y · 深度 Z</li>
+          <li>尺寸 · 旋转 · 透明度</li>
+        </ul>
+      </div>
+      <div class="model-link">包含<br>1 : N</div>
+      <div class="model-box">
+        <div class="mb-k">STORY</div>
+        <div class="mb-t">视点 Frame</div>
+        <div class="mb-d">相机的一次取景快照，按顺序组成路径。</div>
+        <ul class="mb-list">
+          <li>取景（看向点 / 距离 / 朝向）</li>
+          <li>名称 · 顺序 · 过渡时长</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="concept-grid">
+      <div class="concept"><div class="c-k">SPACE</div><div class="c-t">场景空间</div><div class="c-d">所有内容共享的三维坐标；X 向右、Y 向下、Z 朝向观众。</div></div>
+      <div class="concept"><div class="c-k">FRAME</div><div class="c-t">视点</div><div class="c-d">相机位置与朝向的快照。捕获当前视图即可创建，不填坐标。</div></div>
+      <div class="concept"><div class="c-k">PATH</div><div class="c-t">叙事路径</div><div class="c-d">按轨道顺序排列的视点序列。P0 只支持线性路径，无分支。</div></div>
+      <div class="concept"><div class="c-k">PRESENT</div><div class="c-t">演示</div><div class="c-d">隐藏编辑器界面，按路径飞行的全屏浏览状态。</div></div>
+      <div class="concept"><div class="c-k">FREE</div><div class="c-t">自由浏览</div><div class="c-d">演示中临时缩放 / 环绕，不写入作品；下一次翻页回到路径。</div></div>
+      <div class="concept"><div class="c-k">VIEW</div><div class="c-t">当前视图</div><div class="c-d">编辑器里此刻的相机状态，可用于新建视点或作为演示起点。</div></div>
+    </div>
+
+    <h3>最小闭环与恢复路径</h3>
+    <p>
+      入口条件是打开首页并新建或打开一个作品。用户完成放置内容、调整取景、捕获视点后进入演示；
+      演示退出后回到编辑器，自动保存恢复作品。最重要的失败恢复有两条：图片加载失败时提供重试 / 替换 / 删除；
+      本地保存失败时保留当前编辑状态，并提供重试与导出工程。
+    </p>
+    <div class="callout">
+      <span class="k">RULE</span>
+      <span>内容对象属于作品而不是视点。删除一个视点不会删除任何内容；新增视点也不会复制内容。任何「每页独立内容」的预期都视为误用，需在界面文案中明确。</span>
+    </div>
+  </section>
+
+  <section class="doc-section" id="fr">
+    <div class="section-head"><span class="no">04</span><h2>功能需求</h2><span class="en">FUNCTIONAL REQUIREMENTS</span></div>
+    <p class="section-lede">
+      以下七个模块构成 P0 的完整行为面。每个模块按「目的 → 界面 / 触发 → 处理规则 → 结果与状态 → 异常」组织；
+      跨模块重复出现的规则统一收敛到第 05 节，模块内只引用编号，不重复定义。
+    </p>
+
+    <div class="req-card" id="fr-01">
+      <div class="req-head">
+        <span class="req-id">FR-01</span>
+        <h3>作品入口与作品管理</h3>
+        <span class="role">HOME / DECK</span>
+      </div>
+      <h4>目的</h4>
+      <p>让用户从打开页面到进入编辑不超过两步；让「最近作品」成为可信的入口，而不是一个会误删东西的列表。</p>
+
+      <h4>界面与触发</h4>
+      <table class="tbl tbl-compact">
+        <thead><tr><th style="width:22%">区域</th><th>内容与职责</th></tr></thead>
+        <tbody>
+          <tr><td><b>顶栏</b></td><td>品牌、「导入」、主按钮「新建演示」。</td></tr>
+          <tr><td><b>作品列表</b></td><td>按最后修改时间倒序；每项显示标题、缩略占位、更新时间、对象数与视点数。</td></tr>
+          <tr><td><b>空状态</b></td><td>首次使用时显示「新建第一份演示」与「导入 .slide 文件」两个入口。</td></tr>
+          <tr><td><b>作品菜单</b></td><td>每张作品卡片提供重命名（进入编辑器后也可改）与删除。</td></tr>
+        </tbody>
+      </table>
+
+      <h4>处理规则</h4>
+      <p><b>1. 新建</b>　点击「新建演示」立即创建一个标题为「未命名演示」的空白作品并进入编辑器；P0 不插入模板或引导页。</p>
+      <p><b>2. 标题</b>　编辑器顶栏内联编辑，长度 1–80 字符；失焦时若为空，恢复为上一个有效标题。修改后首页列表同步更新。</p>
+      <p><b>3. 最近作品</b>　仅列出本地作品，按最后修改时间倒序；不设数量上限，可显示数量受浏览器本地存储容量约束。</p>
+      <p><b>4. 删除</b>　从作品卡片触发，必须经过二次确认。确认框显示作品标题，并明确「删除后无法恢复」。确认后删除作品并返回首页；若该作品正在另一个标签页打开，按 SR-05 处理。P0 不提供回收站。</p>
+      <p><b>5. 打开</b>　点击作品卡片进入编辑器，恢复到最后一次保存的编辑视图；选中状态不恢复。作品不存在或数据损坏时见异常。</p>
+
+      <h4>结果与状态</h4>
+      <p>首页存在三种可见状态：空状态、作品列表、删除确认中。删除完成后列表立即更新，无延迟占位。</p>
+
+      <h4>异常</h4>
+      <table class="tbl tbl-compact">
+        <thead><tr><th style="width:30%">触发</th><th>用户可见行为</th></tr></thead>
+        <tbody>
+          <tr><td>作品数据无法读取</td><td>该作品卡片标记「无法打开」，点击时提示原因；列表其他作品不受影响。</td></tr>
+          <tr><td>删除确认被取消</td><td>关闭确认框，不改变任何数据或列表顺序。</td></tr>
+          <tr><td>标题为空</td><td>失焦时恢复上一个有效标题，不产生空标题作品。</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="req-card" id="fr-02">
+      <div class="req-head">
+        <span class="req-id">FR-02</span>
+        <h3>编辑器与空间视图</h3>
+        <span class="role">EDITOR</span>
+      </div>
+      <h4>目的</h4>
+      <p>提供一个稳定的「取景 — 布置」工作台。用户始终能回答三个问题：我在看什么、我选中了什么、我怎么回到原点。</p>
+
+      <h4>界面布局</h4>
+      <table class="tbl tbl-compact">
+        <thead><tr><th style="width:20%">区域</th><th>内容与职责</th></tr></thead>
+        <tbody>
+          <tr><td><b>顶栏</b></td><td>返回首页、作品标题、保存状态、撤销 / 重做、「演示」、「导出」。</td></tr>
+          <tr><td><b>左栏</b></td><td>内容对象列表，按深度从近到远排序；每项显示类型、名称、可见性开关。可折叠。</td></tr>
+          <tr><td><b>中央</b></td><td>16:9 取景安全框内的空间视图；左上角显示视图工具：重置视图、网格开关、缩放提示。</td></tr>
+          <tr><td><b>右栏</b></td><td>属性检查器。未选中时显示作品设置（背景色、默认过渡时长、演示进度开关）；选中时显示对象属性。</td></tr>
+          <tr><td><b>底部</b></td><td>视点轨道，行为见 FR-04。无选中对象时，它承担「下一步」的引导作用。</td></tr>
+        </tbody>
+      </table>
+
+      <h4>视图操作</h4>
+      <table class="tbl tbl-compact">
+        <thead><tr><th style="width:24%">操作</th><th style="width:34%">触发</th><th>结果</th></tr></thead>
+        <tbody>
+          <tr><td><b>平移视图</b></td><td>在空白处按住左键拖拽</td><td>相机沿屏幕平面移动，不改变朝向与距离。</td></tr>
+          <tr><td><b>环绕视图</b></td><td><code>Alt</code> / <code>Option</code> + 左键拖拽</td><td>围绕当前看向点旋转相机；不改变看向点的位置。</td></tr>
+          <tr><td><b>缩放视图</b></td><td>滚轮</td><td>以光标位置为中心前进 / 后退，保持画面中心目标不漂移。</td></tr>
+          <tr><td><b>重置视图</b></td><td>工具栏「重置视图」</td><td>相机回到作品初始正视视角，取景安全框充满视图。</td></tr>
+          <tr><td><b>聚焦对象</b></td><td>选中对象后按 <code>F</code> 或工具栏按钮</td><td>相机对准对象中心，对象以完整可见为准并保留边距。</td></tr>
+          <tr><td><b>选择 / 取消</b></td><td>单击对象 / 单击空白</td><td>选中单个对象并显示其属性；空白点击取消选中。</td></tr>
+          <tr><td><b>删除对象</b></td><td>选中后按 <code>Delete</code> / <code>Backspace</code></td><td>删除并进入撤销栈，不弹确认。</td></tr>
+        </tbody>
+      </table>
+
+      <h4>处理规则</h4>
+      <p><b>1. 取景一致性</b>　编辑视图始终显示固定 16:9 安全框；窗口更大时安全框居中留边，更小时整体缩放显示。演示按同一安全框取景，不出现编辑看不到、演示被裁掉的内容。</p>
+      <p><b>2. 相机不写入作品</b>　常规平移、环绕、缩放只改变当前视图，不改变视点、不影响自动保存的内容结构；仅当用户捕获或更新视点时，相机状态才进入作品。</p>
+      <p><b>3. 防止迷路</b>　「重置视图」与「聚焦选中对象」在编辑期间始终可用；二者不进入撤销栈，也不改变内容。</p>
+      <p><b>4. 网格</b>　默认开启，作为空间参照；只在编辑中出现，演示中永不渲染。网格间距随缩放自适应，不显示坐标数值。</p>
+      <p><b>5. 选择模型</b>　P0 仅支持单项选择；点击对象即切换选择，不提供框选、Shift 多选与批量变换。</p>
+      <p><b>6. 视图恢复</b>　离开作品或刷新后，恢复到上次保存的编辑视图（相机与缩放），选中状态清空。</p>
+
+      <h4>结果与状态</h4>
+      <p>选中对象时：画布显示选框、对象列表高亮、右栏切换为该对象属性。未选中时右栏显示作品设置。视图缩放比例始终可见（如「72%」），但不可直接输入。</p>
+
+      <h4>异常</h4>
+      <table class="tbl tbl-compact">
+        <thead><tr><th style="width:30%">触发</th><th>用户可见行为</th></tr></thead>
+        <tbody>
+          <tr><td>空白作品</td><td>画布中央显示「添加第一个内容」的空状态，提供文本 / 图片 / 形状三个快捷入口；不自动创建对象。</td></tr>
+          <tr><td>视口宽度小于 1024px</td><td>顶部显示「建议使用更宽的窗口」提示条；编辑功能保留，不保证所有面板同时可见。</td></tr>
+          <tr><td>对象达到 200 个上限</td><td>添加按钮禁用，悬停提示「已达到单作品对象上限」。</td></tr>
+        </tbody>
+      </table>
+
+      <div class="demo" id="demo-editor">
+        <div class="demo-top">
+          <span class="demo-tag">PROTOTYPE A · 编辑器 / 对象属性</span>
+          <span class="demo-hint">点击对象 · 拖动 · 调深度</span>
+        </div>
+        <div class="mock">
+          <div class="mock-bar">
+            <span class="mock-title">未命名演示 · 已保存</span>
+            <button class="mbtn" type="button" data-add="text">+ 文本</button>
+            <button class="mbtn" type="button" data-add="image">+ 图片</button>
+            <button class="mbtn" type="button" data-add="shape">+ 形状</button>
+            <button class="mbtn on" type="button" id="gridBtn" aria-pressed="true">网格</button>
+          </div>
+          <div class="mock-body">
+            <div class="mock-pane mock-left">
+              <div class="mock-pane-k">内容 · 按深度排序</div>
+              <ul class="obj-list" id="objList"></ul>
+              <p class="mock-note">列表顺序与深度同步；<b>眼睛</b>切换可见性。</p>
+            </div>
+            <div class="mock-pane">
+              <div class="mock-pane-k">空间视图 · 16:9 安全框</div>
+              <div class="mock-stage grid" id="mockStage">
+                <div class="world" id="mockWorld"></div>
+              </div>
+            </div>
+            <div class="mock-pane mock-insp">
+              <div class="mock-pane-k" id="inspK">属性 · 未选中</div>
+              <div id="inspector"></div>
+            </div>
+          </div>
+        </div>
+        <div class="demo-foot">
+          <span>FR-02 · FR-03</span>
+          <span>拖动对象改变 <b>X / Y</b>；深度 <b>Z</b> 改变前后与透视大小</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="req-card" id="fr-03">
+      <div class="req-head">
+        <span class="req-id">FR-03</span>
+        <h3>内容对象</h3>
+        <span class="role">TEXT / IMAGE / SHAPE</span>
+      </div>
+      <h4>目的</h4>
+      <p>用三类对象覆盖一次讲解的基本素材：文本负责观点，图片负责证据，形状负责结构。P0 不追求富文本排版与素材管理。</p>
+
+      <h4>通用属性</h4>
+      <table class="tbl tbl-compact">
+        <thead><tr><th style="width:18%">字段</th><th style="width:34%">范围 / 规则</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><b>名称</b></td><td>1–60 字符</td><td>默认按类型自动命名（文本 1、图片 1、矩形 1）；可在属性面板修改，不要求唯一。</td></tr>
+          <tr><td><b>位置 X / Y</b></td><td>场景坐标，−99999 至 99999</td><td>新对象放在当前视图中心对应的世界坐标。</td></tr>
+          <tr><td><b>深度 Z</b></td><td>−10000 至 10000</td><td>数值越大越靠近观众。新对象默认在当前最靠前对象之上 +10；无对象时为 0。</td></tr>
+          <tr><td><b>尺寸 W / H</b></td><td>最小 8；最大 20000</td><td>文本高度随内容自动增长、不可手动修改；图片与形状宽高可编辑。</td></tr>
+          <tr><td><b>旋转</b></td><td>−180° 至 180°（仅 Z 轴）</td><td>P0 不支持 X / Y 轴倾斜；数值以度为单位，可输入或滑杆调整。</td></tr>
+          <tr><td><b>不透明度</b></td><td>0–100%</td><td>默认 100%；隐藏对象与 0% 透明度是两种不同状态。</td></tr>
+          <tr><td><b>可见</b></td><td>开 / 关</td><td>关闭后对象仍在场景中，编辑视图以半透明占位显示，演示中不渲染。</td></tr>
+          <tr><td><b>图层顺序</b></td><td>由深度 Z 推导</td><td>左侧列表按 Z 从近到远排序；拖拽调整顺序时交换相邻对象的 Z 值，见 SR-01。</td></tr>
+        </tbody>
+      </table>
+
+      <h4>文本</h4>
+      <p><b>编辑</b>　双击进入行内编辑；<code>Esc</code> 放弃本次修改，点击空白或 <code>Ctrl / Cmd + Enter</code> 提交。<b>提交空内容时删除该对象</b>，该删除可撤销。</p>
+      <p><b>样式</b>　字体提供四个预设：系统黑体、宋体、圆体、等宽；字号 8–400（默认 48）；支持加粗、左 / 中 / 右对齐、字色与行高 0.8–3.0。一个文本对象只能使用一种字体与字号，P0 不做富文本混排。</p>
+      <p><b>换行与上限</b>　文本按文本框宽度自动换行，高度随行数增长；单对象上限 5000 字符<span class="chip assume">ASSUMPTION</span>，达到上限后禁止继续输入并提示。</p>
+
+      <h4>图片</h4>
+      <p><b>添加</b>　点击「图片」选择文件，或把文件拖入空间视图；拖入时以落点作为放置位置，否则放在当前视图中心。</p>
+      <p><b>格式与大小</b>　支持 PNG、JPG / JPEG、WebP、GIF；GIF 在 P0 只显示首帧，不作为动图播放。单张 ≤ 20MB<span class="chip assume">ASSUMPTION</span>。不支持的格式与超限文件见异常。</p>
+      <p><b>尺寸与适配</b>　默认锁定原始比例，拖拽缩放保持比例；属性面板可解除锁定并允许变形。适配方式提供「完整显示」（默认，留白）与「填充裁切」（铺满对象框）。替换图片时保留位置、尺寸、旋转与深度。</p>
+
+      <h4>形状</h4>
+      <p>提供矩形、椭圆、直线三种。矩形与椭圆支持填充色与描边；直线只有描边、无填充。默认填充使用强调青色，描边关闭；属性面板可修改颜色与描边宽度 0–40。</p>
+
+      <h4>对象操作与图层</h4>
+      <p><b>添加</b>　工具栏「添加」选择类型；新对象进入选中状态，右栏显示属性，视点轨道同时提示「捕获当前视图作为一个视点」。</p>
+      <p><b>删除</b>　<code>Delete</code> / <code>Backspace</code> 或属性面板删除按钮，不弹确认，进入撤销栈。</p>
+      <p><b>可见性</b>　左栏眼睛图标切换；隐藏对象在编辑器中保留虚线轮廓与半透明内容，演示中完全不渲染。</p>
+      <p><b>层级</b>　左栏拖拽改变前后顺序；系统交换相邻对象的 Z 值而不是插入任意小数，保证顺序稳定、可撤销、可再次还原。</p>
+
+      <h4>异常</h4>
+      <table class="tbl tbl-compact">
+        <thead><tr><th style="width:30%">触发</th><th>用户可见行为</th></tr></thead>
+        <tbody>
+          <tr><td>图片解码失败 / 文件损坏</td><td>对象以占位图显示，提供「重试」「替换」「删除」；其他内容不受影响。</td></tr>
+          <tr><td>不支持的文件类型</td><td>拒绝添加并提示支持的四种格式，不创建占位对象。</td></tr>
+          <tr><td>单图超过 20MB</td><td>拒绝添加并显示实际大小与上限；已存在图片不受影响。</td></tr>
+          <tr><td>文本提交为空</td><td>删除该文本对象（可撤销），不保留空气泡。</td></tr>
+          <tr><td>达到 200 对象上限</td><td>添加入口禁用并提示上限；删除对象后立即恢复可用。</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="req-card" id="fr-04">
+      <div class="req-head">
+        <span class="req-id">FR-04</span>
+        <h3>视点与叙事路径</h3>
+        <span class="role">FRAMES / PATH</span>
+      </div>
+      <h4>目的</h4>
+      <p>把「怎么讲」固化成一条可回放的空间路径。用户只需要摆好画面并捕获，不需要理解相机参数。</p>
+
+      <h4>界面与触发</h4>
+      <table class="tbl tbl-compact">
+        <thead><tr><th style="width:22%">区域</th><th>内容与职责</th></tr></thead>
+        <tbody>
+          <tr><td><b>视点轨道</b></td><td>底部横向卡片：序号、名称、过渡时长。当前播放或最近应用的视点高亮。</td></tr>
+          <tr><td><b>添加视点</b></td><td>轨道末尾的「＋ 添加视点」，捕获当前编辑器视图。<span class="chip p0">主路径</span></td></tr>
+          <tr><td><b>视点属性</b></td><td>点击卡片后右栏显示：名称、过渡时长、「用当前视图更新」、删除。</td></tr>
+          <tr><td><b>排序</b></td><td>拖拽卡片改变顺序，序号自动重排；顺序即演示顺序。</td></tr>
+        </tbody>
+      </table>
+
+      <h4>处理规则</h4>
+      <p><b>1. 捕获</b>　添加视点时记录当前相机取景，包括看向点、距离与朝向；由于编辑与演示共用 16:9 安全框，捕获的构图与演示一致。</p>
+      <p><b>2. 更新</b>　选中视点后点击「用当前视图更新」，以当前视图覆盖该视点取景；更新进入撤销栈。名称与过渡时长不受影响。</p>
+      <p><b>3. 前往</b>　点击视点卡片时，编辑器相机以 0.4 秒过渡飞到该视点，便于对照调整；这次移动不写入作品，也不进入撤销栈。</p>
+      <p><b>4. 命名</b>　默认「视点 N」，长度 1–40 字符；清空后失焦恢复上一个有效名称，不允许空名称。</p>
+      <p><b>5. 过渡时长</b>　单个视点可设 0.2–5.0 秒，默认继承作品设置（默认 1.2 秒）。<b>时长属于「被进入的那个视点」</b>：从视点 A 到 B 时使用 B 的时长。改动只影响之后发生的过渡。</p>
+      <p><b>6. 顺序与数量</b>　P0 只支持线性路径，不支持分支、循环或跳转；单作品最多 50 个视点<span class="chip assume">ASSUMPTION</span>，达到上限后添加按钮禁用。</p>
+      <p><b>7. 删除</b>　删除视点不弹确认、不移除任何内容对象，进入撤销栈；删除当前高亮视点后，高亮回到相邻视点，不移动相机。</p>
+      <p><b>8. 零视点</b>　作品允许没有视点。此时仍可从当前视图进入演示，但前进 / 后退禁用，并在轨道处提示「添加视点后可串联叙事」。</p>
+
+      <h4>结果与状态</h4>
+      <p>轨道始终显示所有视点；当前视点由「最近点击或最近捕获」决定。添加 / 更新 / 排序 / 删除后，轨道序号立即重排并随作品自动保存。任何视点操作都不改变内容对象的可见性、深度或层级。</p>
+
+      <h4>异常</h4>
+      <table class="tbl tbl-compact">
+        <thead><tr><th style="width:30%">触发</th><th>用户可见行为</th></tr></thead>
+        <tbody>
+          <tr><td>无视点时点击「演示」</td><td>提示并允许「从当前视图开始」；前进 / 后退按钮禁用。</td></tr>
+          <tr><td>名称被清空</td><td>失焦后恢复上一个有效名称，不产生空名称视点。</td></tr>
+          <tr><td>达到 50 个视点上限</td><td>「添加视点」禁用并提示；删除后可恢复。</td></tr>
+          <tr><td>更新视点时相机尚未稳定</td><td>以当前实际取景为准；不存在「更新失败」状态。</td></tr>
+        </tbody>
+      </table>
+
+      <div class="demo" id="demo-flight">
+        <div class="demo-top">
+          <span class="demo-tag">PROTOTYPE B · 视点路径 / 演示飞行</span>
+          <span class="demo-hint">点击下一步 · 或用方向键</span>
+        </div>
+        <div class="flight-stage" id="flightStage" tabindex="0" role="region" aria-label="视点飞行交互原型">
+          <div class="stars" aria-hidden="true"></div>
+          <div class="flight-world" id="flightWorld">
+            <div class="fp fp-hero">
+              <div class="fp-k">3D-SLIDE<em>OVERVIEW</em></div>
+              <h5>关系，不该被切成页</h5>
+              <p>所有内容在同一个空间里；讲述者只移动相机。</p>
+              <div class="mini"><i></i><i></i><i></i></div>
+            </div>
+            <div class="fp fp-a">
+              <div class="fp-k">01<em>问题</em></div>
+              <h5>线性翻页</h5>
+              <p>结构被压成顺序，观众只记得下一页。</p>
+            </div>
+            <div class="fp fp-b">
+              <div class="fp-k">02<em>做法</em></div>
+              <h5>相机视点</h5>
+              <p>不建模，不写动画；取景即导演。</p>
+            </div>
+            <div class="fp fp-c">
+              <div class="fp-k">03<em>路径</em></div>
+              <h5>从全景到局部</h5>
+              <p>一条线性路径，按顺序飞行。</p>
+            </div>
+            <div class="fp fp-d">
+              <div class="fp-k">04<em>自由浏览</em></div>
+              <h5>讲细节时放大</h5>
+              <p>下一次翻页，仍回到路径。</p>
+            </div>
+            <div class="fp fp-e">
+              <div class="fp-k">05<em>结束</em></div>
+              <h5>回到整张地图</h5>
+              <p>Esc 退出演示。</p>
+            </div>
+          </div>
+          <div class="flight-overlay" aria-hidden="true">
+            <div class="fo-top"><span class="live">PRESENTING</span><span>ESC TO EXIT</span></div>
+            <div class="fo-bot">
+              <span class="fo-frame" id="frameLabel"><b>01</b> / 全景</span>
+              <span class="fo-count" id="frameCount">1 / 6</span>
+            </div>
+          </div>
+        </div>
+        <div class="flight-controls">
+          <button class="mbtn" type="button" id="prevFrame">← 上一视点</button>
+          <button class="mbtn" type="button" id="nextFrame">下一视点 →</button>
+          <button class="mbtn" type="button" id="resetFrame">回到首个视点</button>
+          <div class="flight-dots" id="flightDots" role="tablist" aria-label="视点列表"></div>
+          <label class="demo-toggle"><input type="checkbox" id="reduceMotion"> 减少动效</label>
+        </div>
+        <div class="demo-foot">
+          <span>FR-04 · FR-05</span>
+          <span>键盘：<b>方向键</b> / 空格前进 · <b>R</b> 回到当前视点</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="req-card" id="fr-05">
+      <div class="req-head">
+        <span class="req-id">FR-05</span>
+        <h3>演示模式</h3>
+        <span class="role">PRESENT</span>
+      </div>
+      <h4>目的</h4>
+      <p>在没有编辑器干扰的环境中完整讲完一条空间路径，并允许讲述者临时离开路径查看细节，再可靠地回到叙事。</p>
+
+      <h4>进入与起点</h4>
+      <p>顶部「演示」触发。若作品已有视点，弹出起点选择：<b>从第一个视点开始</b>（默认）或<b>从当前视图开始</b>；无视点时直接以当前视图进入，并提示「添加视点后可串联叙事」。进入后请求全屏；请求被拒绝时使用全窗口演示，并显示一条可关闭的提示条。</p>
+
+      <h4>界面</h4>
+      <p>演示中只渲染作品内容，不显示左栏、右栏、轨道、网格与选择框。右下角显示视点进度（如「3 / 8」），可在作品设置中关闭；首次进入时显示一次操作提示，3 秒后淡出。光标在 2 秒无操作后隐藏，移动后立即恢复。</p>
+
+      <h4>控制</h4>
+      <table class="tbl tbl-compact">
+        <thead><tr><th style="width:24%">操作</th><th style="width:34%">输入</th><th>行为</th></tr></thead>
+        <tbody>
+          <tr><td><b>下一个视点</b></td><td>单击（未拖动）/ <code>→</code> / <code>Space</code> / <code>Enter</code></td><td>相机按目标视点的时长飞向下一个视点；位于末视点时保持不动。</td></tr>
+          <tr><td><b>上一个视点</b></td><td><code>←</code></td><td>返回上一个视点；位于首视点时保持不动。</td></tr>
+          <tr><td><b>退出演示</b></td><td><code>Esc</code></td><td>退出全屏与演示，回到编辑器；相机停留在最后观看的取景。</td></tr>
+          <tr><td><b>自由浏览</b></td><td>按住拖拽（移动超过 4px）</td><td>围绕当前看向点环绕；滚轮以光标为中心缩放 10%–800%（相对当前视点取景）。不写入作品。</td></tr>
+          <tr><td><b>回到路径</b></td><td>双击舞台 / <code>R</code></td><td>相机在 0.6 秒内回到当前视点的取景。</td></tr>
+          <tr><td><b>推进确认</b></td><td>相机飞行中再次点击</td><td>忽略该输入，直到本次过渡结束，避免连点跳过多个视点。</td></tr>
+        </tbody>
+      </table>
+
+      <h4>处理规则</h4>
+      <p><b>1. 过渡</b>　相机从当前位置飞到目标视点，位置、朝向与距离同时插值，缓入缓出；时长取目标视点的设置。相机飞行期间不接受前进 / 后退输入。</p>
+      <p><b>2. 内容不可交互</b>　P0 中所有内容对象在演示里只作为视觉内容，不支持点击链接、播放视频或选中文字；鼠标点击只用于推进视点。</p>
+      <p><b>3. 自由浏览不污染作品</b>　演示中的缩放与环绕不写回视点、不影响自动保存；退出演示时相机停在最后观看位置，便于继续编辑。</p>
+      <p><b>4. 比例</b>　演示使用与编辑相同的 16:9 安全框；屏幕比例不同时上下或左右留黑，不裁切内容。</p>
+      <p><b>5. 减少动效</b>　系统开启「减少动态效果」时，所有相机过渡改为瞬时切换；该设置只影响呈现，不影响路径数据。</p>
+      <p><b>6. 退出</b>　<code>Esc</code>、系统退出全屏、窗口失焦都不改变作品内容；退出后清空选择状态并恢复编辑器界面。</p>
+
+      <h4>结果与状态</h4>
+      <div class="state-grid">
+        <div class="state-card">
+          <div class="sk">演示状态</div>
+          <div class="sv">
+            <span class="sv-step">进入全屏</span><span class="sv-arrow">→</span>
+            <span class="sv-step hot">路径播放</span><span class="sv-arrow">⇄</span>
+            <span class="sv-step">自由浏览</span><span class="sv-arrow">→</span>
+            <span class="sv-step">退出</span>
+          </div>
+        </div>
+        <div class="state-card">
+          <div class="sk">当前视点</div>
+          <div class="sv">
+            <span class="sv-step hot">首视点</span><span class="sv-arrow">→</span>
+            <span class="sv-step">中间视点</span><span class="sv-arrow">→</span>
+            <span class="sv-step">末视点</span>
+          </div>
+        </div>
+      </div>
+
+      <h4>异常</h4>
+      <table class="tbl tbl-compact">
+        <thead><tr><th style="width:30%">触发</th><th>用户可见行为</th></tr></thead>
+        <tbody>
+          <tr><td>全屏请求被拒绝</td><td>全窗口演示 + 顶部提示「浏览器阻止了全屏，按 Esc 退出」；内容与控制不受影响。</td></tr>
+          <tr><td>无视点进入演示</td><td>展示当前视图；前进 / 后退禁用；进度显示「1 / 1」或隐藏。</td></tr>
+          <tr><td>过渡中被连续点击</td><td>忽略后续输入，过渡结束后才接受下一次导航。</td></tr>
+          <tr><td>演示中窗口比例变化</td><td>安全框等比缩放并重新留黑，不裁切内容。</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="req-card" id="fr-06">
+      <div class="req-head">
+        <span class="req-id">FR-06</span>
+        <h3>保存、撤销与恢复</h3>
+        <span class="role">AUTOSAVE / UNDO</span>
+      </div>
+      <h4>目的</h4>
+      <p>让用户敢于直接关闭页面：不需要记得点保存，也不会因为一次误操作丢掉整个作品。</p>
+
+      <h4>自动保存</h4>
+      <p>任何会写入作品的操作停止 <b>2 秒</b>后自动保存<span class="chip assume">ASSUMPTION</span>；页面隐藏、窗口失焦时强制保存一次。保存内容包括作品标题、画布背景与设置、全部内容对象与素材、视点路径、最后一次编辑视图。</p>
+      <table class="tbl tbl-compact">
+        <thead><tr><th style="width:20%">状态</th><th>顶栏显示</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td><b>待保存</b></td><td>「未保存更改」</td><td>有改动尚未落盘；通常只存在 2 秒以内。</td></tr>
+          <tr><td><b>保存中</b></td><td>旋转图标 + 「保存中」</td><td>写入期间不接受重复保存请求。</td></tr>
+          <tr><td><b>已保存</b></td><td>「已保存 HH:MM」</td><td>成功后显示时间；无后续改动时保持。</td></tr>
+          <tr><td><b>保存失败</b></td><td>红色「保存失败 · 查看」</td><td>点击查看原因，提供「重试」与「导出工程」。</td></tr>
+        </tbody>
+      </table>
+
+      <h4>撤销与重做</h4>
+      <p>撤销范围包括对象添加 / 删除 / 变换 / 样式修改、文本内容修改、图层顺序、视点添加 / 更新 / 删除 / 排序 / 命名 / 时长、作品标题与设置。<b>不进入撤销栈</b>的包括：相机浏览、选择变化、保存状态、演示播放。至少保留 50 步<span class="chip assume">ASSUMPTION</span>；执行新编辑后清空重做栈。快捷键为 <code>Ctrl / Cmd + Z</code> 与 <code>Ctrl / Cmd + Shift + Z</code>。</p>
+
+      <h4>恢复</h4>
+      <p>重新打开作品时恢复到最后一次成功保存的内容与编辑视图；选中状态清空。撤销 / 重做栈不跨会话保留，重新打开后从空历史开始。若上次保存失败，作品保留最后成功保存的版本，并在顶栏继续显示失败状态。</p>
+
+      <h4>异常</h4>
+      <table class="tbl tbl-compact">
+        <thead><tr><th style="width:30%">触发</th><th>用户可见行为</th></tr></thead>
+        <tbody>
+          <tr><td>本地存储空间不足</td><td>保存状态变为失败，提示「本地空间不足」；提供重试与导出工程，不静默丢弃改动。</td></tr>
+          <tr><td>保存失败且用户尝试离开</td><td>浏览器原生确认提示；用户可选择留下并重试，或导出工程后离开。</td></tr>
+          <tr><td>同一作品在第二个标签页打开</td><td>第二个标签页以只读方式打开并提示「该作品已在另一窗口编辑」；不写入、不覆盖。</td></tr>
+          <tr><td>页面在保存过程中被关闭</td><td>下次打开恢复最后成功保存的版本；顶栏提示上次未完成保存，但不阻塞编辑。</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="req-card" id="fr-07">
+      <div class="req-head">
+        <span class="req-id">FR-07</span>
+        <h3>导入与导出</h3>
+        <span class="role">PORTABILITY</span>
+      </div>
+      <h4>目的</h4>
+      <p>让作品成为用户可以带走的东西：一个文件包含全部内容与素材，不依赖账号、链接或原设备。</p>
+
+      <h4>导出</h4>
+      <p>顶部「导出」生成单个 <code>.slide</code> 工程文件，文件名取作品标题（非法字符替换为下划线），并附带导出日期。文件包含作品结构、视点路径与全部图片素材，可离线打开；导出不改变作品状态，也不触发额外保存。导出成功显示「已导出 · 文件名 · 大小」；失败时提示原因，作品保持不变。</p>
+
+      <h4>导入</h4>
+      <p>首页「导入」与空状态入口均可选择 <code>.slide</code> 文件。校验通过后<b>创建一个新作品</b>并进入编辑器，不覆盖已有作品；标题重复时追加「（2）」等序号。导入失败时不创建任何作品、不修改现有列表。</p>
+      <table class="tbl tbl-compact">
+        <thead><tr><th style="width:24%">校验项</th><th>失败行为</th></tr></thead>
+        <tbody>
+          <tr><td>文件类型与完整性</td><td>提示「不是有效的 .slide 工程文件」，保留文件选择入口。</td></tr>
+          <tr><td>工程版本</td><td>文件版本高于当前应用时提示「请升级后再打开」；低于当前版本时按兼容规则读取。</td></tr>
+          <tr><td>必备字段与对象类型</td><td>指出缺失或未知的类型，整份文件拒绝导入，不做部分恢复。</td></tr>
+          <tr><td>素材可用性</td><td>缺失素材以占位图导入并逐项提示，其余内容正常打开。</td></tr>
+          <tr><td>文件大小</td><td>超过 200MB<span class="chip assume">ASSUMPTION</span> 时拒绝并提示上限。</td></tr>
+        </tbody>
+      </table>
+
+      <h4>边界</h4>
+      <p>P0 不提供只读分享链接、自包含 HTML 导出、PDF 快照与 PPTX 互转。分享能力进入 P1 后需单独定义发布、权限、撤回与失效行为，不与工程文件混为一谈。</p>
+
+      <h4>异常</h4>
+      <table class="tbl tbl-compact">
+        <thead><tr><th style="width:30%">触发</th><th>用户可见行为</th></tr></thead>
+        <tbody>
+          <tr><td>工程文件损坏</td><td>拒绝导入并说明无法解析；现有作品与首页列表不受影响。</td></tr>
+          <tr><td>导入过程中取消</td><td>关闭文件选择或进度，不创建作品。</td></tr>
+          <tr><td>导出文件过大</td><td>提示文件大小与浏览器限制，建议压缩图片后重试；作品不变。</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="doc-section" id="rules">
+    <div class="section-head"><span class="no">05</span><h2>共享规则</h2><span class="en">SHARED RULES</span></div>
+    <p class="section-lede">以下规则被多个模块引用，在此定义一次，模块内只引用编号。任何实现与原型都必须与此保持一致。</p>
+
+    <div class="req-card">
+      <div class="req-head"><span class="req-id">SR-01</span><h3>空间坐标、深度与取景</h3><span class="role">CANONICAL</span></div>
+      <p><b>坐标系</b>　X 向右为正，Y 向下为正，Z 朝向观众为正。对象尺寸、位置与深度使用同一套场景单位；负坐标允许存在。界面上只显示缩放比例，不显示坐标轴数值。</p>
+      <p><b>深度与层级</b>　Z 越大越靠近观众，遮挡关系由 Z 决定，而不是由添加顺序决定。左侧对象列表按 Z 从大到小排列。拖拽排序时交换被移动对象与目标位置对象的 Z 值，使顺序稳定且可逆。</p>
+      <p><b>初始视图</b>　新建作品的初始相机位于场景正前方，看向原点，取景为 16:9 安全框。重置视图即回到该状态。</p>
+      <p><b>取景一致性</b>　编辑、视点捕获与演示共用 16:9 安全框；窗口比例不同时等比缩放并留黑，任何比例下都不裁切安全框内的内容。</p>
+      <p><b>深度边界</b>　对象 Z 限定在 −10000 至 10000；超出边界的输入收敛到边界，不产生无限远或穿过相机的对象。</p>
+    </div>
+
+    <div class="req-card">
+      <div class="req-head"><span class="req-id">SR-02</span><h3>键盘与输入</h3><span class="role">KEYBOARD</span></div>
+      <table class="tbl tbl-compact">
+        <thead><tr><th style="width:30%">快捷键</th><th style="width:24%">场景</th><th>行为</th></tr></thead>
+        <tbody>
+          <tr><td><code>Ctrl / Cmd + Z</code></td><td>编辑器</td><td>撤销上一步可撤销操作。</td></tr>
+          <tr><td><code>Ctrl / Cmd + Shift + Z</code></td><td>编辑器</td><td>重做；无重做历史时无响应。</td></tr>
+          <tr><td><code>Delete</code> / <code>Backspace</code></td><td>编辑器 · 有选中对象</td><td>删除选中对象，进入撤销栈。</td></tr>
+          <tr><td><code>F</code></td><td>编辑器 · 有选中对象</td><td>聚焦选中对象。</td></tr>
+          <tr><td><code>Esc</code></td><td>编辑器 · 文本编辑中</td><td>放弃本次文本修改。</td></tr>
+          <tr><td><code>Ctrl / Cmd + Enter</code></td><td>编辑器 · 文本编辑中</td><td>提交文本修改。</td></tr>
+          <tr><td><code>Alt / Option + 拖拽</code></td><td>编辑器 · 空白处</td><td>环绕视图。</td></tr>
+          <tr><td><code>→</code> / <code>Space</code> / <code>Enter</code></td><td>演示中</td><td>下一个视点；过渡中忽略。</td></tr>
+          <tr><td><code>←</code></td><td>演示中</td><td>上一个视点；过渡中忽略。</td></tr>
+          <tr><td><code>R</code> / 双击舞台</td><td>演示中</td><td>回到当前视点。</td></tr>
+          <tr><td><code>Esc</code></td><td>演示中</td><td>退出演示并回到编辑器。</td></tr>
+        </tbody>
+      </table>
+      <p class="small">快捷键仅在焦点不处于输入框、下拉框或文本编辑状态时生效；输入框内不拦截系统文本编辑快捷键。</p>
+    </div>
+
+    <div class="req-card">
+      <div class="req-head"><span class="req-id">SR-03</span><h3>素材、容量与文件</h3><span class="role">LIMITS</span></div>
+      <table class="tbl tbl-compact">
+        <thead><tr><th style="width:34%">项目</th><th style="width:22%">限制</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td>单作品内容对象</td><td>≤ 200 个<span class="chip assume">ASSUMPTION</span></td><td>达到上限后添加禁用；删除后恢复。</td></tr>
+          <tr><td>单作品视点</td><td>≤ 50 个<span class="chip assume">ASSUMPTION</span></td><td>线性路径长度上限。</td></tr>
+          <tr><td>单张图片</td><td>≤ 20MB<span class="chip assume">ASSUMPTION</span></td><td>支持 PNG / JPG / JPEG / WebP / GIF。</td></tr>
+          <tr><td>工程文件</td><td>≤ 200MB<span class="chip assume">ASSUMPTION</span></td><td>导出与导入使用同一上限。</td></tr>
+          <tr><td>文本长度</td><td>≤ 5000 字符<span class="chip assume">ASSUMPTION</span></td><td>按字符计，换行计为一个字符。</td></tr>
+          <tr><td>标题长度</td><td>1–80 字符</td><td>空标题不允许保存。</td></tr>
+          <tr><td>视点名长度</td><td>1–40 字符</td><td>空名称失焦恢复。</td></tr>
+        </tbody>
+      </table>
+      <p class="small">所有上限以产品规则呈现；超出时使用明确的用户提示与恢复方式，不静默截断或丢弃。</p>
+    </div>
+
+    <div class="req-card">
+      <div class="req-head"><span class="req-id">SR-04</span><h3>命名与重复</h3><span class="role">NAMING</span></div>
+      <p>新作品默认标题「未命名演示」；同名作品允许存在，首页以更新时间区分。导入产生的新作品在标题重复时追加「（2）」「（3）」等最小可用序号。新对象默认名称按类型计数（文本 1、图片 1、矩形 1），删除后不回收序号；名称不要求唯一。</p>
+      <p>重命名只改变显示名称，不改变对象标识、路径顺序或文件内容。任何名称为空时，失焦恢复到上一个有效值。</p>
+    </div>
+
+    <div class="req-card">
+      <div class="req-head"><span class="req-id">SR-05</span><h3>本地存储与多标签</h3><span class="role">STORAGE</span></div>
+      <p>P0 不使用账号与服务端，作品与素材保存在浏览器本地。用户清理浏览器数据、更换浏览器或设备时，作品不会自动跟随；<code>.slide</code> 工程文件是唯一的迁移手段。</p>
+      <p><b>多标签</b>　同一作品只允许一个标签页写入。检测到第二个标签页打开同一作品时，后者进入只读模式：可查看与演示，不显示编辑工具，不写入数据，并提示「该作品已在另一窗口编辑」。关闭原标签页后刷新即可恢复编辑。</p>
+      <p><b>删除</b>　删除作品同时移除其本地数据与素材，不保留副本；确认框必须明确这一后果。P0 不提供回收站或延迟删除。</p>
+    </div>
+
+    <div class="req-card">
+      <div class="req-head"><span class="req-id">SR-06</span><h3>动效与无障碍</h3><span class="role">MOTION / A11Y</span></div>
+      <p>所有相机过渡使用缓入缓出；演示中的过渡时长以目标视点为准。系统启用「减少动态效果」时，所有相机过渡立即完成，不以动画作为唯一的信息载体。</p>
+      <p>P0 的主路径必须可以只用键盘完成：新建、编辑文本、捕获视点、进入演示、前进 / 后退、退出。控件具备可见焦点；图片对象在 P0 不要求替代文本，但不得把关键信息只放在图片中而不提供文字说明位。</p>
+      <p>不出现闪烁或快速重复运动；演示进度、当前视点与保存状态都以文字或图形同时表达，不只依赖颜色。</p>
+    </div>
+  </section>
+
+  <section class="doc-section" id="states">
+    <div class="section-head"><span class="no">06</span><h2>状态与异常总览</h2><span class="en">STATES &amp; EXCEPTIONS</span></div>
+    <p class="section-lede">跨模块的系统级异常在此汇总；各模块内部的字段校验与局部异常已写在对应模块中，不在此重复。</p>
+    <table class="tbl">
+      <thead><tr><th style="width:8%">ID</th><th style="width:22%">场景</th><th style="width:34%">用户可见行为</th><th>恢复方式</th></tr></thead>
+      <tbody>
+        <tr><td class="id">EX-01</td><td>自动保存失败</td><td>顶栏红色「保存失败 · 查看」，当前编辑状态保留。</td><td>重试保存，或导出工程；离开页面前弹出确认。</td></tr>
+        <tr><td class="id">EX-02</td><td>本地存储空间不足</td><td>保存失败并提示「本地空间不足」。</td><td>导出工程后删除不再需要的作品，再重试。</td></tr>
+        <tr><td class="id">EX-03</td><td>图片加载 / 解码失败</td><td>占位图 + 重试 / 替换 / 删除。</td><td>替换文件或删除对象；其余内容不受影响。</td></tr>
+        <tr><td class="id">EX-04</td><td>全屏请求被拒绝</td><td>全窗口演示 + 可关闭提示条。</td><td>按 Esc 退出；或允许全屏后重新进入。</td></tr>
+        <tr><td class="id">EX-05</td><td>零视点进入演示</td><td>展示当前视图，前进 / 后退禁用。</td><td>退出后添加视点，再次演示。</td></tr>
+        <tr><td class="id">EX-06</td><td>导入文件损坏 / 版本过高</td><td>拒绝导入并说明原因，不创建作品。</td><td>换用有效文件，或升级应用后重试。</td></tr>
+        <tr><td class="id">EX-07</td><td>达到对象 / 视点上限</td><td>对应添加入口禁用并提示上限。</td><td>删除不需要的对象或视点后继续。</td></tr>
+        <tr><td class="id">EX-08</td><td>同一作品第二个标签页</td><td>只读模式 + 提示已在另一窗口编辑。</td><td>关闭原窗口后刷新。</td></tr>
+        <tr><td class="id">EX-09</td><td>编辑视口过小</td><td>顶部建议提示条，功能保留。</td><td>扩大窗口至 ≥ 1280×720。</td></tr>
+        <tr><td class="id">EX-10</td><td>标题 / 视点名称为空</td><td>失焦自动恢复上一个有效值。</td><td>输入有效名称。</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="doc-section" id="open">
+    <div class="section-head"><span class="no">07</span><h2>待确认问题</h2><span class="en">OPEN QUESTIONS</span></div>
+    <p class="section-lede">以下问题会实质影响 P0 范围或体验，当前按「临时决策」推进，评审后确认。其余空白已用 <span class="chip assume">ASSUMPTION</span> 标记，不阻塞开发。</p>
+    <table class="tbl">
+      <thead><tr><th style="width:8%">ID</th><th style="width:30%">问题</th><th style="width:32%">当前临时决策</th><th>影响</th></tr></thead>
+      <tbody>
+        <tr><td class="id">Q-01</td><td>P0 是否必须支持竖屏 / 4:3 取景？</td><td>固定 16:9，其他比例留黑。<span class="chip tbd">TBD</span></td><td>影响安全框、视点捕获与素材适配；若要支持，需新增比例选择与切换规则。</td></tr>
+        <tr><td class="id">Q-02</td><td>删除作品是否需要回收站？</td><td>二次确认后永久删除。<span class="chip tbd">TBD</span></td><td>影响本地存储结构与数据生命周期；会增加 P0 状态与恢复入口。</td></tr>
+        <tr><td class="id">Q-03</td><td>是否需要视点停留时长与自动播放？</td><td>P0 仅手动前进，不做计时。<span class="chip tbd">TBD</span></td><td>若支持，需定义计时、暂停、循环与自由浏览后的恢复规则。</td></tr>
+        <tr><td class="id">Q-04</td><td>容量假设（20MB / 200MB / 200 对象 / 50 视点）是否符合真实使用？</td><td>按上述上限实现并给出提示。<span class="chip tbd">TBD</span></td><td>影响性能预期、导出文件大小与错误路径；偏小会打断大图演示，偏大会带来卡顿。</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="doc-section" id="glossary">
+    <div class="section-head"><span class="no">08</span><h2>术语表</h2><span class="en">GLOSSARY</span></div>
+    <dl class="glossary">
+      <div class="gl-item"><dt>场景空间</dt><dd>一个作品中所有内容对象共享的三维坐标环境。</dd></div>
+      <div class="gl-item"><dt>内容对象</dt><dd>文本、图片或形状；属于作品，不属于某个视点。</dd></div>
+      <div class="gl-item"><dt>视点</dt><dd>相机看向点、距离与朝向的快照；不包含内容。</dd></div>
+      <div class="gl-item"><dt>路径</dt><dd>按轨道顺序排列的视点序列；P0 为线性、单向。</dd></div>
+      <div class="gl-item"><dt>当前视图</dt><dd>编辑器此刻的相机状态；可用于捕获视点或作为演示起点。</dd></div>
+      <div class="gl-item"><dt>自由浏览</dt><dd>演示中临时缩放与环绕，不写回作品；回到路径后恢复。</dd></div>
+      <div class="gl-item"><dt>工程文件</dt><dd><code>.slide</code> 单文件，内含结构与全部素材，用于迁移与备份。</dd></div>
+      <div class="gl-item"><dt>取景安全框</dt><dd>16:9 的可见范围；编辑与演示都以此为准，不裁切内容。</dd></div>
+    </dl>
+  </section>
+
+  <footer class="doc-foot">
+    <span>3d-slide · 产品需求文档 / <b>P0 MVP v1.0</b></span>
+    <span>2026-10-31 · 待评审</span>
+    <span>状态标记：<b>ASSUMPTION</b> 临时假设 / <b>TBD</b> 待确认</span>
+  </footer>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ---------- 滚动进度与侧栏高亮 ---------- */
+  var progress = document.getElementById('progress');
+  var navLinks = Array.prototype.slice.call(document.querySelectorAll('#sideNav a'));
+  var targets = navLinks.map(function (a) {
+    return { link: a, el: document.querySelector(a.getAttribute('href')) };
+  }).filter(function (t) { return t.el; });
+
+  function onScroll() {
+    var doc = document.documentElement;
+    var max = doc.scrollHeight - doc.clientHeight;
+    progress.style.width = (max > 0 ? (doc.scrollTop / max) * 100 : 0) + '%';
+    var active = null;
+    targets.forEach(function (t) {
+      if (t.el.getBoundingClientRect().top <= 130) active = t;
+    });
+    navLinks.forEach(function (a) { a.classList.remove('active'); });
+    if (active) active.link.classList.add('active');
+  }
+  document.addEventListener('scroll', onScroll, { passive: true });
+  onScroll();
+
+  /* ---------- 原型 A：编辑器 ---------- */
+  var world = document.getElementById('mockWorld');
+  var objList = document.getElementById('objList');
+  var inspector = document.getElementById('inspector');
+  var inspK = document.getElementById('inspK');
+  var stage = document.getElementById('mockStage');
+  var gridBtn = document.getElementById('gridBtn');
+
+  var selected = null;
+  var seq = { text: 1, image: 1, shape: 1 };
+  var objects = [
+    { id: 1, type: 'text', name: '文本 1', text: '关系，不该被切成页', x: -34, y: -58, z: 0, opacity: 100, visible: true },
+    { id: 2, type: 'image', name: '图片 1', x: 186, y: 68, z: -40, opacity: 100, visible: true },
+    { id: 3, type: 'shape', name: '形状 1', x: -190, y: 96, z: 58, opacity: 100, visible: true }
+  ];
+
+  var typeMarks = { text: 'T', image: 'I', shape: 'S' };
+  var typeNames = { text: '文本', image: '图片', shape: '形状' };
+
+  function byId(id) {
+    for (var i = 0; i < objects.length; i++) if (objects[i].id === id) return objects[i];
+    return null;
+  }
+
+  function objMarkup(o) {
+    if (o.type === 'text') {
+      return '<div class="mo-text">' + o.text + '</div><span class="tag">TEXT · Z ' + o.z + '</span>';
+    }
+    if (o.type === 'image') {
+      return '<div class="mo-image">图片 · 山脊</div><span class="tag">IMAGE · Z ' + o.z + '</span>';
+    }
+    return '<div class="mo-shape"></div><span class="tag">SHAPE · Z ' + o.z + '</span>';
+  }
+
+  function applyGeometry(o) {
+    var el = world.querySelector('[data-id="' + o.id + '"]');
+    if (!el) return;
+    el.style.transform = 'translate(-50%,-50%) translate3d(' + o.x + 'px,' + o.y + 'px,' + o.z + 'px)';
+    el.style.opacity = o.visible ? (o.opacity / 100) : 0.18;
+    var tag = el.querySelector('.tag');
+    if (tag) tag.textContent = typeMarks[o.type] + ' · Z ' + o.z;
+  }
+
+  function renderScene() {
+    world.innerHTML = '';
+    var sorted = objects.slice().sort(function (a, b) { return b.z - a.z; });
+    sorted.forEach(function (o) {
+      var el = document.createElement('div');
+      el.className = 'mobj' + (selected === o.id ? ' sel' : '');
+      el.setAttribute('data-id', o.id);
+      el.setAttribute('role', 'button');
+      el.setAttribute('tabindex', '0');
+      el.setAttribute('aria-label', o.name);
+      el.innerHTML = objMarkup(o);
+      el.style.transform = 'translate(-50%,-50%) translate3d(' + o.x + 'px,' + o.y + 'px,' + o.z + 'px)';
+      el.style.opacity = o.visible ? (o.opacity / 100) : 0.18;
+      world.appendChild(el);
+    });
+  }
+
+  function renderList() {
+    objList.innerHTML = '';
+    objects.slice().sort(function (a, b) { return b.z - a.z; }).forEach(function (o) {
+      var li = document.createElement('li');
+      li.className = 'obj-row t-' + o.type + (selected === o.id ? ' sel' : '') + (o.visible ? '' : ' hidden-obj');
+      li.innerHTML = '<span class="oi">' + typeMarks[o.type] + '</span><span class="nm">' + o.name +
+        '</span><button class="eye" type="button" aria-label="切换可见性" title="切换可见性">' +
+        (o.visible ? '◉' : '○') + '</button>';
+      li.addEventListener('click', function (e) {
+        if (e.target.closest('.eye')) return;
+        select(o.id);
+      });
+      li.querySelector('.eye').addEventListener('click', function (e) {
+        e.stopPropagation();
+        o.visible = !o.visible;
+        renderScene();
+        renderList();
+      });
+      objList.appendChild(li);
+    });
+  }
+
+  function fieldHTML(key, label, value, min, max, unit) {
+    return '<div class="field"><div class="fk"><span>' + label + '</span><b id="fv-' + key + '">' + value + unit + '</b></div>' +
+      '<input type="range" id="fs-' + key + '" min="' + min + '" max="' + max + '" value="' + value + '" aria-label="' + label + '"></div>';
+  }
+
+  function renderInspector() {
+    var o = byId(selected);
+    if (!o) {
+      inspK.textContent = '属性 · 未选中';
+      inspector.innerHTML = '<div class="mock-note" style="margin-top:2px;border-top:0;padding-top:0">选中画布上的对象查看属性。未选中时，这里显示作品设置（背景、默认过渡时长、演示进度）。</div>';
+      return;
+    }
+    inspK.textContent = '属性 · ' + typeNames[o.type];
+    var html = '<div class="insip">' +
+      '<div class="field"><div class="fk"><span>名称</span><b>' + typeNames[o.type] + '</b></div></div>' +
+      fieldHTML('x', '位置 X', o.x, -280, 280, 'px') +
+      fieldHTML('y', '位置 Y', o.y, -200, 200, 'px') +
+      fieldHTML('z', '深度 Z', o.z, -160, 160, '') +
+      fieldHTML('op', '不透明度', o.opacity, 0, 100, '%') +
+      '<div class="mock-note">拖动对象可改变 X / Y；<b>Z</b> 越大越靠前。深度顺序同时反映在左栏列表中。</div>' +
+      '</div>';
+    inspector.innerHTML = html;
+
+    ['x', 'y', 'z', 'op'].forEach(function (k) {
+      var slider = document.getElementById('fs-' + k);
+      var label = document.getElementById('fv-' + k);
+      slider.addEventListener('input', function () {
+        var v = Number(slider.value);
+        if (k === 'x') o.x = v;
+        if (k === 'y') o.y = v;
+        if (k === 'z') o.z = v;
+        if (k === 'op') o.opacity = v;
+        label.textContent = v + (k === 'op' ? '%' : (k === 'z' ? '' : 'px'));
+        applyGeometry(o);
+        if (k === 'z') renderList();
+      });
+    });
+  }
+
+  function select(id) {
+    selected = id;
+    renderScene();
+    renderList();
+    renderInspector();
+  }
+
+  world.addEventListener('pointerdown', function (e) {
+    var el = e.target.closest('.mobj');
+    if (!el) {
+      if (e.target === world || e.target === stage) {
+        selected = null; renderScene(); renderList(); renderInspector();
+      }
+      return;
+    }
+    var id = Number(el.getAttribute('data-id'));
+    selected = id;
+    world.querySelectorAll('.mobj').forEach(function (n) {
+      n.classList.toggle('sel', Number(n.getAttribute('data-id')) === id);
+    });
+    renderList();
+    renderInspector();
+    var o = byId(id);
+    var startX = e.clientX, startY = e.clientY;
+    var baseX = o.x, baseY = o.y;
+    var moved = false;
+    el.setPointerCapture(e.pointerId);
+
+    function move(ev) {
+      moved = true;
+      var scale = 1;
+      o.x = Math.round(baseX + (ev.clientX - startX) / scale);
+      o.y = Math.round(baseY + (ev.clientY - startY) / scale);
+      applyGeometry(o);
+      var fx = document.getElementById('fv-x'), fy = document.getElementById('fv-y');
+      if (fx) fx.textContent = o.x + 'px';
+      if (fy) fy.textContent = o.y + 'px';
+      var sx = document.getElementById('fs-x'), sy = document.getElementById('fs-y');
+      if (sx) sx.value = Math.max(-280, Math.min(280, o.x));
+      if (sy) sy.value = Math.max(-200, Math.min(200, o.y));
+    }
+    function up(ev) {
+      el.removeEventListener('pointermove', move);
+      el.removeEventListener('pointerup', up);
+      if (el.hasPointerCapture && el.hasPointerCapture(ev.pointerId)) el.releasePointerCapture(ev.pointerId);
+      renderInspector();
+    }
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointerup', up);
+    el.addEventListener('pointercancel', up);
+  });
+
+  stage.addEventListener('click', function (e) {
+    if (e.target === stage) { selected = null; renderScene(); renderList(); renderInspector(); }
+  });
+
+  document.querySelectorAll('[data-add]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var type = btn.getAttribute('data-add');
+      seq[type] += 1;
+      var maxZ = objects.reduce(function (m, o) { return Math.max(m, o.z); }, -200);
+      var id = Date.now();
+      var item = {
+        id: id, type: type, name: typeNames[type] + ' ' + seq[type],
+        x: 0, y: 0, z: maxZ + 12, opacity: 100, visible: true
+      };
+      if (type === 'text') item.text = '新文本 ' + seq[type];
+      objects.push(item);
+      selected = id;
+      renderScene(); renderList(); renderInspector();
+    });
+  });
+
+  gridBtn.addEventListener('click', function () {
+    var on = !stage.classList.contains('grid');
+    stage.classList.toggle('grid', on);
+    gridBtn.classList.toggle('on', on);
+    gridBtn.setAttribute('aria-pressed', String(on));
+  });
+
+  renderScene();
+  renderList();
+  renderInspector();
+
+  /* ---------- 原型 B：视点飞行 ---------- */
+  var flightStage = document.getElementById('flightStage');
+  var flightWorld = document.getElementById('flightWorld');
+  var frameLabel = document.getElementById('frameLabel');
+  var frameCount = document.getElementById('frameCount');
+  var dotsWrap = document.getElementById('flightDots');
+  var reduceToggle = document.getElementById('reduceMotion');
+
+  var frames = [
+    { name: '全景', tf: 'translate(0%, 0%) scale(1)' },
+    { name: '标题', tf: 'translate(12%, 12%) scale(1.55)' },
+    { name: '问题', tf: 'translate(64%, 57%) scale(2)' },
+    { name: '做法', tf: 'translate(-62%, 57%) scale(2)' },
+    { name: '路径 / 自由浏览', tf: 'translate(0%, -24%) scale(1.7)' },
+    { name: '结尾', tf: 'translate(0%, -64%) scale(1.8)' }
+  ];
+  var current = 0;
+  var flying = false;
+
+  var dots = frames.map(function (f, i) {
+    var b = document.createElement('button');
+    b.className = 'fdot' + (i === 0 ? ' on' : '');
+    b.type = 'button';
+    b.setAttribute('role', 'tab');
+    b.setAttribute('aria-label', '视点 ' + (i + 1) + '：' + f.name);
+    b.addEventListener('click', function () { go(i, true); });
+    dotsWrap.appendChild(b);
+    return b;
+  });
+
+  function go(index, fromUser) {
+    if (index < 0 || index >= frames.length) return;
+    if (flying && fromUser) return;
+    current = index;
+    flightWorld.style.transform = frames[index].tf;
+    frameLabel.innerHTML = '<b>0' + (index + 1) + '</b> / ' + frames[index].name;
+    frameCount.textContent = (index + 1) + ' / ' + frames.length;
+    dots.forEach(function (d, i) { d.classList.toggle('on', i === index); d.setAttribute('aria-selected', String(i === index)); });
+    flying = true;
+    window.setTimeout(function () { flying = false; }, reduceToggle.checked ? 80 : 1250);
+  }
+
+  document.getElementById('prevFrame').addEventListener('click', function () { go(current - 1, true); });
+  document.getElementById('nextFrame').addEventListener('click', function () { go(current + 1, true); });
+  document.getElementById('resetFrame').addEventListener('click', function () {
+    flightWorld.classList.add('no-anim');
+    go(0, true);
+    window.setTimeout(function () { flightWorld.classList.remove('no-anim'); }, 100);
+  });
+
+  reduceToggle.addEventListener('change', function () {
+    flightWorld.classList.toggle('no-anim', reduceToggle.checked);
+  });
+  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    reduceToggle.checked = true;
+    flightWorld.classList.add('no-anim');
+  }
+
+  var clickTimer = null;
+  flightStage.addEventListener('click', function () {
+    if (flying) return;
+    if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; return; }
+    clickTimer = window.setTimeout(function () {
+      clickTimer = null;
+      go(current + 1, true);
+    }, 200);
+  });
+  flightStage.addEventListener('dblclick', function (e) {
+    e.preventDefault();
+    if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; }
+    flightWorld.classList.add('no-anim');
+    flightWorld.style.transform = frames[current].tf;
+    window.setTimeout(function () {
+      if (!reduceToggle.checked) flightWorld.classList.remove('no-anim');
+    }, 100);
+  });
+  flightStage.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'Enter') {
+      e.preventDefault(); go(current + 1, true);
+    } else if (e.key === 'ArrowLeft') {
+      e.preventDefault(); go(current - 1, true);
+    } else if (e.key === 'r' || e.key === 'R') {
+      e.preventDefault();
+      flightWorld.style.transform = frames[current].tf;
+    }
+  });
+
+  go(0, false);
+})();
+</script>
+</main>
+</body>
+</html>

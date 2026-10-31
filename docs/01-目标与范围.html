@@ -1,0 +1,654 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>3d-slide · 阶段一：目标与范围</title>
+<style>
+  :root{
+    --bg:#070A10;
+    --panel:#0D131C;
+    --panel-2:#111927;
+    --line:rgba(148, 163, 184, .18);
+    --text:#E9EEF6;
+    --muted:#94A0B4;
+    --dim:#66738A;
+    --cyan:#5DE3FF;
+    --amber:#FFB86B;
+    --violet:#A78BFA;
+    --sans:"Inter","Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+    --serif:"Songti SC","Noto Serif SC","Source Han Serif SC",Georgia,serif;
+    --mono:"SFMono-Regular",Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{
+    background:
+      radial-gradient(900px 600px at 82% -8%, rgba(93,227,255,.10), transparent 60%),
+      radial-gradient(760px 520px at 8% 18%, rgba(167,139,250,.08), transparent 62%),
+      var(--bg);
+    color:var(--text);
+    font-family:var(--sans);
+    line-height:1.7;
+    -webkit-font-smoothing:antialiased;
+    overflow-x:hidden;
+  }
+  body::before{
+    content:"";position:fixed;inset:0;pointer-events:none;z-index:0;
+    background-image:
+      linear-gradient(rgba(148,163,184,.055) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(148,163,184,.055) 1px, transparent 1px);
+    background-size:72px 72px;
+    mask-image:radial-gradient(ellipse 90% 70% at 50% 30%, #000 20%, transparent 78%);
+    -webkit-mask-image:radial-gradient(ellipse 90% 70% at 50% 30%, #000 20%, transparent 78%);
+  }
+  .page{position:relative;z-index:1;max-width:1180px;margin:0 auto;padding:0 44px 88px}
+
+  /* ---------- 顶栏 ---------- */
+  .topbar{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:28px 0 22px;border-bottom:1px solid var(--line);
+  }
+  .brand{display:flex;align-items:center;gap:12px}
+  .brand-mark{position:relative;width:30px;height:30px;flex:0 0 auto}
+  .brand-mark i{
+    position:absolute;width:17px;height:17px;border:1px solid var(--cyan);
+    border-radius:4px;display:block;
+  }
+  .brand-mark i:nth-child(1){left:0;top:9px;opacity:.35}
+  .brand-mark i:nth-child(2){left:6px;top:4px;opacity:.65}
+  .brand-mark i:nth-child(3){left:12px;top:0;background:rgba(93,227,255,.16);box-shadow:0 0 22px rgba(93,227,255,.25)}
+  .brand-name{font-family:var(--mono);font-size:15px;letter-spacing:.12em;color:#DCE6F2}
+  .phase{
+    font-family:var(--mono);font-size:11px;letter-spacing:.16em;color:var(--dim);
+    text-transform:uppercase;display:flex;align-items:center;gap:10px;
+  }
+  .phase b{color:var(--cyan);font-weight:500}
+  .phase span{color:var(--muted)}
+
+  /* ---------- Hero ---------- */
+  .hero{
+    display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,.95fr);
+    gap:56px;align-items:center;padding:74px 0 64px;
+  }
+  .eyebrow{
+    font-family:var(--mono);font-size:11px;letter-spacing:.2em;color:var(--cyan);
+    display:flex;align-items:center;gap:12px;margin-bottom:26px;
+  }
+  .eyebrow::before{content:"";width:30px;height:1px;background:var(--cyan);opacity:.7}
+  h1{
+    font-size:clamp(34px,4.2vw,52px);line-height:1.24;letter-spacing:-.015em;
+    font-weight:650;color:#F4F7FB;margin-bottom:24px;
+  }
+  h1 .accent{
+    color:var(--cyan);
+    text-shadow:0 0 44px rgba(93,227,255,.28);
+    white-space:nowrap;
+  }
+  .lede{font-size:16px;color:#B5C1D3;max-width:52ch;margin-bottom:30px}
+  .lede strong{color:#E9EEF6;font-weight:500}
+  .meta-row{display:flex;flex-wrap:wrap;gap:10px}
+  .meta-pill{
+    font-family:var(--mono);font-size:10.5px;letter-spacing:.08em;color:var(--muted);
+    border:1px solid var(--line);border-radius:999px;padding:6px 12px;
+  }
+  .meta-pill.on{color:var(--cyan);border-color:rgba(93,227,255,.35);background:rgba(93,227,255,.06)}
+
+  /* 空间示意 */
+  .hero-visual{position:relative;height:400px;display:flex;align-items:center;justify-content:center}
+  .visual-glow{
+    position:absolute;width:340px;height:340px;border-radius:50%;
+    background:radial-gradient(circle,rgba(93,227,255,.16),transparent 66%);
+    filter:blur(18px);
+  }
+  .deck{
+    position:relative;width:400px;height:330px;
+    transform-style:preserve-3d;perspective:900px;
+  }
+  .space-card{
+    position:absolute;left:50%;top:50%;
+    border:1px solid rgba(148,163,184,.22);border-radius:12px;
+    background:linear-gradient(150deg,rgba(23,33,48,.82),rgba(11,17,26,.92));
+    box-shadow:0 18px 60px rgba(0,0,0,.45);
+    padding:14px;transform-style:preserve-3d;
+  }
+  .space-card .card-tag{
+    font-family:var(--mono);font-size:9px;letter-spacing:.14em;color:var(--cyan);
+    display:flex;justify-content:space-between;margin-bottom:9px;
+  }
+  .space-card .card-tag em{font-style:normal;color:var(--dim)}
+  .space-card .bar{height:5px;border-radius:3px;background:rgba(148,163,184,.18);margin-bottom:7px}
+  .space-card .bar.hi{background:linear-gradient(90deg,var(--cyan),rgba(93,227,255,.15))}
+  .space-card .bar.mid{width:74%}
+  .space-card .bar.short{width:46%}
+  .space-card .pane{
+    margin-top:10px;height:52px;border-radius:7px;
+    background:
+      linear-gradient(135deg,rgba(93,227,255,.18),transparent 62%),
+      rgba(148,163,184,.07);
+    border:1px solid rgba(148,163,184,.14);
+  }
+  .card-a{
+    width:226px;height:148px;
+    transform:translate(-50%,-50%) translate(-72px,-78px) translateZ(-70px) rotateY(-16deg);
+    opacity:.72;
+  }
+  .card-b{
+    width:196px;height:124px;
+    transform:translate(-50%,-50%) translate(22px,-6px) translateZ(46px) rotateY(-12deg);
+  }
+  .card-c{
+    width:146px;height:94px;
+    transform:translate(-50%,-50%) translate(118px,96px) translateZ(150px) rotateY(-8deg);
+    border-color:rgba(93,227,255,.4);
+    box-shadow:0 18px 50px rgba(0,0,0,.5),0 0 40px rgba(93,227,255,.12);
+  }
+  .card-c .pane{height:30px}
+  .path-svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+  .visual-caption{
+    position:absolute;left:50%;bottom:-8px;transform:translateX(-50%);
+    font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;color:var(--dim);
+    white-space:nowrap;
+  }
+  .visual-caption b{color:var(--muted);font-weight:400}
+
+  /* ---------- 产品契约 ---------- */
+  .section{padding-top:66px}
+  .section-head{
+    display:flex;align-items:baseline;gap:16px;margin-bottom:30px;
+  }
+  .sec-no{font-family:var(--mono);font-size:11px;color:var(--dim);letter-spacing:.1em}
+  .sec-title{font-size:19px;font-weight:600;letter-spacing:.01em;color:#E4EAF3}
+  .sec-line{flex:1;height:1px;background:var(--line)}
+  .sec-note{font-family:var(--mono);font-size:10px;letter-spacing:.1em;color:var(--dim)}
+  .contract-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+  .contract-card{
+    background:linear-gradient(160deg,rgba(23,33,48,.66),rgba(10,15,23,.55));
+    border:1px solid var(--line);border-radius:14px;padding:22px 20px 20px;
+    position:relative;overflow:hidden;
+  }
+  .contract-card::after{
+    content:"";position:absolute;left:0;top:0;width:100%;height:1px;
+    background:linear-gradient(90deg,transparent,rgba(93,227,255,.5),transparent);
+    opacity:.45;
+  }
+  .contract-card .idx{
+    font-family:var(--mono);font-size:10px;color:var(--cyan);letter-spacing:.12em;
+    margin-bottom:14px;display:block;
+  }
+  .contract-card h3{font-size:15px;font-weight:600;color:#E9EEF6;margin-bottom:10px}
+  .contract-card p{font-size:13px;line-height:1.65;color:var(--muted)}
+  .contract-card p b{color:#CBD6E5;font-weight:500}
+
+  /* ---------- 问题与回应 ---------- */
+  .problem-wrap{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr);gap:44px;align-items:start}
+  .problem-list{border-top:1px solid var(--line)}
+  .problem-item{
+    display:grid;grid-template-columns:46px minmax(0,1fr);gap:18px;
+    padding:22px 0;border-bottom:1px solid var(--line);
+  }
+  .problem-item .num{
+    font-family:var(--mono);font-size:11px;color:var(--dim);padding-top:5px;letter-spacing:.08em;
+  }
+  .problem-item h3{font-size:15.5px;font-weight:600;color:#E4EAF3;margin-bottom:7px}
+  .problem-item p{font-size:13px;color:var(--muted);max-width:46ch}
+  .response-box{
+    align-self:stretch;
+    border:1px solid rgba(93,227,255,.22);border-radius:16px;
+    background:
+      radial-gradient(320px 220px at 90% 0%,rgba(93,227,255,.10),transparent 70%),
+      rgba(13,19,28,.6);
+    padding:30px 28px;display:flex;flex-direction:column;justify-content:center;
+  }
+  .response-box .rlabel{
+    font-family:var(--mono);font-size:10px;letter-spacing:.16em;color:var(--cyan);margin-bottom:18px;
+  }
+  .response-box p{font-size:16px;line-height:1.8;color:#D7E0EC}
+  .response-box p strong{color:#fff;font-weight:500}
+  .response-box .rfoot{
+    margin-top:18px;padding-top:16px;border-top:1px dashed rgba(148,163,184,.22);
+    font-family:var(--mono);font-size:10px;letter-spacing:.1em;color:var(--dim);
+  }
+
+  /* ---------- 目标 ---------- */
+  .goal-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 44px;border-top:1px solid var(--line)}
+  .goal-item{
+    display:grid;grid-template-columns:40px minmax(0,1fr);gap:14px;
+    padding:18px 0;border-bottom:1px solid var(--line);
+  }
+  .goal-item .gid{font-family:var(--mono);font-size:10.5px;color:var(--cyan);letter-spacing:.08em;padding-top:4px}
+  .goal-item h3{font-size:14px;font-weight:600;color:#DFE7F1;margin-bottom:5px}
+  .goal-item p{font-size:12.5px;color:var(--muted)}
+  .goal-item:nth-child(5){grid-column:1 / -1;max-width:calc(50% - 22px)}
+  @media (max-width:900px){.goal-item:nth-child(5){max-width:none}}
+
+  /* ---------- 范围 ---------- */
+  .scope-grid{display:grid;grid-template-columns:1.05fr .95fr;gap:18px}
+  .scope-panel{
+    border-radius:16px;border:1px solid var(--line);background:rgba(13,19,28,.55);
+    padding:26px 26px 20px;
+  }
+  .scope-panel.in{border-color:rgba(93,227,255,.24);background:linear-gradient(170deg,rgba(93,227,255,.07),rgba(13,19,28,.55) 46%)}
+  .scope-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+  .scope-head h3{font-size:15px;font-weight:600;color:#E9EEF6}
+  .scope-badge{
+    font-family:var(--mono);font-size:9.5px;letter-spacing:.1em;padding:4px 9px;border-radius:5px;
+  }
+  .scope-badge.in{color:var(--cyan);background:rgba(93,227,255,.1);border:1px solid rgba(93,227,255,.28)}
+  .scope-badge.out{color:#8E9AAF;background:rgba(148,163,184,.06);border:1px solid var(--line)}
+  .scope-list{list-style:none}
+  .scope-list li{
+    display:grid;grid-template-columns:16px minmax(0,1fr);gap:10px;
+    padding:10px 0;border-bottom:1px dashed rgba(148,163,184,.14);
+    font-size:12.5px;color:#B9C5D6;
+  }
+  .scope-list li:last-child{border-bottom:0}
+  .scope-list li .dot{
+    width:5px;height:5px;border-radius:50%;margin-top:9px;
+    background:var(--cyan);box-shadow:0 0 8px rgba(93,227,255,.5);
+  }
+  .scope-panel.out .dot{background:#5C687B;box-shadow:none}
+  .scope-list li span b{color:#E4EAF3;font-weight:500}
+  .p1-band{
+    margin-top:18px;border:1px solid var(--line);border-radius:14px;
+    padding:16px 22px;display:flex;flex-wrap:wrap;gap:10px 26px;align-items:center;
+    background:rgba(148,163,184,.04);
+  }
+  .p1-band .p1-label{
+    font-family:var(--mono);font-size:10px;letter-spacing:.14em;color:var(--amber);
+  }
+  .p1-band .p1-item{font-size:12.5px;color:var(--muted)}
+  .p1-band .p1-item::before{content:"·";color:var(--dim);margin-right:10px}
+
+  /* ---------- 决策 ---------- */
+  .decision-table{width:100%;border-collapse:collapse}
+  .decision-table thead th{
+    font-family:var(--mono);font-size:9.5px;letter-spacing:.13em;color:var(--dim);
+    text-align:left;font-weight:400;padding:0 16px 10px;border-bottom:1px solid var(--line);
+  }
+  .decision-table tbody td{
+    padding:18px 16px;border-bottom:1px solid var(--line);vertical-align:top;font-size:12.5px;
+  }
+  .decision-table tbody tr:hover{background:rgba(148,163,184,.035)}
+  .decision-table .did{
+    font-family:var(--mono);font-size:10.5px;color:var(--cyan);letter-spacing:.06em;white-space:nowrap;
+  }
+  .decision-table .dname{color:#E4EAF3;font-weight:500;font-size:13px}
+  .decision-table .dbody{color:var(--muted);line-height:1.65}
+  .decision-table .dbody b{color:#CBD6E5;font-weight:500}
+  .decision-table .dcost{color:#9AA6B9;font-size:12px}
+
+  /* ---------- 边界 / 假设 / 评审 ---------- */
+  .edge-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+  .edge-card{
+    border:1px solid var(--line);border-radius:14px;padding:22px 22px 18px;
+    background:rgba(13,19,28,.5);
+  }
+  .edge-card h3{
+    font-size:13px;font-weight:600;color:#DFE7F1;margin-bottom:14px;
+    display:flex;align-items:center;gap:8px;
+  }
+  .edge-card h3 .tag{
+    font-family:var(--mono);font-size:8.5px;letter-spacing:.1em;color:var(--amber);
+    border:1px solid rgba(255,184,107,.28);background:rgba(255,184,107,.07);
+    border-radius:4px;padding:3px 6px;font-weight:400;
+  }
+  .edge-card ul{list-style:none}
+  .edge-card li{
+    font-size:12px;color:var(--muted);padding:8px 0;border-bottom:1px dashed rgba(148,163,184,.13);
+    display:grid;grid-template-columns:12px 1fr;gap:8px;
+  }
+  .edge-card li:last-child{border-bottom:0}
+  .edge-card li .m{color:var(--dim);font-family:var(--mono);font-size:10px;padding-top:2px}
+  .edge-card li b{color:#CBD6E5;font-weight:500}
+
+  .review-strip{
+    margin-top:44px;border:1px solid rgba(255,184,107,.24);border-radius:16px;
+    background:linear-gradient(120deg,rgba(255,184,107,.07),rgba(13,19,28,.4) 55%);
+    padding:26px 28px;display:grid;grid-template-columns:auto 1fr;gap:26px;align-items:center;
+  }
+  .review-strip .rlabel{
+    font-family:var(--mono);font-size:10px;letter-spacing:.16em;color:var(--amber);
+    border-right:1px solid rgba(255,184,107,.22);padding-right:26px;white-space:nowrap;
+  }
+  .review-strip ul{list-style:none;display:flex;flex-wrap:wrap;gap:8px 28px}
+  .review-strip li{font-size:12.5px;color:#C9D3E2}
+  .review-strip li span{font-family:var(--mono);font-size:10px;color:var(--amber);margin-right:8px}
+
+  .foot{
+    margin-top:56px;padding-top:22px;border-top:1px solid var(--line);
+    display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;
+    font-family:var(--mono);font-size:10px;letter-spacing:.1em;color:var(--dim);
+  }
+  .foot b{color:var(--muted);font-weight:400}
+
+  @media (max-width:1040px){
+    .contract-grid{grid-template-columns:repeat(2,1fr)}
+    .edge-grid{grid-template-columns:1fr 1fr}
+    .edge-grid .edge-card:last-child{grid-column:1 / -1}
+  }
+  @media (max-width:860px){
+    .page{padding:0 24px 64px}
+    .hero{grid-template-columns:1fr;gap:34px;padding:48px 0 40px}
+    .hero-visual{height:340px;transform:scale(.86)}
+    .brand-name,.phase{display:none}
+    .problem-wrap{grid-template-columns:1fr}
+    .goal-list{grid-template-columns:1fr}
+    .scope-grid{grid-template-columns:1fr}
+    .decision-table thead{display:none}
+    .decision-table tbody tr{display:block;border-bottom:1px solid var(--line);padding:10px 0}
+    .decision-table tbody td{display:block;border-bottom:0;padding:4px 0}
+    .review-strip{grid-template-columns:1fr}
+    .review-strip .rlabel{border-right:0;padding-right:0}
+    .foot{flex-direction:column;gap:6px}
+  }
+  @media (max-width:640px){
+    .contract-grid{grid-template-columns:1fr}
+    .edge-grid{grid-template-columns:1fr}
+    .hero-visual{transform:scale(.68);height:270px;margin:-20px 0}
+    h1{font-size:32px}
+  }
+  @media (prefers-reduced-motion:reduce){
+    *{scroll-behavior:auto !important}
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span class="brand-name">3d-slide</span>
+    </div>
+    <div class="phase">PHASE <b>01</b><span>/ 目标与范围</span></div>
+  </header>
+
+  <section class="hero">
+    <div class="hero-copy">
+      <p class="eyebrow">SPATIAL PRESENTATION · PRODUCT BRIEF</p>
+      <h1>把线性翻页，<br>变成一片<span class="accent">可以飞翔的空间</span>。</h1>
+      <p class="lede">
+        3d-slide 是一个浏览器端的空间演示工具。内容不再是逐页出现的卡片，而是共同存在于同一个三维场景；
+        讲述者用<strong>相机视点</strong>组织叙事，观众在场景之间连续移动，而不是翻页。
+      </p>
+      <div class="meta-row">
+        <span class="meta-pill on">P0 · 桌面浏览器</span>
+        <span class="meta-pill">免登录</span>
+        <span class="meta-pill">本地优先</span>
+        <span class="meta-pill">v1.0 · 待评审</span>
+      </div>
+    </div>
+
+    <div class="hero-visual" aria-hidden="true">
+      <div class="visual-glow"></div>
+      <svg class="path-svg" viewBox="0 0 400 330" fill="none">
+        <path d="M96 108 C 150 96, 186 132, 214 156 S 270 214, 316 246"
+              stroke="rgba(93,227,255,.42)" stroke-width="1" stroke-dasharray="4 6"/>
+        <circle cx="96" cy="108" r="3" fill="#5DE3FF" opacity=".55"/>
+        <circle cx="214" cy="156" r="3.5" fill="#5DE3FF" opacity=".8"/>
+        <circle cx="316" cy="246" r="4" fill="#FFB86B"/>
+      </svg>
+      <div class="deck">
+        <div class="space-card card-a">
+          <div class="card-tag">FRAME 01<em>全景</em></div>
+          <div class="bar hi"></div>
+          <div class="bar mid"></div>
+          <div class="bar short"></div>
+          <div class="pane"></div>
+        </div>
+        <div class="space-card card-b">
+          <div class="card-tag">FRAME 02<em>章节</em></div>
+          <div class="bar hi"></div>
+          <div class="bar mid"></div>
+          <div class="bar short"></div>
+        </div>
+        <div class="space-card card-c">
+          <div class="card-tag">FRAME 03<em>细节</em></div>
+          <div class="bar hi"></div>
+          <div class="bar mid"></div>
+        </div>
+      </div>
+      <div class="visual-caption">ONE CAMERA PATH <b>/ THREE DEPTH LAYERS</b></div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-head">
+      <span class="sec-no">01</span>
+      <span class="sec-title">产品契约</span>
+      <span class="sec-line"></span>
+      <span class="sec-note">WHO · WHEN · JOB · DONE</span>
+    </div>
+    <div class="contract-grid">
+      <div class="contract-card">
+        <span class="idx">为 谁</span>
+        <h3>需要把一件事讲清楚的人</h3>
+        <p>汇报者、讲师、学生、设计师、创作者。<b>不要求任何 3D 软件经验</b>，也不需要设计团队协助。</p>
+      </div>
+      <div class="contract-card">
+        <span class="idx">何 时</span>
+        <h3>关系比条目更重要时</h3>
+        <p>需要展示层级、流程、对比、全景与局部的关系时，打开浏览器即可开始，<b>无需安装或登录</b>。</p>
+      </div>
+      <div class="contract-card">
+        <span class="idx">核心任务</span>
+        <h3>在空间里摆内容，用视点讲故事</h3>
+        <p>在空间画布上放置文本、图片与形状，捕获若干相机视点，形成一条<b>可按顺序播放的空间路径</b>。</p>
+      </div>
+      <div class="contract-card">
+        <span class="idx">完成证据</span>
+        <h3>讲完一遍，且工作还在</h3>
+        <p>在演示模式下从首视点走到末视点并退出；刷新页面后，<b>作品与上次编辑视图仍在</b>，并能导出为单个工程文件。</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-head">
+      <span class="sec-no">02</span>
+      <span class="sec-title">我们要解决的问题</span>
+      <span class="sec-line"></span>
+      <span class="sec-note">OBSERVED PROBLEM</span>
+    </div>
+    <div class="problem-wrap">
+      <div class="problem-list">
+        <div class="problem-item">
+          <span class="num">01</span>
+          <div>
+            <h3>关系被切成页</h3>
+            <p>层级、流程、对比被平均成同样大小的页面。观众记住了顺序，却记不住结构；讲完之后，脑子里没有一张完整的地图。</p>
+          </div>
+        </div>
+        <div class="problem-item">
+          <span class="num">02</span>
+          <div>
+            <h3>相机比画布更吓人</h3>
+            <p>空间演示的门槛不在排版，而在取景与路径。非设计用户在三维视图里很容易迷路：不知道该往哪里飞，也不知道怎么回来。</p>
+          </div>
+        </div>
+        <div class="problem-item">
+          <span class="num">03</span>
+          <div>
+            <h3>素材与交付常常要妥协</h3>
+            <p>图片、中文排版、离线演示，在既有工具里常被当作附加项。我们不打算让这些成为用户需要额外解决的问题。</p>
+          </div>
+        </div>
+      </div>
+      <aside class="response-box">
+        <span class="rlabel">PRODUCT RESPONSE</span>
+        <p>
+          所有内容放在<strong>一个连续的空间</strong>里，叙事只由<strong>相机视点</strong>负责。
+          用户只需要会摆画面、会取景，不需要建模、不需要写动画时间轴。
+        </p>
+        <div class="rfoot">摆内容 → 设视点 → 演示 → 带走</div>
+      </aside>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-head">
+      <span class="sec-no">03</span>
+      <span class="sec-title">目标（可观察）</span>
+      <span class="sec-line"></span>
+      <span class="sec-note">OUTCOMES, NOT SLOGANS</span>
+    </div>
+    <div class="goal-list">
+      <div class="goal-item">
+        <span class="gid">G1</span>
+        <div><h3>首次使用者完成闭环</h3><p>不依赖教程，完成「新建 → 加内容 → 设视点 → 演示」四步，并知道下一步该做什么。</p></div>
+      </div>
+      <div class="goal-item">
+        <span class="gid">G2</span>
+        <div><h3>观众感知到连续空间</h3><p>视点切换表现为相机飞行，而非页面淡入淡出；观众能说出「从全景到了局部」。</p></div>
+      </div>
+      <div class="goal-item">
+        <span class="gid">G3</span>
+        <div><h3>工作不会消失</h3><p>刷新、关闭标签页、重新打开浏览器后，作品内容与上次编辑视图均可恢复。</p></div>
+      </div>
+      <div class="goal-item">
+        <span class="gid">G4</span>
+        <div><h3>作品可以带走</h3><p>导出一个 <code>.slide</code> 工程文件，在另一台装有本工具的浏览器中完整打开。</p></div>
+      </div>
+      <div class="goal-item">
+        <span class="gid">G5</span>
+        <div><h3>用户不会在空间里迷路</h3><p>任何时刻都能一键回到默认视图或聚焦选中对象；演示中可随时回到当前视点。</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-head">
+      <span class="sec-no">04</span>
+      <span class="sec-title">范围</span>
+      <span class="sec-line"></span>
+      <span class="sec-note">P0 · P1 · NOT DOING</span>
+    </div>
+    <div class="scope-grid">
+      <div class="scope-panel in">
+        <div class="scope-head"><h3>P0 · 最小完整闭环</h3><span class="scope-badge in">IN SCOPE</span></div>
+        <ul class="scope-list">
+          <li><span class="dot"></span><span><b>作品管理</b>：新建、重命名、最近作品、删除二次确认</span></li>
+          <li><span class="dot"></span><span><b>空间编辑</b>：三维视图、平移 / 环绕 / 缩放、重置视图、聚焦对象</span></li>
+          <li><span class="dot"></span><span><b>内容对象</b>：文本、图片、矩形 / 椭圆 / 直线；位置、深度、缩放、旋转、透明度、可见性、图层顺序</span></li>
+          <li><span class="dot"></span><span><b>叙事路径</b>：捕获视点、更新视点、重命名、拖拽排序、删除、过渡时长</span></li>
+          <li><span class="dot"></span><span><b>演示模式</b>：全屏、前进 / 后退、自由浏览、回到路径、退出回编辑器</span></li>
+          <li><span class="dot"></span><span><b>持久化</b>：本地自动保存、重新打开恢复、撤销 / 重做</span></li>
+          <li><span class="dot"></span><span><b>迁移</b>：<code>.slide</code> 工程文件导出与导入</span></li>
+        </ul>
+      </div>
+      <div class="scope-panel out">
+        <div class="scope-head"><h3>P0 明确不做</h3><span class="scope-badge out">OUT OF SCOPE</span></div>
+        <ul class="scope-list">
+          <li><span class="dot"></span><span>账号、云同步、只读分享链接（依赖服务端，P1 另行定义）</span></li>
+          <li><span class="dot"></span><span>模板库、自动播放、演讲者备注 / 双屏观众视图</span></li>
+          <li><span class="dot"></span><span>对象入场 / 退场动效、视频素材、3D 模型导入</span></li>
+          <li><span class="dot"></span><span>对象沿 X / Y 轴的 3D 倾斜、光照与材质编辑</span></li>
+          <li><span class="dot"></span><span>PPTX / PDF 导入导出；空间布局无法在平面幻灯片中保真，不承诺降级转换</span></li>
+          <li><span class="dot"></span><span>移动端编辑；P0 只保证桌面浏览器上的编辑与演示</span></li>
+        </ul>
+      </div>
+    </div>
+    <div class="p1-band">
+      <span class="p1-label">P1 · 候选</span>
+      <span class="p1-item">模板与预设路径</span>
+      <span class="p1-item">自包含 HTML 导出</span>
+      <span class="p1-item">分享链接</span>
+      <span class="p1-item">3D 倾斜与视频</span>
+      <span class="p1-item">演讲者备注</span>
+      <span class="p1-item">移动端演示</span>
+      <span class="p1-item">多选与批量编辑</span>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-head">
+      <span class="sec-no">05</span>
+      <span class="sec-title">关键产品决策</span>
+      <span class="sec-line"></span>
+      <span class="sec-note">DECISIONS &amp; TRADE-OFFS</span>
+    </div>
+    <table class="decision-table">
+      <thead><tr><th>ID</th><th>决策</th><th>为什么</th><th>代价 / 边界</th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="did">D1</td>
+          <td><div class="dname">本地优先，免登录</div></td>
+          <td class="dbody">打开就能用，不把账号当成使用前提；<b>作品保存在浏览器本地</b>。</td>
+          <td class="dcost">跨设备需靠 <code>.slide</code> 文件携带；无实时协作。</td>
+        </tr>
+        <tr>
+          <td class="did">D2</td>
+          <td><div class="dname">叙事是相机路径，不是对象动画</div></td>
+          <td class="dbody">内容始终存在于空间中，视点只移动相机。<b>空间连续性</b>成为产品承诺。</td>
+          <td class="dcost">P0 不支持入场 / 退场与逐对象动画。</td>
+        </tr>
+        <tr>
+          <td class="did">D3</td>
+          <td><div class="dname">视点捕获当前视图</div></td>
+          <td class="dbody">用户用<b>摆姿势</b>导演，不填写相机坐标；捕获比调参更接近直觉。</td>
+          <td class="dcost">必须提供可靠的取景辅助：默认视图、聚焦对象、重置视图。</td>
+        </tr>
+        <tr>
+          <td class="did">D4</td>
+          <td><div class="dname">演示可自由浏览，翻页回路径</div></td>
+          <td class="dbody">讲解时可临时放大细节；下一次翻页仍从当前位置飞向下一个视点。</td>
+          <td class="dcost">观众可能暂时离开叙事线，需要用「回到当前视点」收束。</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="section">
+    <div class="section-head">
+      <span class="sec-no">06</span>
+      <span class="sec-title">边界、假设与风险</span>
+      <span class="sec-line"></span>
+      <span class="sec-note">ASSUMPTIONS</span>
+    </div>
+    <div class="edge-grid">
+      <div class="edge-card">
+        <h3>环境边界 <span class="tag">ASSUMPTION</span></h3>
+        <ul>
+          <li><span class="m">01</span><span>桌面浏览器最近两个大版本；视口建议 <b>≥ 1280×720</b></span></li>
+          <li><span class="m">02</span><span>支持全屏 API；被拒绝时降级为全窗口演示</span></li>
+          <li><span class="m">03</span><span>P0 固定 <b>16:9</b> 取景安全框，编辑与演示所见一致</span></li>
+        </ul>
+      </div>
+      <div class="edge-card">
+        <h3>容量假设 <span class="tag">TBD</span></h3>
+        <ul>
+          <li><span class="m">01</span><span>单作品 <b>≤ 200 个对象</b>、<b>≤ 50 个视点</b></span></li>
+          <li><span class="m">02</span><span>单张图片 <b>≤ 20MB</b>，工程文件 <b>≤ 200MB</b></span></li>
+          <li><span class="m">03</span><span>自动保存 2 秒防抖；撤销至少 <b>50 步</b></span></li>
+        </ul>
+      </div>
+      <div class="edge-card">
+        <h3>主要风险与缓解</h3>
+        <ul>
+          <li><span class="m">01</span><span><b>迷路</b> → 默认视图、聚焦对象、演示「回到当前视点」</span></li>
+          <li><span class="m">02</span><span><b>大图卡顿</b> → 容量上限 + 加载失败占位与重试</span></li>
+          <li><span class="m">03</span><span><b>本地空间不足</b> → 保存失败提示 + 导出工程兜底</span></li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="review-strip">
+      <span class="rlabel">REVIEW FOCUS</span>
+      <ul>
+        <li><span>01</span>P0 边界是否足够克制，又没有切断闭环？</li>
+        <li><span>02</span>「视点捕获当前视图」是否符合你的讲解直觉？</li>
+        <li><span>03</span>固定 16:9 是否可接受，还是必须支持竖屏？</li>
+      </ul>
+    </div>
+  </section>
+
+  <footer class="foot">
+    <span>3d-slide · 阶段一产物 / <b>目标与范围 v1.0</b></span>
+    <span>2026-10-31 · 待评审</span>
+    <span>下一步 / 评审通过后进入完整 PRD 与原型</span>
+  </footer>
+
+</div>
+</body>
+</html>
