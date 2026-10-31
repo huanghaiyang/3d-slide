@@ -89,8 +89,26 @@ export async function deleteDeck(id: string): Promise<void> {
 
 /* ---------------------------- 多标签只读锁 ---------------------------- */
 
-export const TAB_ID =
-  typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : Math.random().toString(36).slice(2);
+function loadTabId(): string {
+  const key = '3d-slide:tab-id';
+  try {
+    const stored = sessionStorage.getItem(key);
+    if (stored) return stored;
+    const id =
+      typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID()
+        : Math.random().toString(36).slice(2);
+    sessionStorage.setItem(key, id);
+    return id;
+  } catch {
+    return typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : Math.random().toString(36).slice(2);
+  }
+}
+
+/** 同一标签页刷新后保持不变，不同标签页互不相同 */
+export const TAB_ID = loadTabId();
 
 const LOCK_PREFIX = '3d-slide:lock:';
 const LOCK_TTL = 20000;
