@@ -24,7 +24,15 @@ export type IconName =
   | 'alert'
   | 'more'
   | 'spark'
-  | 'check';
+  | 'check'
+  | 'video'
+  | 'audio'
+  | 'pause'
+  | 'volume'
+  | 'volumeOff'
+  | 'model'
+  | 'folder'
+  | 'restore';
 
 interface IconProps extends SVGProps<SVGSVGElement> {
   name: IconName;
@@ -103,6 +111,45 @@ const paths: Record<IconName, ReactNode> = {
   ),
   spark: <path d="M12 3v4m0 10v4M3 12h4m10 0h4M6 6l2.6 2.6M15.4 15.4 18 18M18 6l-2.6 2.6M8.6 15.4 6 18" />,
   check: <path d="m4 12 5 5L20 6" />,
+  video: (
+    <>
+      <rect x="3" y="5.5" width="13" height="13" rx="2" />
+      <path d="m16 10.5 4.5-2.6v8.2L16 13.5z" />
+    </>
+  ),
+  audio: (
+    <>
+      <path d="M4 10v4h3l4.5 3.5v-11L7 10z" />
+      <path d="M15 9a4.2 4.2 0 0 1 0 6M17.6 6.8a7.4 7.4 0 0 1 0 10.4" />
+    </>
+  ),
+  pause: <path d="M9 5v14M15 5v14" strokeWidth="2.4" />,
+  volume: (
+    <>
+      <path d="M4 10v4h3l4.5 3.5v-11L7 10z" />
+      <path d="M15 9.5a4 4 0 0 1 0 5" />
+    </>
+  ),
+  volumeOff: (
+    <>
+      <path d="M4 10v4h3l4.5 3.5v-11L7 10z" />
+      <path d="m15 9.5 4 5m0-5-4 5" />
+    </>
+  ),
+  model: (
+    <>
+      <path d="M12 3.2 20 7.6v8.8L12 20.8 4 16.4V7.6z" />
+      <path d="M4 7.6l8 4.4 8-4.4M12 12v8.8" />
+    </>
+  ),
+  folder: <path d="M3.5 6.5A1.5 1.5 0 0 1 5 5h4l2 2.5h8A1.5 1.5 0 0 1 20.5 9v8A1.5 1.5 0 0 1 19 18.5H5A1.5 1.5 0 0 1 3.5 17z" />,
+  restore: (
+    <>
+      <path d="M4 9a8.5 8.5 0 1 1 2.1 8.2" />
+      <path d="M4 4v5h5" />
+      <path d="M12 8.5v4l2.5 1.5" />
+    </>
+  ),
 };
 
 export function Icon({ name, size = 18, ...rest }: IconProps) {

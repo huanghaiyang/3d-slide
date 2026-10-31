@@ -1,11 +1,29 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
 import type { Deck } from '../types';
+import type { AssetFolder, AssetMeta } from './assets';
 import { normalizeDeck } from './validate';
+
+interface AssetDataRecord {
+  id: string;
+  src: string;
+}
 
 interface SlideDB extends DBSchema {
   decks: {
     key: string;
     value: unknown;
+  };
+  assets: {
+    key: string;
+    value: AssetMeta;
+  };
+  assetData: {
+    key: string;
+    value: AssetDataRecord;
+  };
+  folders: {
+    key: string;
+    value: AssetFolder;
   };
 }
 
@@ -13,10 +31,19 @@ let dbPromise: Promise<IDBPDatabase<SlideDB>> | null = null;
 
 function db(): Promise<IDBPDatabase<SlideDB>> {
   if (!dbPromise) {
-    dbPromise = openDB<SlideDB>('3d-slide', 1, {
+    dbPromise = openDB<SlideDB>('3d-slide', 2, {
       upgrade(database) {
         if (!database.objectStoreNames.contains('decks')) {
           database.createObjectStore('decks', { keyPath: 'id' });
+        }
+        if (!database.objectStoreNames.contains('assets')) {
+          database.createObjectStore('assets', { keyPath: 'id' });
+        }
+        if (!database.objectStoreNames.contains('assetData')) {
+          database.createObjectStore('assetData', { keyPath: 'id' });
+        }
+        if (!database.objectStoreNames.contains('folders')) {
+          database.createObjectStore('folders', { keyPath: 'id' });
         }
       },
     });
@@ -85,6 +112,107 @@ export async function putDeck(deck: Deck): Promise<void> {
 export async function deleteDeck(id: string): Promise<void> {
   const database = await db();
   await database.delete('decks', id);
+}
+
+/* ----------------------------- 资源库存储 ----------------------------- */
+
+export async function listAssetMetas(): Promise<AssetMeta[]> {
+  const database = await db();
+  const rows = await database.getAll('assets');
+  return rows.map((row) => ({
+    ...row,
+    thumb: row.thumb ?? '',
+    deletedAt: row.deletedAt ?? null,
+    folderId: row.folderId ?? null,
+    duration: row.duration ?? 0,
+    width: row.width ?? 0,
+    height: row.height ?? 0,
+  }));
+}
+
+export async function getAssetSource(id: string): Promise<string | null> {
+  const database = await db();
+  const row = await database.get('assetData', id);
+  return row?.src ?? null;
+}
+
+export async function putAssetMeta(meta: AssetMeta, src: string): Promise<void> {
+  const database = await db();
+  const tx = database.transaction(['assets', 'assetData'], 'readwrite');
+  await tx.objectStore('assets').put(meta);
+  await tx.objectStore('assetData').put({ id: meta.id, src });
+  await tx.done;
+}
+
+export async function updateAssetMeta(id: string, patch: Partial<AssetMeta>): Promise<void> {
+  const database = await db();
+  const existing = await database.get('assets', id);
+  if (!existing) return;
+  await database.put('assets', { ...existing, ...patch, id });
+}
+
+export async function trashAssets(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  const database = await db();
+  const tx = database.transaction('assets', 'readwrite');
+  const now = Date.now();
+  for (const id of ids) {
+    const row = await tx.store.get(id);
+    if (row) tx.store.put({ ...row, deletedAt: now, updatedAt: now });
+  }
+  await tx.done;
+}
+
+export async function restoreAssets(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  const database = await db();
+  const folderIds = new Set((await database.getAll('folders')).map((folder) => folder.id));
+  const tx = database.transaction('assets', 'readwrite');
+  for (const id of ids) {
+    const row = await tx.store.get(id);
+    if (!row) continue;
+    const folderId = row.folderId && folderIds.has(row.folderId) ? row.folderId : null;
+    tx.store.put({ ...row, deletedAt: null, folderId, updatedAt: Date.now() });
+  }
+  await tx.done;
+}
+
+export async function deleteAssetsPermanently(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  const database = await db();
+  const tx = database.transaction(['assets', 'assetData'], 'readwrite');
+  for (const id of ids) {
+    tx.objectStore('assets').delete(id);
+    tx.objectStore('assetData').delete(id);
+  }
+  await tx.done;
+}
+
+export async function emptyAssetTrash(): Promise<number> {
+  const database = await db();
+  const metas = await database.getAll('assets');
+  const ids = metas.filter((meta) => meta.deletedAt !== null).map((meta) => meta.id);
+  await deleteAssetsPermanently(ids);
+  return ids.length;
+}
+
+export async function listFolders(): Promise<AssetFolder[]> {
+  const database = await db();
+  const rows = await database.getAll('folders');
+  return rows.map((row) => ({ ...row, parentId: row.parentId ?? null }));
+}
+
+export async function putFolder(folder: AssetFolder): Promise<void> {
+  const database = await db();
+  await database.put('folders', folder);
+}
+
+export async function deleteFolderRecords(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  const database = await db();
+  const tx = database.transaction('folders', 'readwrite');
+  for (const id of ids) tx.store.delete(id);
+  await tx.done;
 }
 
 /* ---------------------------- 多标签只读锁 ---------------------------- */

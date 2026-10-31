@@ -1,14 +1,26 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import type { Deck, ImageObject, ShapeObject, SlideObject, TextObject } from '../types';
+import type {
+  AudioObject,
+  Deck,
+  ImageObject,
+  ModelObject,
+  ShapeObject,
+  SlideObject,
+  TextObject,
+  VideoObject,
+} from '../types';
 import { LIMITS } from '../lib/constants';
+import { formatDuration } from '../lib/media';
 import { useDeckStore } from '../store/deckStore';
-import { FONT_LABELS, OBJECT_LABELS, SHAPE_LABELS } from '../types';
+import { FONT_LABELS, MODEL_FORMAT_LABELS, OBJECT_LABELS, SHAPE_LABELS } from '../types';
 import { Icon } from './Icon';
 import { ColorField, NumberField, Segmented, Switch } from './ui';
 
 interface InspectorProps {
   readonly: boolean;
   onReplaceImage: (id: string) => void;
+  onReplaceMedia: (id: string) => void;
+  onReplaceModel: (id: string) => void;
   onUpdateFrameView: (id: string) => void;
 }
 
@@ -316,8 +328,21 @@ function ImageFields({ object, onReplaceImage }: { object: ImageObject; onReplac
           <button className="btn btn-light btn-sm" onClick={() => onReplaceImage(object.id)}>
             <Icon name="upload" size={14} /> 替换图片
           </button>
-          <button className="btn btn-ghost btn-sm" onClick={() => retryImage(object.id)}>
+          <button className="btn btn-light btn-sm" onClick={() => retryImage(object.id)}>
             <Icon name="reset" size={14} /> 重新加载
+          </button>
+        </div>
+        <div className="button-row">
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() =>
+              updateObject(object.id, {
+                width: object.naturalWidth,
+                height: object.naturalHeight,
+              })
+            }
+          >
+            <Icon name="focus" size={14} /> 还原原始尺寸
           </button>
         </div>
         <span className="field-hint">
@@ -368,22 +393,246 @@ function ImageFields({ object, onReplaceImage }: { object: ImageObject; onReplac
   );
 }
 
+function MediaFields({
+  object,
+  onReplaceMedia,
+}: {
+  object: VideoObject | AudioObject;
+  onReplaceMedia: (id: string) => void;
+}) {
+  const updateObject = useDeckStore((state) => state.updateObject);
+  const retryImage = useDeckStore((state) => state.retryImage);
+  const error = useDeckStore((state) => state.imageErrors[object.id]);
+  const key = (field: string) => `${object.id}:${field}`;
+  const canRestoreSize = object.type === 'video';
+
+  return (
+    <>
+      <Section title={object.type === 'video' ? '视频' : '音频'}>
+        <div className="media-meta">
+          <div>
+            <b>{formatDuration(object.duration)}</b>
+            <span>时长</span>
+          </div>
+          {object.type === 'video' ? (
+            <div>
+              <b>
+                {object.naturalWidth} × {object.naturalHeight}
+              </b>
+              <span>分辨率</span>
+            </div>
+          ) : (
+            <div>
+              <b>{formatBytesOf(object.src)}</b>
+              <span>素材大小</span>
+            </div>
+          )}
+        </div>
+        <div className="button-row">
+          <button className="btn btn-light btn-sm" onClick={() => onReplaceMedia(object.id)}>
+            <Icon name="upload" size={14} /> 替换{object.type === 'video' ? '视频' : '音频'}
+          </button>
+          <button className="btn btn-ghost btn-sm" onClick={() => retryImage(object.id)}>
+            <Icon name="reset" size={14} /> 重新加载
+          </button>
+        </div>
+        {canRestoreSize && (
+          <div className="button-row">
+            <button
+              className="btn btn-ghost btn-sm"
+              onClick={() =>
+                updateObject(object.id, {
+                  width: object.naturalWidth,
+                  height: object.naturalHeight,
+                })
+              }
+            >
+              <Icon name="focus" size={14} /> 还原原始尺寸
+            </button>
+          </div>
+        )}
+        <span className="field-hint">双击舞台上的媒体可打开播放器；演示时按对象设置自动播放。</span>
+      </Section>
+      {error && (
+        <div className="image-error-box">
+          <Icon name="alert" size={15} />
+          <div>
+            <b>{object.type === 'video' ? '视频无法播放' : '音频无法播放'}</b>
+            <p>{error}</p>
+            <div className="button-row">
+              <button className="btn btn-light btn-sm" onClick={() => retryImage(object.id)}>
+                重试
+              </button>
+              <button className="btn btn-ghost btn-sm" onClick={() => onReplaceMedia(object.id)}>
+                替换
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {object.type === 'video' && (
+        <Section title="适配">
+          <Segmented
+            value={object.fit}
+            ariaLabel="视频适配方式"
+            options={[
+              { value: 'contain', label: '完整显示' },
+              { value: 'cover', label: '填充裁切' },
+            ]}
+            onChange={(fit) => updateObject(object.id, { fit })}
+          />
+        </Section>
+      )}
+      <Section title="播放">
+        <div className="prop-row">
+          <span className="field-label">循环播放</span>
+          <Switch
+            checked={object.loop}
+            label="循环播放"
+            onChange={(loop) => updateObject(object.id, { loop })}
+          />
+        </div>
+        {object.type === 'video' && (
+          <div className="prop-row">
+            <span className="field-label">静音</span>
+            <Switch
+              checked={object.muted}
+              label="静音播放"
+              onChange={(muted) => updateObject(object.id, { muted })}
+            />
+          </div>
+        )}
+        <div className="prop-row">
+          <span className="field-label">演示时自动播放</span>
+          <Switch
+            checked={object.autoplay}
+            label="演示时自动播放"
+            onChange={(autoplay) => updateObject(object.id, { autoplay })}
+          />
+        </div>
+        <SliderRow
+          label="音量"
+          value={object.volume}
+          min={0}
+          max={100}
+          step={1}
+          unit="%"
+          onChange={(volume) => updateObject(object.id, { volume }, key('volume'))}
+        />
+      </Section>
+    </>
+  );
+}
+
+function formatBytesOf(src: string): string {
+  const size = src.length;
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function ModelFields({
+  object,
+  onReplaceModel,
+}: {
+  object: ModelObject;
+  onReplaceModel: (id: string) => void;
+}) {
+  const updateObject = useDeckStore((state) => state.updateObject);
+  const retryImage = useDeckStore((state) => state.retryImage);
+  const error = useDeckStore((state) => state.imageErrors[object.id]);
+  const key = (field: string) => `${object.id}:${field}`;
+  return (
+    <>
+      <Section title="3D 模型">
+        <div className="media-meta">
+          <div>
+            <b>{MODEL_FORMAT_LABELS[object.format]}</b>
+            <span>格式</span>
+          </div>
+          <div>
+            <b>{formatBytesOf(object.src)}</b>
+            <span>素材大小</span>
+          </div>
+        </div>
+        <div className="button-row">
+          <button className="btn btn-light btn-sm" onClick={() => onReplaceModel(object.id)}>
+            <Icon name="upload" size={14} /> 替换模型
+          </button>
+          <button className="btn btn-ghost btn-sm" onClick={() => retryImage(object.id)}>
+            <Icon name="reset" size={14} /> 重新加载
+          </button>
+        </div>
+        <div className="button-row">
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => updateObject(object.id, { width: 760, height: 760 })}
+          >
+            <Icon name="focus" size={14} /> 重置包围盒
+          </button>
+        </div>
+        <span className="field-hint">
+          模型会按包围盒等比缩放并居中显示。修改 W / H 可整体放大或缩小。
+        </span>
+      </Section>
+      {error && (
+        <div className="image-error-box">
+          <Icon name="alert" size={15} />
+          <div>
+            <b>模型无法加载</b>
+            <p>{error}</p>
+            <div className="button-row">
+              <button className="btn btn-light btn-sm" onClick={() => retryImage(object.id)}>
+                重试
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      <Section title="展示">
+        <div className="prop-row">
+          <span className="field-label">自动旋转</span>
+          <Switch
+            checked={object.autoRotate}
+            label="模型自动旋转"
+            onChange={(autoRotate) => updateObject(object.id, { autoRotate })}
+          />
+        </div>
+        {object.autoRotate && (
+          <SliderRow
+            label="旋转速度"
+            value={object.rotateSpeed}
+            min={0}
+            max={360}
+            step={5}
+            unit="°/s"
+            onChange={(rotateSpeed) => updateObject(object.id, { rotateSpeed }, key('rotateSpeed'))}
+          />
+        )}
+        <span className="field-hint">OBJ / STL / PLY 等单文件模型可直接载入；带外部贴图的多文件模型请先打包为 GLB。</span>
+      </Section>
+    </>
+  );
+}
+
 function ShapeFields({ object }: { object: ShapeObject }) {
   const updateObject = useDeckStore((state) => state.updateObject);
   const key = (field: string) => `${object.id}:${field}`;
   const hasStroke = object.stroke !== null;
   return (
     <Section title="形状">
-      <Segmented
-        value={object.shape}
-        ariaLabel="形状类型"
-        options={[
-          { value: 'rect', label: '矩形' },
-          { value: 'ellipse', label: '椭圆' },
-          { value: 'line', label: '直线' },
-        ]}
-        onChange={(shape) => updateObject(object.id, { shape })}
-      />
+      <div className="shape-grid" role="group" aria-label="形状类型">
+        {(Object.keys(SHAPE_LABELS) as ShapeObject['shape'][]).map((kind) => (
+          <button
+            key={kind}
+            type="button"
+            className={`shape-chip${object.shape === kind ? ' is-active' : ''}`}
+            onClick={() => updateObject(object.id, { shape: kind })}
+          >
+            {SHAPE_LABELS[kind]}
+          </button>
+        ))}
+      </div>
       {object.shape !== 'line' && (
         <ColorField
           label="填充"
@@ -438,12 +687,28 @@ function ObjectPanel({
   object,
   readonly,
   onReplaceImage,
+  onReplaceMedia,
+  onReplaceModel,
 }: {
   deck: Deck;
   object: SlideObject;
   readonly: boolean;
   onReplaceImage: (id: string) => void;
+  onReplaceMedia: (id: string) => void;
+  onReplaceModel: (id: string) => void;
 }) {
+  const subtitle =
+    object.type === 'text'
+      ? '文本对象'
+      : object.type === 'image'
+        ? '图片对象'
+        : object.type === 'shape'
+          ? SHAPE_LABELS[object.shape]
+          : object.type === 'video'
+            ? '视频对象'
+            : object.type === 'audio'
+              ? '音频对象'
+              : `${MODEL_FORMAT_LABELS[object.format]} 模型`;
   const updateObject = useDeckStore((state) => state.updateObject);
   const removeObject = useDeckStore((state) => state.removeObject);
   const moveObjectLayer = useDeckStore((state) => state.moveObjectLayer);
@@ -457,9 +722,7 @@ function ObjectPanel({
       <div className="inspector-head">
         <div>
           <div className="pane-label">{OBJECT_LABELS[object.type]}属性</div>
-          <div className="pane-sub">
-            {object.type === 'text' ? '文本对象' : object.type === 'image' ? '图片对象' : SHAPE_LABELS[object.shape]}
-          </div>
+          <div className="pane-sub">{subtitle}</div>
         </div>
         <span className="inspector-badge">{object.type.toUpperCase()}</span>
       </div>
@@ -476,6 +739,10 @@ function ObjectPanel({
 
         {object.type === 'text' && <TextFields object={object} />}
         {object.type === 'image' && <ImageFields object={object} onReplaceImage={onReplaceImage} />}
+        {(object.type === 'video' || object.type === 'audio') && (
+          <MediaFields object={object} onReplaceMedia={onReplaceMedia} />
+        )}
+        {object.type === 'model' && <ModelFields object={object} onReplaceModel={onReplaceModel} />}
         {object.type === 'shape' && <ShapeFields object={object} />}
 
         <Section title="变换">
@@ -670,17 +937,128 @@ function FramePanel({ deck, onUpdateFrameView }: { deck: Deck; onUpdateFrameView
   );
 }
 
-export function Inspector({ readonly, onReplaceImage, onUpdateFrameView }: InspectorProps) {
+function MultiPanel({ deck, ids, readonly }: { deck: Deck; ids: string[]; readonly: boolean }) {
+  const updateObject = useDeckStore((state) => state.updateObject);
+  const removeObjects = useDeckStore((state) => state.removeObjects);
+  const selectObjects = useDeckStore((state) => state.selectObjects);
+  const objects = deck.objects.filter((object) => ids.includes(object.id));
+  if (objects.length === 0) return null;
+  const bounds = {
+    minX: Math.min(...objects.map((object) => object.x - object.width / 2)),
+    maxX: Math.max(...objects.map((object) => object.x + object.width / 2)),
+    minY: Math.min(...objects.map((object) => object.y - object.height / 2)),
+    maxY: Math.max(...objects.map((object) => object.y + object.height / 2)),
+  };
+  const opacity = Math.round(objects[0].opacity);
+
+  const align = (kind: 'left' | 'centerX' | 'right' | 'top' | 'centerY' | 'bottom') => {
+    for (const object of objects) {
+      let x = object.x;
+      let y = object.y;
+      if (kind === 'left') x = bounds.minX + object.width / 2;
+      if (kind === 'centerX') x = (bounds.minX + bounds.maxX) / 2;
+      if (kind === 'right') x = bounds.maxX - object.width / 2;
+      if (kind === 'top') y = bounds.minY + object.height / 2;
+      if (kind === 'centerY') y = (bounds.minY + bounds.maxY) / 2;
+      if (kind === 'bottom') y = bounds.maxY - object.height / 2;
+      if (x !== object.x || y !== object.y) updateObject(object.id, { x, y }, `multi-align:${kind}`);
+    }
+  };
+
+  return (
+    <div className="inspector-body">
+      <div className="inspector-head">
+        <div>
+          <div className="pane-label">多选属性</div>
+          <div className="pane-sub">已选中 {objects.length} 个对象</div>
+        </div>
+        <span className="inspector-badge">MULTI</span>
+      </div>
+      <fieldset className="inspector-fieldset" disabled={readonly}>
+        <Section title="选中内容">
+          <div className="multi-list">
+            {objects.map((object, index) => (
+              <button
+                key={object.id}
+                className={`multi-item ${index === 0 ? 'is-primary' : ''}`}
+                onClick={() => selectObjects([object.id, ...ids.filter((id) => id !== object.id)])}
+                title="设为主选中对象"
+              >
+                <Icon name={object.type} size={14} />
+                <span>{object.name}</span>
+                <small>{OBJECT_LABELS[object.type]}</small>
+              </button>
+            ))}
+          </div>
+          <span className="field-hint">点在舞台上拖拽可整体移动；角点只显示主选中对象。</span>
+        </Section>
+        <Section title="对齐">
+          <div className="align-grid">
+            <button className="btn btn-light btn-sm" onClick={() => align('left')}>左对齐</button>
+            <button className="btn btn-light btn-sm" onClick={() => align('centerX')}>水平居中</button>
+            <button className="btn btn-light btn-sm" onClick={() => align('right')}>右对齐</button>
+            <button className="btn btn-light btn-sm" onClick={() => align('top')}>顶对齐</button>
+            <button className="btn btn-light btn-sm" onClick={() => align('centerY')}>垂直居中</button>
+            <button className="btn btn-light btn-sm" onClick={() => align('bottom')}>底对齐</button>
+          </div>
+        </Section>
+        <Section title="统一不透明度">
+          <SliderRow
+            label="不透明度"
+            value={opacity}
+            min={0}
+            max={100}
+            step={1}
+            unit="%"
+            onChange={(value) => {
+              for (const object of objects) {
+                if (Math.round(object.opacity) !== value) updateObject(object.id, { opacity: value }, 'multi-opacity');
+              }
+            }}
+          />
+        </Section>
+        <Section title="批量操作">
+          <button className="btn btn-danger btn-sm btn-block" onClick={() => removeObjects(objects.map((object) => object.id))}>
+            <Icon name="trash" size={14} /> 删除 {objects.length} 个对象
+          </button>
+        </Section>
+      </fieldset>
+    </div>
+  );
+}
+
+export function Inspector({
+  readonly,
+  onReplaceImage,
+  onReplaceMedia,
+  onReplaceModel,
+  onUpdateFrameView,
+}: InspectorProps) {
   const deck = useDeckStore((state) => state.deck);
   const selectedObjectId = useDeckStore((state) => state.selectedObjectId);
+  const selectedIds = useDeckStore((state) => state.selectedIds);
   const selectedFrameId = useDeckStore((state) => state.selectedFrameId);
   if (!deck) return null;
   const object = deck.objects.find((item) => item.id === selectedObjectId);
 
+  if (selectedIds.length > 1) {
+    return (
+      <aside className="rightbar">
+        <MultiPanel deck={deck} ids={selectedIds} readonly={readonly} />
+      </aside>
+    );
+  }
   if (object) {
     return (
       <aside className="rightbar">
-        <ObjectPanel deck={deck} object={object} readonly={readonly} onReplaceImage={onReplaceImage} />
+        <ObjectPanel
+          deck={deck}
+          object={object}
+          readonly={readonly}
+          onReplaceImage={onReplaceImage}
+          onReplaceMedia={onReplaceMedia}
+          onReplaceModel={onReplaceModel}
+        />
       </aside>
     );
   }

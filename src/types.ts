@@ -12,11 +12,13 @@ export interface ViewState {
   pitch: number;
 }
 
-export type ObjectType = 'text' | 'image' | 'shape';
-export type ShapeKind = 'rect' | 'ellipse' | 'line';
+export type ObjectType = 'text' | 'image' | 'shape' | 'video' | 'audio' | 'model';
+export type ShapeKind = 'rect' | 'roundedRect' | 'ellipse' | 'triangle' | 'diamond' | 'star' | 'arrow' | 'line';
 export type FontPreset = 'sans' | 'serif' | 'round' | 'mono';
 export type TextAlign = 'left' | 'center' | 'right';
 export type ImageFit = 'contain' | 'cover';
+export type MediaKind = 'video' | 'audio';
+export type ModelFormat = 'glb' | 'gltf' | 'obj' | 'fbx' | 'stl' | 'ply' | 'dae' | '3mf' | 'usdz';
 
 interface ObjectBase {
   id: string;
@@ -60,7 +62,44 @@ export interface ShapeObject extends ObjectBase {
   strokeWidth: number;
 }
 
-export type SlideObject = TextObject | ImageObject | ShapeObject;
+export interface VideoObject extends ObjectBase {
+  type: 'video';
+  src: string;
+  fit: ImageFit;
+  naturalWidth: number;
+  naturalHeight: number;
+  /** 秒 */
+  duration: number;
+  loop: boolean;
+  muted: boolean;
+  /** 0–100 */
+  volume: number;
+  autoplay: boolean;
+}
+
+export interface AudioObject extends ObjectBase {
+  type: 'audio';
+  src: string;
+  duration: number;
+  loop: boolean;
+  /** 0–100 */
+  volume: number;
+  autoplay: boolean;
+}
+
+export type MediaObject = VideoObject | AudioObject;
+
+export interface ModelObject extends ObjectBase {
+  type: 'model';
+  src: string;
+  format: ModelFormat;
+  /** 演示与编辑时绕竖轴自动旋转 */
+  autoRotate: boolean;
+  /** 自转速度，度/秒 */
+  rotateSpeed: number;
+}
+
+export type SlideObject = TextObject | ImageObject | ShapeObject | VideoObject | AudioObject | ModelObject;
 
 export interface Frame {
   id: string;
@@ -115,11 +154,31 @@ export const OBJECT_LABELS: Record<ObjectType, string> = {
   text: '文本',
   image: '图片',
   shape: '形状',
+  video: '视频',
+  audio: '音频',
+  model: '3D 模型',
+};
+
+export const MODEL_FORMAT_LABELS: Record<ModelFormat, string> = {
+  glb: 'GLB',
+  gltf: 'glTF',
+  obj: 'OBJ',
+  fbx: 'FBX',
+  stl: 'STL',
+  ply: 'PLY',
+  dae: 'DAE',
+  '3mf': '3MF',
+  usdz: 'USDZ',
 };
 
 export const SHAPE_LABELS: Record<ShapeKind, string> = {
   rect: '矩形',
+  roundedRect: '圆角矩形',
   ellipse: '椭圆',
+  triangle: '三角形',
+  diamond: '菱形',
+  star: '星形',
+  arrow: '箭头',
   line: '直线',
 };
 

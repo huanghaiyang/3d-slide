@@ -1,10 +1,14 @@
 import type {
+  AudioObject,
   Deck,
   ImageObject,
+  ModelFormat,
+  ModelObject,
   ShapeKind,
   ShapeObject,
   SlideObject,
   TextObject,
+  VideoObject,
   ViewState,
 } from '../types';
 import {
@@ -93,6 +97,110 @@ export function createImageObject(
 ): ImageObject {
   const center = viewCenterAtZ(view, z);
   return defaultImageObject(id, name, src, naturalWidth, naturalHeight, center.x, center.y, z);
+}
+
+function fitMediaSize(naturalWidth: number, naturalHeight: number, maxDim: number): { width: number; height: number } {
+  const ratio = naturalWidth / naturalHeight || 16 / 9;
+  let width = maxDim;
+  let height = width / ratio;
+  if (height > maxDim) {
+    height = maxDim;
+    width = height * ratio;
+  }
+  return { width: Math.round(width), height: Math.round(height) };
+}
+
+export function createVideoObject(
+  id: string,
+  name: string,
+  src: string,
+  naturalWidth: number,
+  naturalHeight: number,
+  duration: number,
+  view: ViewState,
+  z: number,
+): VideoObject {
+  const center = viewCenterAtZ(view, z);
+  const size = fitMediaSize(naturalWidth || 1280, naturalHeight || 720, 960);
+  return {
+    id,
+    type: 'video',
+    name,
+    x: center.x,
+    y: center.y,
+    z,
+    width: size.width,
+    height: size.height,
+    rotation: 0,
+    opacity: 100,
+    visible: true,
+    src,
+    fit: 'contain',
+    naturalWidth: Math.max(1, Math.round(naturalWidth || 1280)),
+    naturalHeight: Math.max(1, Math.round(naturalHeight || 720)),
+    duration,
+    loop: true,
+    muted: false,
+    volume: 80,
+    autoplay: false,
+  };
+}
+
+export function createAudioObject(
+  id: string,
+  name: string,
+  src: string,
+  duration: number,
+  view: ViewState,
+  z: number,
+): AudioObject {
+  const center = viewCenterAtZ(view, z);
+  return {
+    id,
+    type: 'audio',
+    name,
+    x: center.x,
+    y: center.y,
+    z,
+    width: 560,
+    height: 168,
+    rotation: 0,
+    opacity: 100,
+    visible: true,
+    src,
+    duration,
+    loop: true,
+    volume: 80,
+    autoplay: false,
+  };
+}
+
+export function createModelObject(
+  id: string,
+  name: string,
+  src: string,
+  format: ModelFormat,
+  view: ViewState,
+  z: number,
+): ModelObject {
+  const center = viewCenterAtZ(view, z);
+  return {
+    id,
+    type: 'model',
+    name,
+    x: center.x,
+    y: center.y,
+    z,
+    width: 760,
+    height: 760,
+    rotation: 0,
+    opacity: 100,
+    visible: true,
+    src,
+    format,
+    autoRotate: false,
+    rotateSpeed: 45,
+  };
 }
 
 export function createShapeObject(

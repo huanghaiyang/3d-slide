@@ -1,44 +1,58 @@
-import { useState } from 'react';
-import type { SlideObject } from '../types';
+import { useRef, useState } from 'react';
+import type { ObjectType, SlideObject } from '../types';
 import { LIMITS } from '../lib/constants';
 import { OBJECT_LABELS } from '../types';
-import { Icon } from './Icon';
+import { Icon, type IconName } from './Icon';
 
 interface ObjectListProps {
   objects: SlideObject[];
   selectedId: string | null;
+  selectedIds: string[];
   readonly: boolean;
   collapsed: boolean;
   onToggleCollapsed: () => void;
-  onSelect: (id: string) => void;
+  onSelect: (id: string, additive: boolean) => void;
+  onRangeSelect: (ids: string[]) => void;
   onToggleVisible: (id: string, visible: boolean) => void;
   onReorder: (sourceId: string, targetId: string) => void;
   onAddText: () => void;
   onAddImage: () => void;
+  onAddVideo: () => void;
+  onAddAudio: () => void;
+  onAddModel: () => void;
   onAddShape: () => void;
 }
 
-const typeIcon = {
+const typeIcon: Record<ObjectType, IconName> = {
   text: 'text',
   image: 'image',
   shape: 'shape',
-} as const;
+  video: 'video',
+  audio: 'audio',
+  model: 'model',
+};
 
 export function ObjectList({
   objects,
   selectedId,
+  selectedIds,
   readonly,
   collapsed,
   onToggleCollapsed,
   onSelect,
+  onRangeSelect,
   onToggleVisible,
   onReorder,
   onAddText,
   onAddImage,
+  onAddVideo,
+  onAddAudio,
+  onAddModel,
   onAddShape,
 }: ObjectListProps) {
   const [dragId, setDragId] = useState<string | null>(null);
   const [overId, setOverId] = useState<string | null>(null);
+  const anchorId = useRef<string | null>(null);
   const sorted = [...objects].sort((a, b) => b.z - a.z);
   const atLimit = objects.length >= LIMITS.objects;
 
@@ -87,17 +101,31 @@ export function ObjectList({
       ) : (
         <ul className="obj-list">
           {sorted.map((object, index) => {
-            const selected = object.id === selectedId;
+            const selected = selectedIds.includes(object.id) || object.id === selectedId;
             const dragging = object.id === dragId;
+            const primary = object.id === selectedId;
             return (
               <li key={object.id}>
                 {overId === object.id && dragId && dragId !== object.id && <div className="drop-line" />}
                 <button
-                  className={`obj-item ${selected ? 'is-selected' : ''} ${dragging ? 'is-dragging' : ''} ${
-                    !object.visible ? 'is-hidden' : ''
-                  }`}
+                  className={`obj-item ${selected ? 'is-selected' : ''} ${primary ? 'is-primary' : ''} ${
+                    dragging ? 'is-dragging' : ''
+                  } ${!object.visible ? 'is-hidden' : ''}`}
                   draggable={!readonly}
-                  onClick={() => onSelect(object.id)}
+                  onClick={(event) => {
+                    if (event.shiftKey && anchorId.current) {
+                      const from = sorted.findIndex((item) => item.id === anchorId.current);
+                      if (from >= 0) {
+                        const a = Math.min(from, index);
+                        const b = Math.max(from, index);
+                        onRangeSelect(sorted.slice(a, b + 1).map((item) => item.id));
+                        return;
+                      }
+                    }
+                    const additive = event.ctrlKey || event.metaKey;
+                    onSelect(object.id, additive);
+                    anchorId.current = object.id;
+                  }}
                   onDragStart={(event) => {
                     setDragId(object.id);
                     event.dataTransfer.effectAllowed = 'move';
@@ -180,6 +208,30 @@ export function ObjectList({
             title={atLimit ? '已达到单作品对象上限' : '添加图片'}
           >
             <Icon name="image" size={14} /> 图片
+          </button>
+          <button
+            className="btn btn-light btn-sm"
+            onClick={onAddVideo}
+            disabled={atLimit}
+            title={atLimit ? '已达到单作品对象上限' : '添加视频'}
+          >
+            <Icon name="video" size={14} /> 视频
+          </button>
+          <button
+            className="btn btn-light btn-sm"
+            onClick={onAddAudio}
+            disabled={atLimit}
+            title={atLimit ? '已达到单作品对象上限' : '添加音频'}
+          >
+            <Icon name="audio" size={14} /> 音频
+          </button>
+          <button
+            className="btn btn-light btn-sm"
+            onClick={onAddModel}
+            disabled={atLimit}
+            title={atLimit ? '已达到单作品对象上限' : '添加 3D 模型'}
+          >
+            <Icon name="model" size={14} /> 模型
           </button>
           <button
             className="btn btn-light btn-sm"

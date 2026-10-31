@@ -4,6 +4,8 @@ import type {
   Deck,
   Frame,
   ImageObject,
+  MediaKind,
+  ModelFormat,
   SaveStatus,
   ShapeKind,
   SlideObject,
@@ -14,9 +16,12 @@ import { LIMITS, DEFAULT_VIEW } from '../lib/constants';
 import {
   autoTextHeight,
   clampNumber,
+  createAudioObject,
   createImageObject,
+  createModelObject,
   createShapeObject,
   createTextObject,
+  createVideoObject,
   nameForObject,
   nextDepth,
   nextFrameName,
@@ -30,6 +35,7 @@ interface DeckStore {
   deck: Deck | null;
   view: ViewState;
   selectedObjectId: string | null;
+  selectedIds: string[];
   selectedFrameId: string | null;
   currentFrameId: string | null;
   readonly: boolean;
@@ -53,6 +59,9 @@ interface DeckStore {
   requestFocus: (objectId: string) => void;
 
   selectObject: (id: string | null) => void;
+  selectObjects: (ids: string[]) => void;
+  toggleObjectSelection: (id: string) => void;
+  removeObjects: (ids: string[]) => void;
   selectFrame: (id: string | null, fly?: boolean) => void;
   setCurrentFrame: (id: string | null) => void;
 
@@ -62,6 +71,13 @@ interface DeckStore {
   addText: () => void;
   addShape: (shape: ShapeKind) => void;
   addImage: (src: string, naturalWidth: number, naturalHeight: number, point?: { x: number; y: number }) => string | null;
+  addMedia: (
+    kind: MediaKind,
+    src: string,
+    meta: { width: number; height: number; duration: number },
+    point?: { x: number; y: number },
+  ) => string | null;
+  addModel: (src: string, format: ModelFormat, point?: { x: number; y: number }) => string | null;
   updateObject: (id: string, patch: ObjectPatch, historyKey?: string) => void;
   removeObject: (id: string) => void;
   removeObjectSilent: (id: string) => void;
@@ -115,6 +131,11 @@ function historyAllowed(key?: string): boolean {
 function validId<T extends { id: string }>(list: T[], id: string | null): string | null {
   if (!id) return null;
   return list.some((item) => item.id === id) ? id : null;
+}
+
+function selectedObjectFallback(deck: Deck, id: string | null): string[] {
+  const valid = validId(deck.objects, id);
+  return valid ? [valid] : [];
 }
 
 function clearTimer() {
@@ -239,9 +260,11 @@ export const useDeckStore = create<DeckStore>((set, get) => {
   function replaceDeckFromHistory(deck: Deck) {
     const state = get();
     const restored: Deck = { ...deck, lastView: state.view, updatedAt: Date.now() };
+    const selectedIds = state.selectedIds.filter((id) => validId(restored.objects, id));
     set({
       deck: restored,
       selectedObjectId: validId(restored.objects, state.selectedObjectId),
+      selectedIds: selectedIds.length > 0 ? selectedIds : selectedObjectFallback(restored, state.selectedObjectId),
       selectedFrameId: validId(restored.frames, state.selectedFrameId),
       currentFrameId: validId(restored.frames, state.currentFrameId),
     });
@@ -253,6 +276,7 @@ export const useDeckStore = create<DeckStore>((set, get) => {
     deck: null,
     view: { ...DEFAULT_VIEW, target: { ...DEFAULT_VIEW.target } },
     selectedObjectId: null,
+    selectedIds: [],
     selectedFrameId: null,
     currentFrameId: null,
     readonly: false,
@@ -275,6 +299,7 @@ export const useDeckStore = create<DeckStore>((set, get) => {
         loadError: null,
         deck: null,
         selectedObjectId: null,
+        selectedIds: [],
         selectedFrameId: null,
         currentFrameId: null,
         past: [],
@@ -316,6 +341,7 @@ export const useDeckStore = create<DeckStore>((set, get) => {
         deck: null,
         view: { ...DEFAULT_VIEW, target: { ...DEFAULT_VIEW.target } },
         selectedObjectId: null,
+        selectedIds: [],
         selectedFrameId: null,
         currentFrameId: null,
         readonly: false,
@@ -340,6 +366,7 @@ export const useDeckStore = create<DeckStore>((set, get) => {
         past: [],
         future: [],
         selectedObjectId: null,
+        selectedIds: [],
         selectedFrameId: null,
         currentFrameId: null,
       });
@@ -384,10 +411,53 @@ export const useDeckStore = create<DeckStore>((set, get) => {
 
     selectObject: (id) => {
       if (!id) {
-        set({ selectedObjectId: null });
+        set({ selectedObjectId: null, selectedIds: [] });
         return;
       }
-      set({ selectedObjectId: id, selectedFrameId: null });
+      set({ selectedObjectId: id, selectedIds: [id], selectedFrameId: null });
+    },
+
+    selectObjects: (ids) => {
+      const unique = [...new Set(ids)];
+      if (unique.length === 0) {
+        set({ selectedObjectId: null, selectedIds: [], selectedFrameId: null });
+        return;
+      }
+      set({ selectedObjectId: unique[0], selectedIds: unique, selectedFrameId: null });
+    },
+
+    toggleObjectSelection: (id) => {
+      const state = get();
+      if (!state.deck) return;
+      const exists = state.selectedIds.includes(id);
+      if (exists) {
+        const next = state.selectedIds.filter((item) => item !== id);
+        set({
+          selectedIds: next,
+          selectedObjectId: next[0] ?? null,
+          selectedFrameId: null,
+        });
+      } else {
+        const next = [...state.selectedIds, id];
+        set({ selectedIds: next, selectedObjectId: next[0], selectedFrameId: null });
+      }
+    },
+
+    removeObjects: (ids) => {
+      const state = get();
+      if (!state.deck || ids.length === 0) return;
+      const selected = state.selectedIds.filter((id) => !ids.includes(id));
+      const applied = applyDeck((deck) => ({
+        ...deck,
+        objects: deck.objects.filter((object) => !ids.includes(object.id)),
+      }));
+      if (applied) {
+        set({
+          selectedIds: selected,
+          selectedObjectId: selected[0] ?? null,
+          selectedFrameId: state.selectedFrameId,
+        });
+      }
     },
 
     selectFrame: (id, fly = true) => {
@@ -399,6 +469,7 @@ export const useDeckStore = create<DeckStore>((set, get) => {
       set({
         selectedFrameId: id,
         selectedObjectId: null,
+        selectedIds: [],
         currentFrameId: id,
       });
       if (fly && frame) {
@@ -437,7 +508,7 @@ export const useDeckStore = create<DeckStore>((set, get) => {
         objects: [...deck.objects, object],
         counters: { ...deck.counters, text: count },
       }));
-      if (applied) set({ selectedObjectId: id, selectedFrameId: null });
+      if (applied) set({ selectedObjectId: id, selectedIds: [id], selectedFrameId: null });
     },
 
     addShape: (shape) => {
@@ -455,7 +526,7 @@ export const useDeckStore = create<DeckStore>((set, get) => {
         objects: [...deck.objects, object],
         counters: { ...deck.counters, [shape]: count },
       }));
-      if (applied) set({ selectedObjectId: id, selectedFrameId: null });
+      if (applied) set({ selectedObjectId: id, selectedIds: [id], selectedFrameId: null });
     },
 
     addImage: (src, naturalWidth, naturalHeight, point) => {
@@ -478,7 +549,57 @@ export const useDeckStore = create<DeckStore>((set, get) => {
         counters: { ...deck.counters, image: count },
       }));
       if (!applied) return null;
-      set({ selectedObjectId: id, selectedFrameId: null });
+      set({ selectedObjectId: id, selectedIds: [id], selectedFrameId: null });
+      return id;
+    },
+
+    addMedia: (kind, src, meta, point) => {
+      const state = get();
+      if (!state.deck) return null;
+      if (state.deck.objects.length >= LIMITS.objects) return null;
+      const deckAtStart = state.deck;
+      const z = nextDepth(deckAtStart.objects);
+      const label = kind === 'video' ? '视频' : '音频';
+      const name = nameForObject(deckAtStart, kind, label);
+      const id = crypto.randomUUID();
+      const object =
+        kind === 'video'
+          ? createVideoObject(id, name, src, meta.width, meta.height, meta.duration, state.view, z)
+          : createAudioObject(id, name, src, meta.duration, state.view, z);
+      if (point) {
+        object.x = clampNumber(point.x, -LIMITS.coord, LIMITS.coord, object.x);
+        object.y = clampNumber(point.y, -LIMITS.coord, LIMITS.coord, object.y);
+      }
+      const applied = applyDeck((deck) => ({
+        ...deck,
+        objects: [...deck.objects, object],
+        counters: { ...deck.counters, [kind]: (deck.counters[kind] ?? 0) + 1 },
+      }));
+      if (!applied) return null;
+      set({ selectedObjectId: id, selectedIds: [id], selectedFrameId: null });
+      return id;
+    },
+
+    addModel: (src, format, point) => {
+      const state = get();
+      if (!state.deck) return null;
+      if (state.deck.objects.length >= LIMITS.objects) return null;
+      const deckAtStart = state.deck;
+      const z = nextDepth(deckAtStart.objects);
+      const name = nameForObject(deckAtStart, 'model', '模型');
+      const id = crypto.randomUUID();
+      const object = createModelObject(id, name, src, format, state.view, z);
+      if (point) {
+        object.x = clampNumber(point.x, -LIMITS.coord, LIMITS.coord, object.x);
+        object.y = clampNumber(point.y, -LIMITS.coord, LIMITS.coord, object.y);
+      }
+      const applied = applyDeck((deck) => ({
+        ...deck,
+        objects: [...deck.objects, object],
+        counters: { ...deck.counters, model: (deck.counters.model ?? 0) + 1 },
+      }));
+      if (!applied) return null;
+      set({ selectedObjectId: id, selectedIds: [id], selectedFrameId: null });
       return id;
     },
 
@@ -514,6 +635,7 @@ export const useDeckStore = create<DeckStore>((set, get) => {
       if (applied) {
         set({
           selectedObjectId: null,
+          selectedIds: [],
           selectedFrameId: frameStillSelected,
         });
       }
@@ -526,7 +648,10 @@ export const useDeckStore = create<DeckStore>((set, get) => {
         ...deck,
         objects: deck.objects.filter((object) => object.id !== id),
       }));
-      if (state.selectedObjectId === id) set({ selectedObjectId: null });
+      if (state.selectedObjectId === id) {
+        const selected = state.selectedIds.filter((item) => item !== id);
+        set({ selectedObjectId: selected[0] ?? null, selectedIds: selected });
+      }
     },
 
     swapDepth: (sourceId, targetId) => {
@@ -592,6 +717,7 @@ export const useDeckStore = create<DeckStore>((set, get) => {
           selectedFrameId: frameId,
           currentFrameId: frameId,
           selectedObjectId: null,
+          selectedIds: [],
         });
       }
     },

@@ -16,6 +16,7 @@ interface TopBarProps {
   onRedo: () => void;
   onPresent: () => void;
   onExport: () => void;
+  onOpenAssets: () => void;
   onShowSaveError: () => void;
 }
 
@@ -31,6 +32,7 @@ export function TopBar({
   onRedo,
   onPresent,
   onExport,
+  onOpenAssets,
   onShowSaveError,
 }: TopBarProps) {
   const [draft, setDraft] = useState(deck.title);
@@ -114,6 +116,9 @@ export function TopBar({
       <div className="topbar-right">
         {!readonly && (
           <>
+            <button className="icon-btn" onClick={onOpenAssets} aria-label="资源库" title="从资源库插入">
+              <Icon name="folder" size={17} />
+            </button>
             <button className="icon-btn" onClick={onUndo} disabled={!canUndo} aria-label="撤销" title="撤销 Ctrl+Z">
               <Icon name="undo" size={18} />
             </button>

@@ -1,10 +1,26 @@
 import * as THREE from 'three';
-import type { Deck, ImageObject, ShapeObject, SlideObject, TextObject, ViewState } from '../types';
+import type {
+  AudioObject,
+  Deck,
+  ImageObject,
+  MediaKind,
+  ModelFormat,
+  ModelObject,
+  ShapeKind,
+  ShapeObject,
+  SlideObject,
+  TextObject,
+  VideoObject,
+  ViewState,
+} from '../types';
 import { ACCENT, ASPECT, FOV } from '../lib/constants';
 import { cameraPosition, clampPitch, lerpView } from '../lib/camera';
+import { disposeObject3D, loadModelGroup } from '../lib/model3d';
 import { fontCss, layoutText } from '../lib/text';
 
 export type StageMode = 'edit' | 'view' | 'present';
+
+export type HandleCorner = 'nw' | 'ne' | 'se' | 'sw';
 
 interface SceneCallbacks {
   onImageError: (id: string, message: string) => void;
@@ -14,6 +30,34 @@ interface ImageState {
   src: string;
   status: 'pending' | 'loaded' | 'error';
   texture?: THREE.Texture;
+}
+
+interface MediaRuntime {
+  kind: MediaKind;
+  src: string;
+  element: HTMLVideoElement | HTMLAudioElement | null;
+  texture: THREE.VideoTexture | null;
+  error: boolean;
+  ready: boolean;
+}
+
+interface ModelRuntime {
+  src: string;
+  format: ModelFormat;
+  status: 'loading' | 'ready' | 'error';
+  group: THREE.Group | null;
+  error?: string;
+}
+
+export interface MediaPlaybackState {
+  kind: MediaKind;
+  playing: boolean;
+  time: number;
+  duration: number;
+  volume: number;
+  muted: boolean;
+  loop: boolean;
+  error: boolean;
 }
 
 interface ObjectNode {
@@ -27,6 +71,8 @@ interface ObjectNode {
   outlineWidth: number;
   outlineHeight: number;
   imageState: ImageState | null;
+  media: MediaRuntime | null;
+  model: ModelRuntime | null;
   data: SlideObject;
   objectId: string;
   pickRoot: THREE.Group | null;
@@ -47,7 +93,7 @@ export class SceneManager {
   private callbacks: SceneCallbacks;
   private objectsRoot = new THREE.Group();
   private nodes = new Map<string, ObjectNode>();
-  private selectedId: string | null = null;
+  private selectedIds: string[] = [];
   private showGrid = true;
   private grid: THREE.LineSegments | null = null;
   private gridKey = '';
@@ -64,7 +110,11 @@ export class SceneManager {
   } | null = null;
   private imageCache = new Map<string, CacheEntry>();
   private imagePending = new Set<string>();
+  private mediaAutoplayArmed = false;
   private placeholderTexture: THREE.Texture;
+  private modelLoadingTexture: THREE.Texture;
+  private modelErrorTexture: THREE.Texture;
+  private lastTickAt = performance.now();
   private solidAccent: THREE.LineBasicMaterial;
   private dashedAccent: THREE.LineDashedMaterial;
   private dashedGray: THREE.LineDashedMaterial;
@@ -96,6 +146,17 @@ export class SceneManager {
     this.camera = new THREE.PerspectiveCamera(FOV, ASPECT, 0.1, 200000);
     this.camera.up.set(0, -1, 0);
     this.scene.add(this.objectsRoot);
+
+    const ambient = new THREE.AmbientLight(0xffffff, 1.15);
+    this.scene.add(ambient);
+    const keyLight = new THREE.DirectionalLight(0xffffff, 1.7);
+    keyLight.position.set(900, -1200, 1400);
+    this.scene.add(keyLight);
+    this.scene.add(keyLight.target);
+    const fillLight = new THREE.DirectionalLight(0x9fb7d4, 0.7);
+    fillLight.position.set(-1000, 600, 800);
+    this.scene.add(fillLight);
+    this.scene.add(fillLight.target);
 
     this.solidAccent = new THREE.LineBasicMaterial({
       color: ACCENT,
@@ -132,6 +193,8 @@ export class SceneManager {
       depthWrite: false,
     });
     this.placeholderTexture = this.createPlaceholderTexture();
+    this.modelLoadingTexture = this.createModelPlaceholderTexture('正在加载 3D 模型…');
+    this.modelErrorTexture = this.createModelPlaceholderTexture('模型无法加载');
 
     this.applyView(this.view);
     this.resize(this.width, this.height);
@@ -163,14 +226,67 @@ export class SceneManager {
     return texture;
   }
 
+  private createModelPlaceholderTexture(label: string): THREE.CanvasTexture {
+    const canvas = document.createElement('canvas');
+    canvas.width = 1024;
+    canvas.height = 1024;
+    const ctx = canvas.getContext('2d')!;
+    ctx.fillStyle = '#141E2A';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.strokeStyle = 'rgba(45,212,191,.35)';
+    ctx.lineWidth = 3;
+    ctx.setLineDash([18, 12]);
+    ctx.strokeRect(24, 24, canvas.width - 48, canvas.height - 48);
+    ctx.setLineDash([]);
+    ctx.strokeStyle = 'rgba(45,212,191,.55)';
+    ctx.lineWidth = 4;
+    const cx = canvas.width / 2;
+    const cy = canvas.height / 2 - 70;
+    const s = 150;
+    const cube = [
+      [-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1],
+      [-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1],
+    ] as [number, number, number][];
+    const project = (point: [number, number, number]) => {
+      const k = 1.9 / (3 + point[2]);
+      return [cx + point[0] * s * k, cy + point[1] * s * k] as [number, number];
+    };
+    const edges: [number, number][] = [
+      [0, 1], [1, 2], [2, 3], [3, 0],
+      [4, 5], [5, 6], [6, 7], [7, 4],
+      [0, 4], [1, 5], [2, 6], [3, 7],
+    ];
+    for (const [a, b] of edges) {
+      const p1 = project(cube[a]);
+      const p2 = project(cube[b]);
+      ctx.beginPath();
+      ctx.moveTo(p1[0], p1[1]);
+      ctx.lineTo(p2[0], p2[1]);
+      ctx.stroke();
+    }
+    ctx.fillStyle = 'rgba(201,210,223,.7)';
+    ctx.font = '500 40px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, canvas.width / 2, cy + 270);
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.generateMipmaps = false;
+    return texture;
+  }
+
   setBackground(color: string) {
     (this.scene.background as THREE.Color).set(color);
   }
 
   setMode(mode: StageMode) {
+    const previousMode = this.mode;
     this.mode = mode;
     for (const node of this.nodes.values()) this.applyNodeAppearance(node);
     this.gridDirty();
+    this.handleModeMedia(previousMode, mode);
   }
 
   setShowGrid(show: boolean) {
@@ -178,9 +294,9 @@ export class SceneManager {
     this.gridDirty();
   }
 
-  setSelected(id: string | null) {
-    if (this.selectedId === id) return;
-    this.selectedId = id;
+  setSelected(ids: string[]) {
+    if (this.selectedIds.length === ids.length && ids.every((id, i) => this.selectedIds[i] === id)) return;
+    this.selectedIds = ids;
     for (const node of this.nodes.values()) {
       this.applyOutline(node, node.data.visible);
       this.applyNodeAppearance(node);
@@ -200,9 +316,10 @@ export class SceneManager {
     return { ...this.view, target: { ...this.view.target } };
   }
 
-  sync(deck: Deck, selectedId: string | null, mode: StageMode) {
+  sync(deck: Deck, selectedIds: string[], mode: StageMode) {
+    const previousMode = this.mode;
     this.mode = mode;
-    this.selectedId = selectedId;
+    this.selectedIds = selectedIds;
     this.setBackground(deck.background);
     const live = new Set(deck.objects.map((object) => object.id));
     for (const [id, node] of this.nodes) {
@@ -236,10 +353,12 @@ export class SceneManager {
         node.visualKey = key;
         this.rebuildContent(node);
       }
+      if (node.media) this.applyMediaSettings(node.media, object);
       this.applyOutline(node, object.visible);
       this.applyNodeAppearance(node);
     });
     this.gridDirty();
+    this.handleModeMedia(previousMode, mode);
   }
 
   private visualKey(object: SlideObject): string {
@@ -252,6 +371,18 @@ export class SceneManager {
     if (object.type === 'image') {
       const image = object as ImageObject;
       return ['image', image.src, image.width, image.height, image.fit].join('|');
+    }
+    if (object.type === 'video') {
+      const video = object as VideoObject;
+      return ['video', video.src, video.width, video.height, video.fit].join('|');
+    }
+    if (object.type === 'audio') {
+      const audio = object as AudioObject;
+      return ['audio', audio.src, audio.name, audio.width, audio.height, audio.duration].join('|');
+    }
+    if (object.type === 'model') {
+      const model = object as ModelObject;
+      return ['model', model.src, model.format, model.width, model.height].join('|');
     }
     const shape = object as ShapeObject;
     return ['shape', shape.shape, shape.width, shape.height, shape.fill, shape.stroke ?? '', shape.strokeWidth].join('|');
@@ -284,6 +415,8 @@ export class SceneManager {
       outlineWidth: object.width,
       outlineHeight: Math.max(object.height, 8),
       imageState: null,
+      media: null,
+      model: null,
       data: object,
       objectId: object.id,
       pickRoot: null,
@@ -318,7 +451,8 @@ export class SceneManager {
   }
 
   private applyOutline(node: ObjectNode, visibleObject: boolean) {
-    const isSelected = this.mode === 'edit' && this.selectedId === node.objectId;
+    const isSelected = this.mode === 'edit' && this.selectedIds.includes(node.objectId);
+    const isPrimary = this.mode === 'edit' && this.selectedIds[0] === node.objectId;
     const showHidden = this.mode === 'edit' && !visibleObject;
     if (node.outlineWidth !== node.data.width || node.outlineHeight !== Math.max(node.data.height, 8)) {
       node.outlineWidth = node.data.width;
@@ -330,7 +464,7 @@ export class SceneManager {
       node.handles.geometry = this.handleGeometry(node.outlineWidth, node.outlineHeight);
     }
     node.outline.visible = isSelected || showHidden;
-    node.handles.visible = isSelected;
+    node.handles.visible = isPrimary;
     if (isSelected) node.outline.material = this.solidAccent;
     else if (showHidden) node.outline.material = this.dashedGray;
     else node.outline.material = this.dashedAccent;
@@ -341,7 +475,13 @@ export class SceneManager {
     const hiddenInEdit = this.mode === 'edit' && !object.visible;
     const base = Math.max(0, Math.min(100, object.opacity)) / 100;
     const opacity = hiddenInEdit ? Math.min(base, 0.24) : base;
-    const needsTransparent = opacity < 1 || object.type === 'text' || object.type === 'image' || hiddenInEdit;
+    const needsTransparent =
+      opacity < 1 ||
+      object.type === 'text' ||
+      object.type === 'image' ||
+      object.type === 'video' ||
+      object.type === 'audio' ||
+      hiddenInEdit;
     for (const material of node.materials) {
       const mat = material as THREE.MeshBasicMaterial;
       mat.opacity = opacity;
@@ -352,6 +492,8 @@ export class SceneManager {
   }
 
   private clearContent(node: ObjectNode) {
+    const modelGroup = node.model?.group;
+    if (modelGroup?.parent) modelGroup.parent.remove(modelGroup);
     if (node.content) {
       node.group.remove(node.content);
       node.content.traverse((child) => {
@@ -382,6 +524,8 @@ export class SceneManager {
     const object = node.data;
     const group = new THREE.Group();
     group.userData.objectId = object.id;
+    // 世界坐标 Y 轴向下（与画布坐标一致），内容需翻转以保证文字/图片正立
+    group.scale.y = -1;
     this.buildInto(group, object, node);
     group.traverse((child) => {
       child.userData.objectId = object.id;
@@ -402,6 +546,18 @@ export class SceneManager {
     }
     if (object.type === 'image') {
       this.buildImage(group, object as ImageObject, node);
+      return;
+    }
+    if (object.type === 'video') {
+      this.buildVideo(group, object as VideoObject, node);
+      return;
+    }
+    if (object.type === 'audio') {
+      this.buildAudio(group, object as AudioObject, node);
+      return;
+    }
+    if (object.type === 'model') {
+      this.buildModel(group, object as ModelObject, node);
       return;
     }
     this.buildShape(group, object as ShapeObject, node);
@@ -511,6 +667,8 @@ export class SceneManager {
   retryImage(id: string) {
     const node = this.nodes.get(id);
     if (!node) return;
+    if (node.media) this.disposeMedia(node);
+    if (node.model) this.disposeModel(node);
     const src = node.imageState?.src;
     if (src) {
       this.imageCache.delete(src);
@@ -585,6 +743,10 @@ export class SceneManager {
       node.materials.push(material);
       return;
     }
+    if (object.shape !== 'rect' && object.shape !== 'ellipse') {
+      this.buildPathShape(group, object, node);
+      return;
+    }
     if (object.shape === 'rect') {
       if (strokeEnabled && object.stroke) {
         const strokeMaterial = new THREE.MeshBasicMaterial({ color: object.stroke, side: THREE.DoubleSide });
@@ -630,7 +792,480 @@ export class SceneManager {
     }
   }
 
+  private buildPathShape(group: THREE.Group, object: ShapeObject, node: ObjectNode) {
+    const geometry = new THREE.ShapeGeometry(this.makePathShape(object.shape), 24);
+    const strokeEnabled = object.stroke !== null && object.strokeWidth > 0;
+    if (strokeEnabled) {
+      const strokeMaterial = new THREE.MeshBasicMaterial({ color: object.stroke!, side: THREE.DoubleSide });
+      const outer = new THREE.Mesh(geometry, strokeMaterial);
+      outer.scale.set(object.width + object.strokeWidth * 2, object.height + object.strokeWidth * 2, 1);
+      group.add(outer);
+      node.materials.push(strokeMaterial);
+    }
+    const fillMaterial = new THREE.MeshBasicMaterial({ color: object.fill, side: THREE.DoubleSide });
+    const inner = new THREE.Mesh(geometry, fillMaterial);
+    inner.scale.set(object.width, object.height, 1);
+    inner.position.z = strokeEnabled ? 0.05 : 0;
+    group.add(inner);
+    node.materials.push(fillMaterial);
+  }
+
+  private makePathShape(kind: ShapeKind): THREE.Shape {
+    const shape = new THREE.Shape();
+    if (kind === 'triangle') {
+      shape.moveTo(0, 0.5);
+      shape.lineTo(-0.5, -0.5);
+      shape.lineTo(0.5, -0.5);
+      shape.closePath();
+      return shape;
+    }
+    if (kind === 'diamond') {
+      shape.moveTo(0, 0.5);
+      shape.lineTo(0.5, 0);
+      shape.lineTo(0, -0.5);
+      shape.lineTo(-0.5, 0);
+      shape.closePath();
+      return shape;
+    }
+    if (kind === 'star') {
+      const outer = 0.5;
+      const inner = 0.22;
+      for (let i = 0; i < 10; i += 1) {
+        const radius = i % 2 === 0 ? outer : inner;
+        const angle = Math.PI / 2 + (i * Math.PI) / 5;
+        const x = Math.cos(angle) * radius;
+        const y = Math.sin(angle) * radius;
+        if (i === 0) shape.moveTo(x, y);
+        else shape.lineTo(x, y);
+      }
+      shape.closePath();
+      return shape;
+    }
+    if (kind === 'arrow') {
+      shape.moveTo(-0.5, -0.18);
+      shape.lineTo(0.12, -0.18);
+      shape.lineTo(0.12, -0.5);
+      shape.lineTo(0.5, 0);
+      shape.lineTo(0.12, 0.5);
+      shape.lineTo(0.12, 0.18);
+      shape.lineTo(-0.5, 0.18);
+      shape.closePath();
+      return shape;
+    }
+    if (kind === 'roundedRect') {
+      const r = 0.16;
+      shape.moveTo(-0.5 + r, -0.5);
+      shape.lineTo(0.5 - r, -0.5);
+      shape.quadraticCurveTo(0.5, -0.5, 0.5, -0.5 + r);
+      shape.lineTo(0.5, 0.5 - r);
+      shape.quadraticCurveTo(0.5, 0.5, 0.5 - r, 0.5);
+      shape.lineTo(-0.5 + r, 0.5);
+      shape.quadraticCurveTo(-0.5, 0.5, -0.5, 0.5 - r);
+      shape.lineTo(-0.5, -0.5 + r);
+      shape.quadraticCurveTo(-0.5, -0.5, -0.5 + r, -0.5);
+      return shape;
+    }
+    shape.moveTo(-0.5, -0.5);
+    shape.lineTo(0.5, -0.5);
+    shape.lineTo(0.5, 0.5);
+    shape.lineTo(-0.5, 0.5);
+    shape.closePath();
+    return shape;
+  }
+
+  private ensureModel(node: ObjectNode, object: ModelObject) {
+    const existing = node.model;
+    if (existing && existing.src === object.src && existing.format === object.format) return;
+    this.disposeModel(node);
+    const runtime: ModelRuntime = {
+      src: object.src,
+      format: object.format,
+      status: 'loading',
+      group: null,
+    };
+    node.model = runtime;
+    if (!object.src) {
+      runtime.status = 'error';
+      runtime.error = '缺少模型素材';
+      return;
+    }
+    void loadModelGroup(object.src, object.format, object.name)
+      .then(({ group }) => {
+        if (this.nodes.get(node.objectId) !== node || node.model !== runtime || this.disposed) {
+          disposeObject3D(group);
+          return;
+        }
+        runtime.group = group;
+        runtime.status = 'ready';
+        node.visualKey = '';
+        this.rebuildContent(node);
+      })
+      .catch((error: unknown) => {
+        if (node.model !== runtime) return;
+        runtime.status = 'error';
+        runtime.error = error instanceof Error ? error.message : '模型加载失败';
+        this.callbacks.onImageError(node.objectId, `3D 模型无法加载：${runtime.error}`);
+        node.visualKey = '';
+        this.rebuildContent(node);
+      });
+  }
+
+  private disposeModel(node: ObjectNode) {
+    const runtime = node.model;
+    if (!runtime) return;
+    node.model = null;
+    if (runtime.group) disposeObject3D(runtime.group);
+  }
+
+  private buildModel(group: THREE.Group, object: ModelObject, node: ObjectNode) {
+    this.ensureModel(node, object);
+    const runtime = node.model;
+    if (runtime && runtime.status === 'ready' && runtime.group) {
+      const scale = Math.min(object.width, object.height);
+      runtime.group.scale.setScalar(scale);
+      runtime.group.rotation.set(0, 0, 0);
+      group.add(runtime.group);
+      runtime.group.traverse((child) => {
+        const mesh = child as THREE.Mesh;
+        if (!mesh.isMesh || !mesh.material) return;
+        const list = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+        for (const material of list) {
+          // 内容组沿 Y 轴镜像以匹配画布坐标，模型材质需要双面渲染避免被背面剔除
+          material.side = THREE.DoubleSide;
+          node.materials.push(material);
+        }
+      });
+      return;
+    }
+    const texture =
+      runtime?.status === 'error' ? this.modelErrorTexture : this.modelLoadingTexture;
+    const material = new THREE.MeshBasicMaterial({
+      map: texture,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(object.width, object.height), material);
+    group.add(mesh);
+    node.materials.push(material);
+  }
+
+  /** 封面裁切：与图片的 cover 逻辑一致，视频纹理按对象独占，可直接改 repeat */
+  private applyCoverCrop(texture: THREE.Texture, imageAspect: number, boxAspect: number) {
+    texture.wrapS = THREE.ClampToEdgeWrapping;
+    texture.wrapT = THREE.ClampToEdgeWrapping;
+    if (imageAspect >= boxAspect) {
+      const repeatX = boxAspect / imageAspect;
+      texture.repeat.set(repeatX, 1);
+      texture.offset.set((1 - repeatX) / 2, 0);
+    } else {
+      const repeatY = imageAspect / boxAspect;
+      texture.repeat.set(1, repeatY);
+      texture.offset.set(0, (1 - repeatY) / 2);
+    }
+  }
+
+  private ensureMedia(node: ObjectNode, object: VideoObject | AudioObject) {
+    const existing = node.media;
+    if (existing && existing.src === object.src && existing.kind === object.type) {
+      this.applyMediaSettings(existing, object);
+      return;
+    }
+    this.disposeMedia(node);
+    const runtime: MediaRuntime = {
+      kind: object.type,
+      src: object.src,
+      element: null,
+      texture: null,
+      error: false,
+      ready: false,
+    };
+    node.media = runtime;
+    if (!object.src) {
+      runtime.error = true;
+      return;
+    }
+    const handleError = () => {
+      runtime.error = true;
+      runtime.ready = false;
+      this.callbacks.onImageError(node.objectId, object.type === 'video' ? '视频无法加载' : '音频无法加载');
+      if (this.nodes.get(node.objectId) === node) {
+        node.visualKey = '';
+        this.rebuildContent(node);
+      }
+    };
+    if (object.type === 'video') {
+      const video = document.createElement('video');
+      video.src = object.src;
+      video.preload = 'auto';
+      video.playsInline = true;
+      video.loop = object.loop;
+      video.muted = object.muted;
+      video.volume = Math.max(0, Math.min(1, object.volume / 100));
+      video.addEventListener('error', handleError);
+      video.addEventListener('loadeddata', () => {
+        runtime.ready = true;
+        if (runtime.texture) runtime.texture.needsUpdate = true;
+        if (this.nodes.get(node.objectId) === node) {
+          node.visualKey = '';
+          this.rebuildContent(node);
+        }
+      });
+      video.addEventListener('seeked', () => {
+        if (runtime.texture) runtime.texture.needsUpdate = true;
+      });
+      video.load();
+      const texture = new THREE.VideoTexture(video);
+      texture.colorSpace = THREE.SRGBColorSpace;
+      texture.minFilter = THREE.LinearFilter;
+      texture.magFilter = THREE.LinearFilter;
+      texture.generateMipmaps = false;
+      texture.anisotropy = this.maxAnisotropy;
+      runtime.texture = texture;
+      runtime.element = video;
+    } else {
+      const audio = new Audio();
+      audio.src = object.src;
+      audio.preload = 'metadata';
+      audio.loop = object.loop;
+      audio.volume = Math.max(0, Math.min(1, object.volume / 100));
+      audio.addEventListener('error', handleError);
+      audio.load();
+      runtime.element = audio;
+    }
+  }
+
+  private applyMediaSettings(runtime: MediaRuntime, object: SlideObject) {
+    const element = runtime.element;
+    if (!element) return;
+    if (object.type !== 'video' && object.type !== 'audio') return;
+    element.loop = object.loop;
+    element.volume = Math.max(0, Math.min(1, object.volume / 100));
+    if (object.type === 'video') element.muted = object.muted;
+  }
+
+  private disposeMedia(node: ObjectNode) {
+    const runtime = node.media;
+    if (!runtime) return;
+    node.media = null;
+    if (runtime.element) {
+      runtime.element.pause();
+      runtime.element.removeAttribute('src');
+      runtime.element.load();
+      runtime.element = null;
+    }
+    if (runtime.texture) {
+      runtime.texture.dispose();
+      runtime.texture = null;
+    }
+  }
+
+  private buildVideo(group: THREE.Group, object: VideoObject, node: ObjectNode) {
+    this.ensureMedia(node, object);
+    const runtime = node.media;
+    const ready = Boolean(runtime && !runtime.error && runtime.ready && runtime.texture);
+    let texture: THREE.Texture = this.placeholderTexture;
+    let drawWidth = object.width;
+    let drawHeight = object.height;
+    if (ready && runtime?.texture) {
+      const source = runtime.texture;
+      source.repeat.set(1, 1);
+      source.offset.set(0, 0);
+      source.wrapS = THREE.ClampToEdgeWrapping;
+      source.wrapT = THREE.ClampToEdgeWrapping;
+      const imageAspect = object.naturalWidth / object.naturalHeight || 16 / 9;
+      const boxAspect = object.width / object.height || 1;
+      if (object.fit === 'contain') {
+        if (imageAspect >= boxAspect) {
+          drawWidth = object.width;
+          drawHeight = object.width / imageAspect;
+        } else {
+          drawHeight = object.height;
+          drawWidth = object.height * imageAspect;
+        }
+      } else {
+        this.applyCoverCrop(source, imageAspect, boxAspect);
+      }
+      texture = source;
+    }
+    const material = new THREE.MeshBasicMaterial({
+      map: texture,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(drawWidth, drawHeight), material);
+    group.add(mesh);
+    node.materials.push(material);
+  }
+
+  private createAudioCard(object: AudioObject, node: ObjectNode): THREE.CanvasTexture {
+    const canvasWidth = 1024;
+    const ratio = object.height / object.width || 0.3;
+    const canvasHeight = Math.max(96, Math.min(1024, Math.round(canvasWidth * ratio)));
+    const canvas = document.createElement('canvas');
+    canvas.width = canvasWidth;
+    canvas.height = canvasHeight;
+    const ctx = canvas.getContext('2d')!;
+    ctx.fillStyle = '#111A24';
+    ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+    ctx.strokeStyle = 'rgba(45,212,191,.5)';
+    ctx.lineWidth = 4;
+    ctx.strokeRect(2, 2, canvasWidth - 4, canvasHeight - 4);
+
+    const cy = canvasHeight / 2;
+    const radius = Math.min(canvasHeight * 0.3, 90);
+    const cx = radius + Math.min(canvasHeight * 0.14, 32);
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(45,212,191,.14)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(45,212,191,.7)';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.fillStyle = '#2DD4BF';
+    ctx.beginPath();
+    ctx.moveTo(cx - radius * 0.22, cy - radius * 0.36);
+    ctx.lineTo(cx + radius * 0.42, cy);
+    ctx.lineTo(cx - radius * 0.22, cy + radius * 0.36);
+    ctx.closePath();
+    ctx.fill();
+
+    const textLeft = cx + radius + Math.min(canvasHeight * 0.12, 26);
+    ctx.textBaseline = 'alphabetic';
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#F3EEE4';
+    const nameSize = Math.max(18, Math.round(canvasHeight * 0.2));
+    ctx.font = `500 ${nameSize}px "PingFang SC","Microsoft YaHei",sans-serif`;
+    const name = object.name.length > 18 ? `${object.name.slice(0, 18)}…` : object.name;
+    ctx.fillText(name, textLeft, cy - 4);
+    ctx.fillStyle = 'rgba(201,210,223,.6)';
+    const metaSize = Math.max(14, Math.round(canvasHeight * 0.15));
+    ctx.font = `400 ${metaSize}px "PingFang SC","Microsoft YaHei",sans-serif`;
+    ctx.fillText('音频素材', textLeft, cy + metaSize + 8);
+
+    const barCount = Math.max(8, Math.floor((canvasWidth - textLeft) / (canvasHeight * 0.13)));
+    const barWidth = canvasHeight * 0.055;
+    const gap = canvasHeight * 0.075;
+    const startX = canvasWidth - 24 - barCount * (barWidth + gap);
+    const maxBar = canvasHeight * 0.34;
+    for (let i = 0; i < barCount; i += 1) {
+      const wave = 0.35 + 0.65 * Math.abs(Math.sin(i * 1.7 + 0.6));
+      const height = maxBar * wave;
+      ctx.fillStyle = `rgba(45,212,191,${0.28 + 0.32 * wave})`;
+      ctx.fillRect(startX + i * (barWidth + gap), cy - height / 2, barWidth, height);
+    }
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.generateMipmaps = false;
+    texture.anisotropy = this.maxAnisotropy;
+    node.ownedTextures.push(texture);
+    return texture;
+  }
+
+  private buildAudio(group: THREE.Group, object: AudioObject, node: ObjectNode) {
+    this.ensureMedia(node, object);
+    const texture = node.media?.error ? this.placeholderTexture : this.createAudioCard(object, node);
+    const material = new THREE.MeshBasicMaterial({
+      map: texture,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(object.width, object.height), material);
+    group.add(mesh);
+    node.materials.push(material);
+  }
+
+  getMediaState(id: string): MediaPlaybackState | null {
+    const node = this.nodes.get(id);
+    const runtime = node?.media;
+    if (!node || !runtime) return null;
+    const object = node.data;
+    if (object.type !== 'video' && object.type !== 'audio') return null;
+    const element = runtime.element;
+    const duration = element && Number.isFinite(element.duration) && element.duration > 0
+      ? element.duration
+      : object.duration;
+    return {
+      kind: runtime.kind,
+      playing: element ? !element.paused && !element.ended : false,
+      time: element ? element.currentTime : 0,
+      duration: Math.max(0, duration || 0),
+      volume: element ? Math.round(element.volume * 100) : object.volume,
+      muted: element ? element.muted : false,
+      loop: object.loop,
+      error: runtime.error,
+    };
+  }
+
+  playMedia(id: string) {
+    const element = this.nodes.get(id)?.media?.element;
+    if (!element) return;
+    const result = element.play();
+    if (result && typeof result.catch === 'function') result.catch(() => undefined);
+  }
+
+  pauseMedia(id: string) {
+    this.nodes.get(id)?.media?.element?.pause();
+  }
+
+  toggleMedia(id: string) {
+    const element = this.nodes.get(id)?.media?.element;
+    if (!element) return;
+    if (element.paused) this.playMedia(id);
+    else element.pause();
+  }
+
+  seekMedia(id: string, time: number) {
+    const element = this.nodes.get(id)?.media?.element;
+    if (!element) return;
+    const duration = Number.isFinite(element.duration) ? element.duration : 0;
+    element.currentTime = Math.max(0, duration > 0 ? Math.min(duration, time) : time);
+    const texture = this.nodes.get(id)?.media?.texture;
+    if (texture) texture.needsUpdate = true;
+  }
+
+  setMediaVolume(id: string, volume: number) {
+    const runtime = this.nodes.get(id)?.media;
+    const element = runtime?.element;
+    if (!element) return;
+    element.volume = Math.max(0, Math.min(1, volume / 100));
+    if (element.volume > 0 && element.muted) element.muted = false;
+  }
+
+  setMediaMuted(id: string, muted: boolean) {
+    const element = this.nodes.get(id)?.media?.element;
+    if (element) element.muted = muted;
+  }
+
+  private pauseAllMedia() {
+    for (const node of this.nodes.values()) node.media?.element?.pause();
+  }
+
+  private handleModeMedia(previousMode: StageMode, mode: StageMode) {
+    if (mode !== 'present') {
+      this.mediaAutoplayArmed = false;
+      if (previousMode === 'present') this.pauseAllMedia();
+      return;
+    }
+    if (this.mediaAutoplayArmed) return;
+    this.mediaAutoplayArmed = true;
+    for (const node of this.nodes.values()) {
+      const object = node.data;
+      if (!object.visible) continue;
+      if ((object.type === 'video' || object.type === 'audio') && object.autoplay) {
+        this.playMedia(node.objectId);
+      }
+    }
+  }
+
   private removeNode(node: ObjectNode) {
+    this.disposeMedia(node);
+    this.disposeModel(node);
     this.clearContent(node);
     node.group.remove(node.outline);
     node.outline.geometry.dispose();
@@ -672,7 +1307,7 @@ export class SceneManager {
       return;
     }
     const upp = this.unitsPerPixel();
-    const step = this.niceStep(upp * 68);
+    const step = this.niceStep(upp * 56);
     const centerX = Math.round(this.view.target.x / step) * step;
     const centerY = Math.round(this.view.target.y / step) * step;
     const z = this.view.target.z;
@@ -690,8 +1325,8 @@ export class SceneManager {
     const range = step * 44;
     const positions: number[] = [];
     const colors: number[] = [];
-    const minorColor = new THREE.Color(0x243240);
-    const majorColor = new THREE.Color(0x3a4d60);
+    const minorColor = new THREE.Color(0x34485c);
+    const majorColor = new THREE.Color(0x55708a);
     const steps = Math.round(range / step);
     for (let i = -steps; i <= steps; i += 1) {
       if (i === 0) continue;
@@ -708,7 +1343,7 @@ export class SceneManager {
     const material = new THREE.LineBasicMaterial({
       vertexColors: true,
       transparent: true,
-      opacity: 0.5,
+      opacity: 0.6,
       depthWrite: false,
     });
     const lines = new THREE.LineSegments(geometry, material);
@@ -720,6 +1355,15 @@ export class SceneManager {
 
   private tick(now: number) {
     if (this.disposed) return;
+    const dt = Math.min(0.06, Math.max(0, (now - this.lastTickAt) / 1000));
+    this.lastTickAt = now;
+    for (const node of this.nodes.values()) {
+      const runtime = node.model;
+      const object = node.data;
+      if (!runtime || runtime.status !== 'ready' || !runtime.group) continue;
+      if (object.type !== 'model' || !object.autoRotate) continue;
+      runtime.group.rotation.y += ((object.rotateSpeed || 0) * Math.PI / 180) * dt;
+    }
     if (this.animation) {
       const { from, to, start, duration, resolve } = this.animation;
       const t = Math.min(1, (now - start) / duration);
@@ -797,6 +1441,64 @@ export class SceneManager {
     return { x: this.view.target.x, y: this.view.target.y };
   }
 
+  private cornerScreens(node: ObjectNode): { corner: HandleCorner; x: number; y: number }[] {
+    const object = node.data;
+    node.group.updateMatrixWorld(true);
+    this.camera.updateMatrixWorld();
+    const corners: { corner: HandleCorner; x: number; y: number }[] = [
+      { corner: 'nw', x: -object.width / 2, y: -object.height / 2 },
+      { corner: 'ne', x: object.width / 2, y: -object.height / 2 },
+      { corner: 'se', x: object.width / 2, y: object.height / 2 },
+      { corner: 'sw', x: -object.width / 2, y: object.height / 2 },
+    ];
+    return corners.map((corner) => {
+      const world = node.group.localToWorld(new THREE.Vector3(corner.x, corner.y, 0));
+      const projected = world.clone().project(this.camera);
+      return {
+        corner: corner.corner,
+        x: ((projected.x + 1) / 2) * this.width,
+        y: ((1 - projected.y) / 2) * this.height,
+      };
+    });
+  }
+
+  /** 命中主选中对象的四角缩放点，返回画布坐标下的角点 */
+  hitTestHandle(clientX: number, clientY: number): { id: string; corner: HandleCorner } | null {
+    if (this.mode !== 'edit') return null;
+    const primary = this.selectedIds[0];
+    const node = primary ? this.nodes.get(primary) : null;
+    if (!node) return null;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const px = clientX - rect.left;
+    const py = clientY - rect.top;
+    for (const point of this.cornerScreens(node)) {
+      if (Math.hypot(point.x - px, point.y - py) <= 12) {
+        return { id: node.objectId, corner: point.corner };
+      }
+    }
+    return null;
+  }
+
+  /** 框选：返回投影包围盒与矩形相交的对象 */
+  hitTestRect(left: number, top: number, width: number, height: number): string[] {
+    const right = left + width;
+    const bottom = top + height;
+    const ids: string[] = [];
+    for (const node of this.nodes.values()) {
+      const projected = this.projectRect(node.objectId);
+      if (!projected) continue;
+      if (
+        projected.left < right &&
+        projected.left + projected.width > left &&
+        projected.top < bottom &&
+        projected.top + projected.height > top
+      ) {
+        ids.push(node.objectId);
+      }
+    }
+    return ids;
+  }
+
   panBy(dx: number, dy: number) {
     if (this.animation) return;
     const right = new THREE.Vector3().setFromMatrixColumn(this.camera.matrixWorld, 0);
@@ -831,6 +1533,24 @@ export class SceneManager {
     next.target.x += before.x - after.x;
     next.target.y += before.y - after.y;
     this.applyView(next);
+  }
+
+  /** 空间漫游：以视点朝向为基准移动，保持当前朝向与距离 */
+  roamStep(forward: number, right: number, up: number, dt: number) {
+    if (this.mode !== 'present' || this.animation) return;
+    const view = this.getView();
+    const cp = Math.cos(view.pitch);
+    const fx = -Math.sin(view.yaw) * cp;
+    const fy = Math.sin(view.pitch);
+    const fz = -Math.cos(view.yaw) * cp;
+    const rx = Math.cos(view.yaw);
+    const rz = -Math.sin(view.yaw);
+    const speed = Math.max(view.distance * 1.25, 180);
+    const distance = speed * Math.max(0, Math.min(0.1, dt));
+    view.target.x += (fx * forward + rx * right) * distance;
+    view.target.y += (fy * forward - up) * distance;
+    view.target.z += (fz * forward + rz * right) * distance;
+    this.applyView(view);
   }
 
   projectRect(objectId: string): {

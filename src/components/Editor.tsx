@@ -1,10 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ViewState } from '../types';
+import type { AssetMeta } from '../lib/assets';
+import { readAssetFile } from '../lib/assets';
 import { LIMITS } from '../lib/constants';
 import { exportDeckFile } from '../lib/file';
-import { formatBytes, readImageFile } from '../lib/image';
+import { formatBytes, isAcceptedImage, readImageFile } from '../lib/image';
+import { mediaKindOf, readMediaFile } from '../lib/media';
+import { isModelFile, modelFormatOf, MODEL_ACCEPT } from '../lib/model3d';
 import { flushDeckSave, useDeckStore } from '../store/deckStore';
 import { toast } from '../store/uiStore';
+import { AssetPicker } from './AssetPicker';
 import { FrameTrack } from './FrameTrack';
 import { Icon } from './Icon';
 import { Inspector } from './Inspector';
@@ -33,22 +38,26 @@ export function Editor({ deckId, onBack }: EditorProps) {
   const saveStatus = useDeckStore((state) => state.saveStatus);
   const cameraRequest = useDeckStore((state) => state.cameraRequest);
   const selectedObjectId = useDeckStore((state) => state.selectedObjectId);
+  const selectedIds = useDeckStore((state) => state.selectedIds);
   const imageRetry = useDeckStore((state) => state.imageRetry);
   const canUndo = useDeckStore((state) => state.past.length > 0);
   const canRedo = useDeckStore((state) => state.future.length > 0);
 
   const stageRef = useRef<StageApi>(null);
   const imageInput = useRef<HTMLInputElement>(null);
+  const mediaInput = useRef<HTMLInputElement>(null);
+  const modelInput = useRef<HTMLInputElement>(null);
   const pendingReplace = useRef<string | null>(null);
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [narrow, setNarrow] = useState(() => window.innerWidth < 1024);
+  const [assetsOpen, setAssetsOpen] = useState(false);
   const [startChoice, setStartChoice] = useState(false);
   const [presentState, setPresentState] = useState<PresentState | null>(null);
   const [saveErrorOpen, setSaveErrorOpen] = useState(false);
   const [leaveOpen, setLeaveOpen] = useState(false);
   const [retrying, setRetrying] = useState(false);
 
-  const modalOpen = Boolean(startChoice || saveErrorOpen || leaveOpen || presentState);
+  const modalOpen = Boolean(startChoice || saveErrorOpen || leaveOpen || presentState || assetsOpen);
   const modalOpenRef = useRef(modalOpen);
   modalOpenRef.current = modalOpen;
 
@@ -118,9 +127,15 @@ export function Editor({ deckId, onBack }: EditorProps) {
         else state.undo();
         return;
       }
-      if ((event.key === 'Delete' || event.key === 'Backspace') && state.selectedObjectId) {
+      if ((event.key === 'Delete' || event.key === 'Backspace') && (state.selectedIds.length > 0 || state.selectedObjectId)) {
         event.preventDefault();
-        state.removeObject(state.selectedObjectId);
+        const ids = state.selectedIds.length > 0 ? state.selectedIds : state.selectedObjectId ? [state.selectedObjectId] : [];
+        state.removeObjects(ids);
+        return;
+      }
+      if (mod && event.key.toLowerCase() === 'a' && !event.shiftKey) {
+        event.preventDefault();
+        state.selectObjects(state.deck?.objects.map((object) => object.id) ?? []);
         return;
       }
       if ((event.key === 'f' || event.key === 'F') && state.selectedObjectId) {
@@ -202,6 +217,116 @@ export function Editor({ deckId, onBack }: EditorProps) {
     imageInput.current?.click();
   };
 
+  const handleMediaFile = async (file: File, replaceId: string | null, point?: { x: number; y: number }) => {
+    try {
+      const result = await readMediaFile(file);
+      const state = useDeckStore.getState();
+      if (replaceId) {
+        const object = state.deck?.objects.find((item) => item.id === replaceId);
+        if (!object || (object.type !== 'video' && object.type !== 'audio')) return;
+        if (object.type !== result.kind) {
+          toast('素材类型不一致，视频对象只能替换视频，音频对象只能替换音频', 'error');
+          return;
+        }
+        const patch =
+          result.kind === 'video'
+            ? {
+                src: result.src,
+                naturalWidth: result.width,
+                naturalHeight: result.height,
+                duration: result.duration,
+              }
+            : { src: result.src, duration: result.duration };
+        state.updateObject(replaceId, patch);
+        toast('媒体已替换', 'success');
+      } else {
+        const id = state.addMedia(
+          result.kind,
+          result.src,
+          { width: result.width, height: result.height, duration: result.duration },
+          point,
+        );
+        if (!id) {
+          toast(`已达到单作品 ${LIMITS.objects} 个对象上限`, 'error');
+          return;
+        }
+      }
+      if (result.error) toast(result.error, 'error');
+    } catch (error) {
+      toast(error instanceof Error ? error.message : '媒体添加失败', 'error');
+    }
+  };
+
+  const pickMedia = (replaceId?: string) => {
+    pendingReplace.current = replaceId ?? null;
+    mediaInput.current?.click();
+  };
+
+  const handleModelFile = async (file: File, replaceId: string | null, point?: { x: number; y: number }) => {
+    try {
+      const payload = await readAssetFile(file);
+      const format = payload.meta.format ?? modelFormatOf(file.name);
+      if (!format) throw new Error('无法识别该模型格式');
+      const state = useDeckStore.getState();
+      if (replaceId) {
+        const object = state.deck?.objects.find((item) => item.id === replaceId);
+        if (!object || object.type !== 'model') return;
+        state.updateObject(replaceId, { src: payload.src, format });
+        toast('模型已替换', 'success');
+      } else {
+        const id = state.addModel(payload.src, format, point);
+        if (!id) {
+          toast(`已达到单作品 ${LIMITS.objects} 个对象上限`, 'error');
+          return;
+        }
+      }
+    } catch (error) {
+      toast(error instanceof Error ? error.message : '模型添加失败', 'error');
+    }
+  };
+
+  const pickModel = (replaceId?: string) => {
+    pendingReplace.current = replaceId ?? null;
+    modelInput.current?.click();
+  };
+
+  const handleAssetPick = (asset: AssetMeta, src: string) => {
+    const state = useDeckStore.getState();
+    if (!state.deck) return;
+    let id: string | null = null;
+    if (asset.kind === 'image') {
+      id = state.addImage(src, asset.width || 1600, asset.height || 900);
+    } else if (asset.kind === 'video' || asset.kind === 'audio') {
+      id = state.addMedia(
+        asset.kind,
+        src,
+        { width: asset.width || 1280, height: asset.height || 720, duration: asset.duration },
+      );
+    } else if (asset.kind === 'model') {
+      const format = asset.format ?? modelFormatOf(asset.name);
+      if (!format) {
+        toast('无法识别该模型格式', 'error');
+        return;
+      }
+      id = state.addModel(src, format);
+    } else {
+      toast('该资源类型暂不支持插入画板', 'error');
+      return;
+    }
+    if (!id) {
+      toast(`已达到单作品 ${LIMITS.objects} 个对象上限`, 'error');
+      return;
+    }
+    toast(`已插入「${asset.name}」`, 'success');
+  };
+
+  const handleFile = (file: File, replaceId: string | null, point?: { x: number; y: number }) => {
+    if (isAcceptedImage(file)) void handleImageFile(file, replaceId, point);
+    else if (isModelFile(file)) void handleModelFile(file, replaceId, point);
+    else if (mediaKindOf(file)) void handleMediaFile(file, replaceId, point);
+    else toast('不支持的文件类型', 'error');
+  };
+
   const captureFrame = () => {
     const state = useDeckStore.getState();
     if (!state.deck) return;
@@ -253,6 +378,7 @@ export function Editor({ deckId, onBack }: EditorProps) {
     state.commitView(finalView);
     useDeckStore.setState({
       selectedObjectId: null,
+      selectedIds: [],
       selectedFrameId: null,
       currentFrameId: frameId,
     });
@@ -315,6 +441,7 @@ export function Editor({ deckId, onBack }: EditorProps) {
         onRedo={() => useDeckStore.getState().redo()}
         onPresent={handlePresent}
         onExport={handleExport}
+        onOpenAssets={() => setAssetsOpen(true)}
         onShowSaveError={() => setSaveErrorOpen(true)}
       />
       {readonly && (
@@ -328,14 +455,22 @@ export function Editor({ deckId, onBack }: EditorProps) {
         <ObjectList
           objects={deck.objects}
           selectedId={selectedObjectId}
+          selectedIds={selectedIds}
           readonly={readonly}
           collapsed={leftCollapsed}
           onToggleCollapsed={() => setLeftCollapsed((value) => !value)}
-          onSelect={(id) => useDeckStore.getState().selectObject(id)}
+          onSelect={(id, additive) => {
+            if (additive) useDeckStore.getState().toggleObjectSelection(id);
+            else useDeckStore.getState().selectObject(id);
+          }}
+          onRangeSelect={(ids) => useDeckStore.getState().selectObjects(ids)}
           onToggleVisible={(id, visible) => useDeckStore.getState().updateObject(id, { visible })}
           onReorder={(source, target) => useDeckStore.getState().moveObjectLayer(source, target)}
           onAddText={() => useDeckStore.getState().addText()}
           onAddImage={() => pickImage()}
+          onAddVideo={() => pickMedia()}
+          onAddAudio={() => pickMedia()}
+          onAddModel={() => pickModel()}
           onAddShape={() => useDeckStore.getState().addShape('rect')}
         />
 
@@ -345,17 +480,19 @@ export function Editor({ deckId, onBack }: EditorProps) {
             deck={deck}
             mode={mode}
             selectedObjectId={selectedObjectId}
+            selectedObjectIds={selectedIds}
             cameraRequest={cameraRequest}
             imageRetry={imageRetry}
             initialView={deck.lastView}
             onViewChange={(next) => useDeckStore.getState().commitView(next)}
-            onSelect={(id) => useDeckStore.getState().selectObject(id)}
+            onSelectMany={(ids) => useDeckStore.getState().selectObjects(ids)}
             onMoveObject={(id, x, y) => useDeckStore.getState().updateObject(id, { x, y }, `move:${id}`)}
+            onResizeObject={(id, patch) => useDeckStore.getState().updateObject(id, patch, `resize:${id}`)}
             onGestureEnd={() => useDeckStore.getState().endHistoryCoalesce()}
             onImageError={(id, message) => useDeckStore.getState().markImageError(id, message)}
             onAddText={() => useDeckStore.getState().addText()}
             onAddShape={(shape) => useDeckStore.getState().addShape(shape)}
-            onAddImageFile={(file, point) => void handleImageFile(file, null, point)}
+            onAddFile={(file, point) => handleFile(file, null, point)}
             onPickImage={() => pickImage()}
             onTextCommit={(id, text) => {
               if (!text.trim()) useDeckStore.getState().removeObject(id);
@@ -367,6 +504,8 @@ export function Editor({ deckId, onBack }: EditorProps) {
         <Inspector
           readonly={readonly}
           onReplaceImage={(id) => pickImage(id)}
+          onReplaceMedia={(id) => pickMedia(id)}
+          onReplaceModel={(id) => pickModel(id)}
           onUpdateFrameView={updateFrameView}
         />
       </div>
@@ -386,6 +525,42 @@ export function Editor({ deckId, onBack }: EditorProps) {
           if (file) void handleImageFile(file, replaceId);
         }}
       />
+
+      <input
+        ref={mediaInput}
+        type="file"
+        hidden
+        accept="video/*,audio/*,.mkv,.avi,.mov,.flv,.wmv,.mp3,.wav,.flac,.m4a,.aac,.ogg,.opus"
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          const replaceId = pendingReplace.current;
+          pendingReplace.current = null;
+          event.target.value = '';
+          if (file) void handleMediaFile(file, replaceId);
+        }}
+      />
+
+      <input
+        ref={modelInput}
+        type="file"
+        hidden
+        accept={MODEL_ACCEPT}
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          const replaceId = pendingReplace.current;
+          pendingReplace.current = null;
+          event.target.value = '';
+          if (file) void handleModelFile(file, replaceId);
+        }}
+      />
+
+      {assetsOpen && (
+        <AssetPicker
+          kinds={['image', 'video', 'audio', 'model']}
+          onPick={handleAssetPick}
+          onClose={() => setAssetsOpen(false)}
+        />
+      )}
 
       {startChoice && deck.frames.length > 0 && (
         <Modal

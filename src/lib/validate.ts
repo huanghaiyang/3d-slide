@@ -2,6 +2,7 @@ import type {
   Deck,
   Frame,
   ImageObject,
+  ModelFormat,
   ShapeObject,
   SlideObject,
   TextObject,
@@ -118,9 +119,56 @@ function normalizeObject(raw: unknown, warnings: string[]): SlideObject {
       type: 'image',
       src,
       fit: r.fit === 'cover' ? 'cover' : 'contain',
-      aspectLocked: bool(r.aspectLocked, true),
+      aspectLocked: bool(r.aspectLocked, false),
       naturalWidth: Math.max(1, num(r.naturalWidth, 1600)),
       naturalHeight: Math.max(1, num(r.naturalHeight, 900)),
+    };
+  }
+  if (type === 'video') {
+    const base = normalizeBase(r);
+    const src = str(r.src, '');
+    if (!src) warnings.push(`视频「${base.name}」缺少素材，已以占位卡导入`);
+    return {
+      ...base,
+      type: 'video',
+      src,
+      fit: r.fit === 'cover' ? 'cover' : 'contain',
+      naturalWidth: Math.max(1, num(r.naturalWidth, 1280)),
+      naturalHeight: Math.max(1, num(r.naturalHeight, 720)),
+      duration: Math.max(0, num(r.duration, 0)),
+      loop: bool(r.loop, true),
+      muted: bool(r.muted, false),
+      volume: clamp(num(r.volume, 80), 0, 100),
+      autoplay: bool(r.autoplay, false),
+    };
+  }
+  if (type === 'audio') {
+    const base = normalizeBase(r);
+    const src = str(r.src, '');
+    if (!src) warnings.push(`音频「${base.name}」缺少素材，已以占位卡导入`);
+    return {
+      ...base,
+      type: 'audio',
+      src,
+      duration: Math.max(0, num(r.duration, 0)),
+      loop: bool(r.loop, true),
+      volume: clamp(num(r.volume, 80), 0, 100),
+      autoplay: bool(r.autoplay, false),
+    };
+  }
+  if (type === 'model') {
+    const base = normalizeBase(r);
+    const src = str(r.src, '');
+    if (!src) warnings.push(`模型「${base.name}」缺少素材，已以占位框导入`);
+    return {
+      ...base,
+      type: 'model',
+      src,
+      format: (['glb', 'gltf', 'obj', 'fbx', 'stl', 'ply', 'dae', '3mf', 'usdz'].includes(String(r.format))
+        ? r.format
+        : 'glb') as ModelFormat,
+      autoRotate: bool(r.autoRotate, false),
+      rotateSpeed: clamp(num(r.rotateSpeed, 45), 0, 360),
     };
   }
   if (type === 'shape') {
@@ -128,7 +176,11 @@ function normalizeObject(raw: unknown, warnings: string[]): SlideObject {
     return {
       ...base,
       type: 'shape',
-      shape: (['rect', 'ellipse', 'line'].includes(String(r.shape)) ? r.shape : 'rect') as ShapeObject['shape'],
+      shape: (['rect', 'roundedRect', 'ellipse', 'triangle', 'diamond', 'star', 'arrow', 'line'].includes(
+        String(r.shape),
+      )
+        ? r.shape
+        : 'rect') as ShapeObject['shape'],
       fill: str(r.fill, DEFAULT_SHAPE_COLOR),
       stroke: typeof r.stroke === 'string' ? r.stroke : null,
       strokeWidth: clamp(num(r.strokeWidth, 0), LIMITS.minStroke, LIMITS.maxStroke),
@@ -210,6 +262,9 @@ export function normalizeDeckWithWarnings(
   const warnings: string[] = [];
   for (const o of deck.objects) {
     if (o.type === 'image' && !o.src) warnings.push(`图片「${o.name}」缺少素材，已以占位图显示`);
+    if ((o.type === 'video' || o.type === 'audio') && !o.src) {
+      warnings.push(`媒体「${o.name}」缺少素材，已以占位卡显示`);
+    }
   }
   return { deck, warnings };
 }
@@ -292,7 +347,7 @@ export function defaultImageObject(
     visible: true,
     src,
     fit: 'contain',
-    aspectLocked: true,
+    aspectLocked: false,
     naturalWidth,
     naturalHeight,
   };

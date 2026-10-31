@@ -18,6 +18,7 @@ export const LIMITS = {
   objects: 200,
   frames: 50,
   imageBytes: 20 * 1024 * 1024,
+  mediaBytes: 100 * 1024 * 1024,
   projectBytes: 200 * 1024 * 1024,
   textChars: 5000,
   titleChars: 80,

@@ -14,8 +14,9 @@ import { ASPECT, DEFAULT_VIEW, FONT_STACKS } from '../lib/constants';
 import { fitDistance, formatZoom } from '../lib/camera';
 import { nextDepth } from '../lib/deck';
 import { SceneManager } from '../three/SceneManager';
-import type { StageMode } from '../three/SceneManager';
+import type { MediaPlaybackState, StageMode } from '../three/SceneManager';
 import { Icon } from './Icon';
+import { MediaPlayer } from './MediaPlayer';
 
 export interface StageApi {
   captureView: () => ViewState;
@@ -23,22 +24,27 @@ export interface StageApi {
   focus: (objectId: string) => Promise<void>;
   reset: () => Promise<void>;
   projectObject: (id: string) => { left: number; top: number; width: number; height: number } | null;
+  roamStep: (forward: number, right: number, up: number, dt: number) => void;
 }
 
 interface StageProps {
   deck: Deck;
   mode: StageMode;
   selectedObjectId?: string | null;
+  selectedObjectIds?: string[];
   cameraRequest?: CameraRequest | null;
   imageRetry?: Record<string, number>;
   initialView?: ViewState;
   onViewChange?: (view: ViewState) => void;
   onSelect?: (id: string | null) => void;
+  onSelectMany?: (ids: string[]) => void;
   onMoveObject?: (id: string, x: number, y: number) => void;
+  onResizeObject?: (id: string, patch: { x: number; y: number; width: number; height: number }) => void;
   onImageError?: (id: string, message: string) => void;
   onAddText?: () => void;
   onAddShape?: (shape: ShapeKind) => void;
   onAddImageFile?: (file: File, point?: { x: number; y: number }) => void;
+  onAddFile?: (file: File, point?: { x: number; y: number }) => void;
   onPickImage?: () => void;
   onTextCommit?: (id: string, text: string) => void;
   onGestureEnd?: () => void;
@@ -53,7 +59,33 @@ interface EditingState {
   object: TextObject;
 }
 
-type GestureMode = 'pan' | 'orbit' | 'object' | null;
+type GestureMode = 'pan' | 'orbit' | 'object' | 'resize' | 'marquee' | null;
+
+interface ResizeStart {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotation: number;
+  z: number;
+  ratio: number | null;
+}
+
+interface MarqueeRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+interface MediaPanelState {
+  id: string;
+  name: string;
+  left: number;
+  top: number;
+  width: number;
+  state: MediaPlaybackState;
+}
 
 interface GestureState {
   mode: GestureMode;
@@ -63,8 +95,13 @@ interface GestureState {
   lastY: number;
   moved: boolean;
   objectId?: string;
+  corner?: 'nw' | 'ne' | 'se' | 'sw';
   startWorld?: { x: number; y: number };
   startObject?: { x: number; y: number; z: number };
+  startPositions?: { id: string; x: number; y: number; z: number }[];
+  resize?: ResizeStart;
+  baseSelection?: string[];
+  marquee?: MarqueeRect;
   pointerId: number;
 }
 
@@ -73,16 +110,20 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
     deck,
     mode,
     selectedObjectId = null,
+    selectedObjectIds = [],
     cameraRequest = null,
     imageRetry,
     initialView,
     onViewChange,
     onSelect,
+    onSelectMany,
     onMoveObject,
+    onResizeObject,
     onImageError,
     onAddText,
     onAddShape,
     onAddImageFile,
+    onAddFile,
     onPickImage,
     onTextCommit,
     onGestureEnd,
@@ -98,6 +139,9 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
   const [showGrid, setShowGrid] = useState(true);
   const [editing, setEditing] = useState<EditingState | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [marquee, setMarquee] = useState<MarqueeRect | null>(null);
+  const [mediaPanel, setMediaPanel] = useState<MediaPanelState | null>(null);
+  const dismissedMediaRef = useRef<string | null>(null);
   const gesture = useRef<GestureState | null>(null);
   const wheelTimer = useRef<number>();
   const zoomBase = useRef((initialView ?? deck.lastView).distance);
@@ -110,6 +154,7 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
   const initialViewRef = useRef(initialView ?? deck.lastView);
   const deckRef = useRef(deck);
   const selectedPropRef = useRef(selectedObjectId);
+  const selectionRef = useRef(selectedObjectIds);
 
   modeRef.current = mode;
   editingRef.current = editing;
@@ -119,6 +164,16 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
   stageDoubleCallbackRef.current = onStageDoubleClick;
   deckRef.current = deck;
   selectedPropRef.current = selectedObjectId;
+  selectionRef.current = selectedObjectIds;
+
+  const applySelection = (ids: string[]) => {
+    if (onSelectMany) onSelectMany(ids);
+    else onSelect?.(ids[0] ?? null);
+  };
+
+  const selectionIds = selectedObjectId
+    ? [selectedObjectId, ...selectedObjectIds.filter((id) => id !== selectedObjectId)]
+    : selectedObjectIds;
 
   useLayoutEffect(() => {
     const container = boxRef.current;
@@ -128,7 +183,7 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
       onImageError: (id, message) => imageErrorCallbackRef.current?.(id, message),
     });
     managerRef.current = manager;
-    manager.sync(deckRef.current, selectedPropRef.current, modeRef.current);
+    manager.sync(deckRef.current, selectionRef.current, modeRef.current);
     setLiveView(manager.getView());
     return () => {
       manager.dispose();
@@ -139,8 +194,9 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
   useEffect(() => {
     const manager = managerRef.current;
     if (!manager) return;
-    manager.sync(deck, selectedObjectId, mode);
-  }, [deck, selectedObjectId, mode]);
+    manager.sync(deck, selectionIds, mode);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deck, selectedObjectId, selectedObjectIds, mode]);
 
   useEffect(() => {
     managerRef.current?.setShowGrid(showGrid && mode === 'edit');
@@ -152,6 +208,46 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
     if (!manager) return;
     for (const id of Object.keys(imageRetry)) manager.retryImage(id);
   }, [imageRetry]);
+
+  useEffect(() => {
+    dismissedMediaRef.current = null;
+  }, [selectedObjectId]);
+
+  useEffect(() => {
+    if (mode !== 'edit' || !selectedObjectId) {
+      setMediaPanel(null);
+      return;
+    }
+    const object = deckRef.current.objects.find((item) => item.id === selectedObjectId);
+    if (!object || (object.type !== 'video' && object.type !== 'audio')) {
+      setMediaPanel(null);
+      return;
+    }
+    if (dismissedMediaRef.current === selectedObjectId) {
+      setMediaPanel(null);
+      return;
+    }
+    let cancelled = false;
+    const refresh = () => {
+      if (cancelled) return;
+      const manager = managerRef.current;
+      if (!manager) return;
+      const state = manager.getMediaState(selectedObjectId);
+      if (!state) return;
+      const rect = manager.projectRect(selectedObjectId);
+      const width = Math.max(296, Math.min(470, rect ? rect.width : 360));
+      const left = Math.max(8, Math.min(Math.max(8, box.width - width - 8), rect ? rect.left : 8));
+      let top = rect ? rect.top + rect.height + 10 : 8;
+      if (top + 94 > box.height) top = Math.max(8, (rect?.top ?? 0) - 94);
+      setMediaPanel({ id: selectedObjectId, name: object.name, left, top, width, state });
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 150);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [mode, selectedObjectId, box.width, box.height, deck.objects]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -221,6 +317,7 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
       focus: focusObject,
       reset: resetView,
       projectObject: (id) => managerRef.current?.projectRect(id) ?? null,
+      roamStep: (forward, right, up, dt) => managerRef.current?.roamStep(forward, right, up, dt),
     }),
   );
 
@@ -269,18 +366,25 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
     };
   }, []);
 
+  const localPoint = (clientX: number, clientY: number) => {
+    const rect = boxRef.current?.getBoundingClientRect();
+    return { x: clientX - (rect?.left ?? 0), y: clientY - (rect?.top ?? 0) };
+  };
+
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0) return;
     if (editingRef.current) return;
     const manager = managerRef.current;
     if (!manager) return;
     const target = event.target as HTMLElement;
-    if (target.tagName === 'TEXTAREA' || target.closest('button')) return;
-    event.currentTarget.setPointerCapture(event.pointerId);
-    const hitId = mode === 'edit' ? manager.hitTest(event.clientX, event.clientY) : null;
-    let gestureMode: GestureMode;
-    const state: GestureState = {
-      mode: null,
+    if (
+      target.tagName === 'TEXTAREA' ||
+      target.closest('button') ||
+      target.closest('.media-overlay') ||
+      target.closest('.media-player')
+    ) {
+      return;
+    }
+    const base = {
       startX: event.clientX,
       startY: event.clientY,
       lastX: event.clientX,
@@ -288,47 +392,162 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
       moved: false,
       pointerId: event.pointerId,
     };
-    if (event.altKey) {
-      gestureMode = 'orbit';
-    } else if (mode === 'edit' && hitId) {
-      const object = deckRef.current.objects.find((item) => item.id === hitId);
-      onSelect?.(hitId);
-      if (object) {
-        gestureMode = 'object';
-        state.objectId = hitId;
-        state.startWorld = manager.screenToWorldOnPlane(event.clientX, event.clientY, object.z);
-        state.startObject = { x: object.x, y: object.y, z: object.z };
-      } else {
-        gestureMode = 'pan';
-      }
-    } else {
-      gestureMode = mode === 'edit' || mode === 'view' ? 'pan' : 'orbit';
+    if (event.button === 2) {
+      if (mode === 'present') return;
+      event.preventDefault();
+      event.currentTarget.setPointerCapture(event.pointerId);
+      gesture.current = { ...base, mode: 'pan' };
+      return;
     }
-    state.mode = gestureMode;
-    gesture.current = state;
+    if (event.button !== 0) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    if (event.altKey) {
+      gesture.current = { ...base, mode: 'orbit' };
+      return;
+    }
+    if (mode !== 'edit') {
+      gesture.current = { ...base, mode: mode === 'present' ? 'orbit' : 'pan' };
+      return;
+    }
     setEditing(null);
+    const handle = manager.hitTestHandle(event.clientX, event.clientY);
+    if (handle) {
+      const object = deckRef.current.objects.find((item) => item.id === handle.id);
+      if (object) {
+        const ratio =
+          object.type === 'image' && object.aspectLocked && object.naturalHeight > 0
+            ? object.naturalWidth / object.naturalHeight
+            : null;
+        gesture.current = {
+          ...base,
+          mode: 'resize',
+          objectId: handle.id,
+          corner: handle.corner,
+          startWorld: manager.screenToWorldOnPlane(event.clientX, event.clientY, object.z),
+          resize: {
+            x: object.x,
+            y: object.y,
+            width: object.width,
+            height: object.height,
+            rotation: object.rotation,
+            z: object.z,
+            ratio,
+          },
+        };
+        return;
+      }
+    }
+    const hitId = manager.hitTest(event.clientX, event.clientY);
+    if (hitId) {
+      const additive = event.shiftKey || event.ctrlKey || event.metaKey;
+      const current = selectionRef.current;
+      const ids = additive
+        ? current.includes(hitId)
+          ? current.filter((id) => id !== hitId)
+          : [...current, hitId]
+        : current.includes(hitId)
+          ? current
+          : [hitId];
+      applySelection(ids);
+      if (!ids.includes(hitId)) return;
+      const object = deckRef.current.objects.find((item) => item.id === hitId);
+      if (!object) return;
+      gesture.current = {
+        ...base,
+        mode: 'object',
+        objectId: hitId,
+        startWorld: manager.screenToWorldOnPlane(event.clientX, event.clientY, object.z),
+        startObject: { x: object.x, y: object.y, z: object.z },
+        startPositions: deckRef.current.objects
+          .filter((item) => ids.includes(item.id))
+          .map((item) => ({ id: item.id, x: item.x, y: item.y, z: item.z })),
+      };
+      return;
+    }
+    const start = localPoint(event.clientX, event.clientY);
+    gesture.current = {
+      ...base,
+      mode: 'marquee',
+      baseSelection: event.shiftKey || event.ctrlKey || event.metaKey ? selectionRef.current : [],
+      marquee: { left: start.x, top: start.y, width: 0, height: 0 },
+    };
+    setMarquee(null);
   };
 
   const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
     const state = gesture.current;
-    if (!state) return;
+    if (!state) {
+      if (modeRef.current === 'edit' && boxRef.current) {
+        const handle = managerRef.current?.hitTestHandle(event.clientX, event.clientY);
+        boxRef.current.style.cursor = handle
+          ? handle.corner === 'nw' || handle.corner === 'se'
+            ? 'nwse-resize'
+            : 'nesw-resize'
+          : '';
+      }
+      return;
+    }
     const dx = event.clientX - state.lastX;
     const dy = event.clientY - state.lastY;
     state.lastX = event.clientX;
     state.lastY = event.clientY;
-    const totalX = event.clientX - state.startX;
-    const totalY = event.clientY - state.startY;
-    if (!state.moved && Math.hypot(totalX, totalY) > 4) state.moved = true;
+    if (!state.moved && Math.hypot(event.clientX - state.startX, event.clientY - state.startY) > 4) {
+      state.moved = true;
+    }
+    if (state.mode === 'marquee') {
+      const rect = boxRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const x1 = state.startX - rect.left;
+      const y1 = state.startY - rect.top;
+      const x2 = event.clientX - rect.left;
+      const y2 = event.clientY - rect.top;
+      const next = {
+        left: Math.min(x1, x2),
+        top: Math.min(y1, y2),
+        width: Math.abs(x2 - x1),
+        height: Math.abs(y2 - y1),
+      };
+      state.marquee = next;
+      if (state.moved) setMarquee(next);
+      return;
+    }
     if (!state.moved) return;
     const manager = managerRef.current;
     if (!manager) return;
-    if (state.mode === 'object' && state.objectId && state.startWorld && state.startObject) {
-      const point = manager.screenToWorldOnPlane(event.clientX, event.clientY, state.startObject.z);
-      onMoveObject?.(
-        state.objectId,
-        state.startObject.x + (point.x - state.startWorld.x),
-        state.startObject.y + (point.y - state.startWorld.y),
+    if (state.mode === 'object' && state.startWorld && state.startPositions) {
+      const point = manager.screenToWorldOnPlane(
+        event.clientX,
+        event.clientY,
+        state.startObject?.z ?? state.startPositions[0]?.z ?? 0,
       );
+      const worldX = point.x - state.startWorld.x;
+      const worldY = point.y - state.startWorld.y;
+      for (const start of state.startPositions) {
+        onMoveObject?.(start.id, start.x + worldX, start.y + worldY);
+      }
+    } else if (state.mode === 'resize' && state.resize && state.startWorld && state.corner) {
+      const start = state.resize;
+      const point = manager.screenToWorldOnPlane(event.clientX, event.clientY, start.z);
+      const rad = (start.rotation * Math.PI) / 180;
+      const cos = Math.cos(rad);
+      const sin = Math.sin(rad);
+      const wx = point.x - state.startWorld.x;
+      const wy = point.y - state.startWorld.y;
+      const lx = wx * cos + wy * sin;
+      const ly = -wx * sin + wy * cos;
+      const sx = state.corner.includes('e') ? 1 : -1;
+      const sy = state.corner.includes('s') ? 1 : -1;
+      let width = Math.max(8, start.width + sx * lx);
+      let height = Math.max(8, start.height + sy * ly);
+      if (start.ratio) {
+        if (Math.abs(sx * lx) >= Math.abs(sy * ly)) height = Math.max(8, width / start.ratio);
+        else width = Math.max(8, height * start.ratio);
+      }
+      const dw = width - start.width;
+      const dh = height - start.height;
+      const cx = start.x + (sx * dw) / 2 * cos - (sy * dh) / 2 * sin;
+      const cy = start.y + (sx * dw) / 2 * sin + (sy * dh) / 2 * cos;
+      onResizeObject?.(state.objectId!, { x: cx, y: cy, width, height });
     } else if (state.mode === 'orbit') {
       manager.orbitBy(dx, dy);
     } else if (state.mode === 'pan') {
@@ -340,21 +559,30 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
     const state = gesture.current;
     if (!state) return;
     gesture.current = null;
+    setMarquee(null);
+    if (boxRef.current) boxRef.current.style.cursor = '';
     try {
       event.currentTarget.releasePointerCapture(state.pointerId);
     } catch {
       // ignore
     }
+    if (state.mode === 'marquee') {
+      const rect = state.marquee;
+      if (state.moved && rect && rect.width > 4 && rect.height > 4) {
+        const manager = managerRef.current;
+        const ids = manager?.hitTestRect(rect.left, rect.top, rect.width, rect.height) ?? [];
+        const merged = [...new Set([...(state.baseSelection ?? []), ...ids])];
+        applySelection(merged);
+      } else if ((state.baseSelection ?? []).length === 0) {
+        applySelection([]);
+      }
+    }
     if (state.moved) onGestureEnd?.();
     if (mode === 'edit' || mode === 'view') {
       commitView();
     }
-    if (!state.moved) {
-      if (mode === 'edit' && !state.objectId) {
-        onSelect?.(null);
-      } else if (mode === 'present') {
-        stageClickCallbackRef.current?.();
-      }
+    if (!state.moved && mode === 'present') {
+      stageClickCallbackRef.current?.();
     }
   };
 
@@ -369,7 +597,15 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
     const id = manager.hitTest(event.clientX, event.clientY);
     if (!id) return;
     const object = deckRef.current.objects.find((item) => item.id === id);
-    if (!object || object.type !== 'text') return;
+    if (!object) return;
+    if (object.type === 'video' || object.type === 'audio') {
+      dismissedMediaRef.current = null;
+      onSelect?.(id);
+      const state = manager.getMediaState(id);
+      if (state) manager.toggleMedia(id);
+      return;
+    }
+    if (object.type !== 'text') return;
     const rect = manager.projectRect(id);
     if (!rect) return;
     onSelect?.(id);
@@ -400,7 +636,17 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
     if (!manager) return;
     const z = nextDepth(deckRef.current.objects);
     const point = manager.screenToWorldOnPlane(event.clientX, event.clientY, z);
-    onAddImageFile?.(file, point);
+    if (onAddFile) onAddFile(file, point);
+    else onAddImageFile?.(file, point);
+  };
+
+  const mediaCommand = (id: string, action: 'toggle' | 'seek' | 'volume' | 'mute', value?: number) => {
+    const manager = managerRef.current;
+    if (!manager) return;
+    if (action === 'toggle') manager.toggleMedia(id);
+    else if (action === 'seek') manager.seekMedia(id, value ?? 0);
+    else if (action === 'volume') manager.setMediaVolume(id, value ?? 0);
+    else manager.setMediaMuted(id, !(manager.getMediaState(id)?.muted ?? false));
   };
 
   const canFocus = mode === 'edit' && selectedObjectId && deck.objects.some((item) => item.id === selectedObjectId);
@@ -522,7 +768,37 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
           />
         )}
 
-        {dragOver && <div className="stage-drop-hint">松开以放置图片</div>}
+        {mediaPanel && (
+          <MediaPlayer
+            left={mediaPanel.left}
+            top={mediaPanel.top}
+            width={mediaPanel.width}
+            name={mediaPanel.name}
+            state={mediaPanel.state}
+            onToggle={() => mediaCommand(mediaPanel.id, 'toggle')}
+            onSeek={(time) => mediaCommand(mediaPanel.id, 'seek', time)}
+            onVolume={(volume) => mediaCommand(mediaPanel.id, 'volume', volume)}
+            onToggleMute={() => mediaCommand(mediaPanel.id, 'mute')}
+            onClose={() => {
+              dismissedMediaRef.current = mediaPanel.id;
+              setMediaPanel(null);
+            }}
+          />
+        )}
+
+        {marquee && (
+          <div
+            className="stage-marquee"
+            style={{
+              left: marquee.left,
+              top: marquee.top,
+              width: marquee.width,
+              height: marquee.height,
+            }}
+          />
+        )}
+
+        {dragOver && <div className="stage-drop-hint">松开以放置素材</div>}
       </div>
 
       {mode !== 'present' && (

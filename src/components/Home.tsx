@@ -12,6 +12,7 @@ import { ConfirmDialog, Modal } from './ui';
 
 interface HomeProps {
   onOpen: (id: string) => void;
+  onOpenAssets: () => void;
 }
 
 function DeckThumb({ summary }: { summary: DeckSummary }) {
@@ -55,6 +56,20 @@ function DeckThumb({ summary }: { summary: DeckSummary }) {
             </div>
           );
         }
+        if (object.type === 'video' || object.type === 'audio' || object.type === 'model') {
+          return (
+            <div
+              className={`thumb-object thumb-media is-${object.type}`}
+              key={object.id}
+              style={place(object)}
+            >
+              <Icon
+                name={object.type === 'video' ? 'play' : object.type === 'audio' ? 'audio' : 'model'}
+                size={11}
+              />
+            </div>
+          );
+        }
         if (object.type === 'shape') {
           return (
             <div
@@ -87,7 +102,7 @@ function DeckThumb({ summary }: { summary: DeckSummary }) {
   );
 }
 
-export function Home({ onOpen }: HomeProps) {
+export function Home({ onOpen, onOpenAssets }: HomeProps) {
   const [decks, setDecks] = useState<DeckSummary[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [renameTarget, setRenameTarget] = useState<DeckSummary | null>(null);
@@ -223,6 +238,19 @@ export function Home({ onOpen }: HomeProps) {
             <Icon name="upload" size={16} />
             导入
           </button>
+          <button className="btn btn-ghost" onClick={onOpenAssets}>
+            <Icon name="folder" size={16} />
+            资源库
+          </button>
+          <a
+            className="btn btn-ghost"
+            href="docs/02-PRD-3d-slide.html"
+            target="_blank"
+            rel="noreferrer"
+          >
+            <Icon name="text" size={16} />
+            产品说明
+          </a>
           <button className="btn btn-primary" disabled={busy} onClick={() => void create()}>
             <Icon name="plus" size={16} />
             新建演示

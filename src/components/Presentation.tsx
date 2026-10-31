@@ -21,6 +21,8 @@ export function Presentation({ deck, startIndex, entryView, fullscreenFailed, on
   const exiting = useRef(false);
   const clickTimer = useRef<number>();
   const hideTimer = useRef<number>();
+  const pressedKeys = useRef<Set<string>>(new Set());
+  const roamRef = useRef(false);
   const hadFullscreen = useRef(Boolean(document.fullscreenElement));
   const reduced = useRef(
     typeof window !== 'undefined' && window.matchMedia
@@ -28,6 +30,7 @@ export function Presentation({ deck, startIndex, entryView, fullscreenFailed, on
       : false,
   );
   const [index, setIndex] = useState(startIndex);
+  const [roam, setRoam] = useState(false);
   const [hint, setHint] = useState(() => {
     try {
       return localStorage.getItem(HINT_KEY) !== '1';
@@ -39,6 +42,7 @@ export function Presentation({ deck, startIndex, entryView, fullscreenFailed, on
   const [cursorHidden, setCursorHidden] = useState(false);
 
   indexRef.current = index;
+  roamRef.current = roam;
 
   const currentFrame = index >= 0 ? deck.frames[index] : null;
   const initialView = currentFrame?.view ?? entryView;
@@ -87,6 +91,33 @@ export function Presentation({ deck, startIndex, entryView, fullscreenFailed, on
     void flyTo(frame?.view ?? entryView, 0.6);
   };
 
+  const toggleRoam = () => {
+    if (exiting.current) return;
+    pressedKeys.current.clear();
+    if (clickTimer.current) window.clearTimeout(clickTimer.current);
+    setRoam((value) => !value);
+  };
+
+  useEffect(() => {
+    if (!roam) return;
+    let raf = 0;
+    let last = performance.now();
+    const loop = (now: number) => {
+      const dt = Math.min(0.06, Math.max(0, (now - last) / 1000));
+      last = now;
+      const keys = pressedKeys.current;
+      const forward = (keys.has('w') ? 1 : 0) - (keys.has('s') ? 1 : 0);
+      const right = (keys.has('d') ? 1 : 0) - (keys.has('a') ? 1 : 0);
+      const up = (keys.has('e') ? 1 : 0) - (keys.has('q') ? 1 : 0);
+      if (forward !== 0 || right !== 0 || up !== 0) {
+        stageRef.current?.roamStep(forward, right, up, dt);
+      }
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [roam]);
+
   useEffect(() => {
     const first = deck.frames[startIndex]?.view ?? entryView;
     void stageRef.current?.flyTo(first, 0.01);
@@ -107,20 +138,48 @@ export function Presentation({ deck, startIndex, entryView, fullscreenFailed, on
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
+      const key = event.key.toLowerCase();
       if (event.key === 'Escape') {
         event.preventDefault();
         finish();
-      } else if (event.key === 'ArrowRight' || event.key === ' ' || event.key === 'Enter') {
+        return;
+      }
+      if (key === 'm') {
+        event.preventDefault();
+        toggleRoam();
+        return;
+      }
+      if (roamRef.current) {
+        if (key === 'w' || key === 'a' || key === 's' || key === 'd' || key === 'q' || key === 'e') {
+          event.preventDefault();
+          pressedKeys.current.add(key);
+          return;
+        }
+        if (event.key === 'ArrowRight' || event.key === 'ArrowLeft' || event.key === ' ' || event.key === 'Enter') {
+          event.preventDefault();
+          return;
+        }
+        if (key === 'r') {
+          event.preventDefault();
+          returnToPath();
+        }
+        return;
+      }
+      if (event.key === 'ArrowRight' || event.key === ' ' || event.key === 'Enter') {
         event.preventDefault();
         go(1);
       } else if (event.key === 'ArrowLeft') {
         event.preventDefault();
         go(-1);
-      } else if (event.key === 'r' || event.key === 'R') {
+      } else if (key === 'r') {
         event.preventDefault();
         returnToPath();
       }
     };
+    const keyup = (event: KeyboardEvent) => {
+      pressedKeys.current.delete(event.key.toLowerCase());
+    };
+    const clearKeys = () => pressedKeys.current.clear();
     const fullscreenHandler = () => {
       if (document.fullscreenElement) {
         hadFullscreen.current = true;
@@ -131,9 +190,13 @@ export function Presentation({ deck, startIndex, entryView, fullscreenFailed, on
       }
     };
     window.addEventListener('keydown', handler);
+    window.addEventListener('keyup', keyup);
+    window.addEventListener('blur', clearKeys);
     document.addEventListener('fullscreenchange', fullscreenHandler);
     return () => {
       window.removeEventListener('keydown', handler);
+      window.removeEventListener('keyup', keyup);
+      window.removeEventListener('blur', clearKeys);
       document.removeEventListener('fullscreenchange', fullscreenHandler);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -165,7 +228,7 @@ export function Presentation({ deck, startIndex, entryView, fullscreenFailed, on
           mode="present"
           initialView={initialView}
           onStageClick={() => {
-            if (busy.current) return;
+            if (busy.current || roamRef.current) return;
             if (clickTimer.current) window.clearTimeout(clickTimer.current);
             clickTimer.current = window.setTimeout(() => go(1), 260);
           }}
@@ -178,6 +241,39 @@ export function Presentation({ deck, startIndex, entryView, fullscreenFailed, on
 
       {deck.showProgress && <div className="present-progress">{progress}</div>}
 
+      <button
+        className={`present-roam-toggle ${roam ? 'is-on' : ''}`}
+        onClick={toggleRoam}
+        aria-pressed={roam}
+        title="按 M 切换漫游模式"
+      >
+        <Icon name="focus" size={15} />
+        {roam ? '退出漫游' : '空间漫游'}
+      </button>
+
+      {roam && (
+        <div className="present-roam-hint">
+          <span>
+            <b>W / S</b> 前进 / 后退
+          </span>
+          <span>
+            <b>A / D</b> 左移 / 右移
+          </span>
+          <span>
+            <b>Q / E</b> 下降 / 上升
+          </span>
+          <span>
+            <b>拖拽 / 滚轮</b> 转向 / 推拉
+          </span>
+          <span>
+            <b>R</b> 回到路径
+          </span>
+          <span>
+            <b>Esc</b> 退出演示
+          </span>
+        </div>
+      )}
+
       {hint && (
         <div className="present-hint">
           <span>
@@ -188,6 +284,9 @@ export function Presentation({ deck, startIndex, entryView, fullscreenFailed, on
           </span>
           <span>
             <b>拖拽 / 滚轮</b> 自由浏览
+          </span>
+          <span>
+            <b>M</b> 空间漫游
           </span>
           <span>
             <b>Esc</b> 退出
