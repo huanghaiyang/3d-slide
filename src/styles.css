@@ -3540,7 +3540,458 @@ button:disabled {
   bottom: 58px;
 }
 
+/* --------------------------- Present tools / media ---------------------- */
+
+.present-tools {
+  position: fixed;
+  top: 20px;
+  right: 24px;
+  z-index: 331;
+  display: flex;
+  gap: 6px;
+}
+
+.present-tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  background: rgba(9, 13, 19, 0.6);
+  color: rgba(230, 238, 250, 0.82);
+  font-size: 11px;
+  backdrop-filter: blur(8px);
+}
+
+.present-tool:hover {
+  border-color: rgba(94, 234, 212, 0.55);
+  color: #fff;
+}
+
+.present-tool.is-on {
+  border-color: rgba(94, 234, 212, 0.7);
+  background: rgba(15, 118, 110, 0.42);
+  color: #eafffb;
+}
+
+.present-media-bar {
+  position: fixed;
+  left: 50%;
+  bottom: 62px;
+  z-index: 332;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(720px, 92vw);
+  padding: 7px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 12px;
+  background: rgba(9, 13, 19, 0.74);
+  color: rgba(230, 238, 250, 0.8);
+  backdrop-filter: blur(10px);
+}
+
+.present-media-select {
+  height: 26px;
+  max-width: 140px;
+  padding: 0 6px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 6px;
+  background: rgba(18, 26, 37, 0.92);
+  color: #dbe7f5;
+  font-size: 11px;
+  outline: none;
+}
+
+.present-media-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.present-media-btn:hover {
+  background: rgba(45, 212, 191, 0.28);
+}
+
+.present-media-time {
+  min-width: 30px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.62);
+}
+
+.present-media-range {
+  width: 150px;
+  accent-color: #2dd4bf;
+  cursor: pointer;
+}
+
+.present-media-range.is-volume {
+  width: 72px;
+}
+
+.present-media-error {
+  font-size: 10.5px;
+  color: #fca5a5;
+  white-space: nowrap;
+}
+
+/* ------------------------------ Stage draw / axes ----------------------- */
+
+.stage-box.is-drawing {
+  cursor: crosshair;
+}
+
+.stage-draw-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.stage-tools {
+  flex-wrap: wrap;
+  max-width: calc(100% - 24px);
+}
+
+.stage-axis-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 4px;
+  padding-left: 6px;
+  border-left: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.stage-axis-btn {
+  min-width: 26px;
+  height: 24px;
+  padding: 0 5px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: #8e9aab;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
+.stage-axis-btn:hover:not(:disabled) {
+  background: rgba(59, 130, 246, 0.18);
+  color: #bfdbfe;
+}
+
+.stage-axis-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* -------------------------------- Export -------------------------------- */
+
+.export-preview {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  margin-bottom: 10px;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 10px;
+  overflow: hidden;
+  background: #080b11;
+}
+
+.export-canvas-host {
+  position: absolute;
+  inset: 0;
+}
+
+.export-canvas-host canvas {
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.export-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.export-progress-bar {
+  height: 100%;
+  background: var(--teal);
+  transition: width 0.18s linear;
+}
+
+.export-status {
+  margin: 0 0 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--ink-2);
+  word-break: break-all;
+}
+
+.export-status.is-error {
+  color: #b91c1c;
+}
+
+.export-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 18px;
+}
+
+.export-grid .field-block {
+  margin: 0;
+}
+
+.export-select {
+  width: 100%;
+}
+
+.export-value {
+  font-family: var(--mono);
+  font-size: 11px;
+  text-align: right;
+  white-space: nowrap;
+  color: var(--ink-2);
+}
+
+.export-value.is-block {
+  display: block;
+  text-align: left;
+  white-space: normal;
+  line-height: 1.5;
+}
+
+.export-foot-note {
+  margin-right: auto;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--ink-3);
+}
+
+.export-hint {
+  margin: 12px 0 0;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--ink-3);
+}
+
+.export-hint strong {
+  color: #b45309;
+  font-weight: 600;
+}
+
+/* ------------------------------ AI panel -------------------------------- */
+
+.ai-section {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.ai-section:first-child {
+  padding-top: 0;
+}
+
+.ai-section:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.ai-section h4 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--ink);
+}
+
+.ai-config-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 12px;
+}
+
+.ai-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.ai-field-wide {
+  grid-column: 1 / -1;
+}
+
+.ai-input {
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fffdf9;
+  color: var(--ink);
+  font-size: 12px;
+  outline: none;
+}
+
+.ai-input:focus,
+.ai-textarea:focus {
+  border-color: var(--teal-2);
+  box-shadow: 0 0 0 3px var(--teal-soft);
+}
+
+.ai-inline {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 9px;
+}
+
+.ai-note {
+  margin: 0;
+  font-size: 10.5px;
+  line-height: 1.6;
+  color: var(--ink-3);
+}
+
+.ai-chat-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.ai-chat-head h4 {
+  margin: 0;
+}
+
+.ai-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+
+.ai-toggle input {
+  accent-color: var(--teal);
+}
+
+.ai-history {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 180px;
+  margin-bottom: 10px;
+  padding: 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: var(--paper-2, #f7f3ec);
+  overflow-y: auto;
+}
+
+.ai-bubble {
+  padding: 7px 10px;
+  border-radius: 8px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ai-bubble.is-user {
+  align-self: flex-end;
+  background: rgba(20, 184, 166, 0.12);
+  color: var(--ink);
+}
+
+.ai-bubble.is-assistant {
+  align-self: flex-start;
+  background: #fffdf9;
+  border: 1px solid var(--line-soft);
+  color: var(--ink-2);
+}
+
+.ai-textarea {
+  width: 100%;
+  min-height: 68px;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fffdf9;
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.55;
+  resize: vertical;
+  outline: none;
+}
+
+.ai-error {
+  margin: 8px 0 0;
+  padding: 7px 9px;
+  border: 1px solid rgba(185, 28, 28, 0.24);
+  border-radius: 7px;
+  background: rgba(185, 28, 28, 0.06);
+  font-size: 11px;
+  line-height: 1.55;
+  color: #991b1b;
+  white-space: pre-wrap;
+}
+
+.ai-reply {
+  margin-top: 9px;
+  padding: 9px 11px;
+  border: 1px solid rgba(20, 184, 166, 0.28);
+  border-radius: 8px;
+  background: rgba(20, 184, 166, 0.06);
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ai-code {
+  margin: 8px 0 0;
+  padding: 9px 11px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: #0f151d;
+  color: #c7d5e5;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  line-height: 1.6;
+  overflow-x: auto;
+}
+
 @media (max-width: 920px) {
+  .ai-config-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .export-grid {
+    grid-template-columns: 1fr;
+  }
+
   .asset-side {
     flex-basis: 180px;
   }

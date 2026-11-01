@@ -12,8 +12,17 @@ export interface ViewState {
   pitch: number;
 }
 
-export type ObjectType = 'text' | 'image' | 'shape' | 'video' | 'audio' | 'model';
-export type ShapeKind = 'rect' | 'roundedRect' | 'ellipse' | 'triangle' | 'diamond' | 'star' | 'arrow' | 'line';
+export type ObjectType = 'text' | 'image' | 'shape' | 'video' | 'audio' | 'model' | 'svg';
+export type ShapeKind =
+  | 'rect'
+  | 'roundedRect'
+  | 'ellipse'
+  | 'triangle'
+  | 'diamond'
+  | 'star'
+  | 'arrow'
+  | 'line'
+  | 'path';
 export type FontPreset = 'sans' | 'serif' | 'round' | 'mono';
 export type TextAlign = 'left' | 'center' | 'right';
 export type ImageFit = 'contain' | 'cover';
@@ -28,7 +37,12 @@ interface ObjectBase {
   z: number;
   width: number;
   height: number;
+  /** 绕 Z 轴旋转（度） */
   rotation: number;
+  /** 绕 X 轴倾斜（度） */
+  rotationX?: number;
+  /** 绕 Y 轴倾斜（度） */
+  rotationY?: number;
   /** 0–100 */
   opacity: number;
   visible: boolean;
@@ -43,6 +57,8 @@ export interface TextObject extends ObjectBase {
   align: TextAlign;
   color: string;
   lineHeight: number;
+  /** 3D 挤出厚度（0 表示平面文本） */
+  depth3d?: number;
 }
 
 export interface ImageObject extends ObjectBase {
@@ -60,6 +76,16 @@ export interface ShapeObject extends ObjectBase {
   fill: string;
   stroke: string | null;
   strokeWidth: number;
+  /** 自由绘制路径：归一化坐标 [x0, y0, x1, y1, ...]（0–1，原点左上） */
+  points?: number[];
+}
+
+export interface SvgObject extends ObjectBase {
+  type: 'svg';
+  src: string;
+  fit: ImageFit;
+  naturalWidth: number;
+  naturalHeight: number;
 }
 
 export interface VideoObject extends ObjectBase {
@@ -99,7 +125,14 @@ export interface ModelObject extends ObjectBase {
   rotateSpeed: number;
 }
 
-export type SlideObject = TextObject | ImageObject | ShapeObject | VideoObject | AudioObject | ModelObject;
+export type SlideObject =
+  | TextObject
+  | ImageObject
+  | ShapeObject
+  | VideoObject
+  | AudioObject
+  | ModelObject
+  | SvgObject;
 
 export interface Frame {
   id: string;
@@ -157,6 +190,7 @@ export const OBJECT_LABELS: Record<ObjectType, string> = {
   video: '视频',
   audio: '音频',
   model: '3D 模型',
+  svg: 'SVG 图形',
 };
 
 export const MODEL_FORMAT_LABELS: Record<ModelFormat, string> = {
@@ -180,6 +214,7 @@ export const SHAPE_LABELS: Record<ShapeKind, string> = {
   star: '星形',
   arrow: '箭头',
   line: '直线',
+  path: '自由路径',
 };
 
 export const FONT_LABELS: Record<FontPreset, string> = {

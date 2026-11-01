@@ -3,6 +3,7 @@ import { LIMITS } from './constants';
 import { formatBytes, isAcceptedImage, readImageFile } from './image';
 import { mediaKindOf, readMediaFile } from './media';
 import { modelFormatOf } from './model3d';
+import { isSvgFile, readSvgFile } from './svg';
 
 export type AssetKind = 'image' | 'video' | 'audio' | 'model' | 'file';
 
@@ -66,6 +67,7 @@ function extOf(name: string): string {
 }
 
 export function assetKindOf(file: File): AssetKind {
+  if (isSvgFile(file)) return 'image';
   if (isAcceptedImage(file)) return 'image';
   if (modelFormatOf(file.name)) return 'model';
   const media = mediaKindOf(file);
@@ -167,7 +169,9 @@ export async function readAssetFile(file: File): Promise<AssetPayload> {
     size: file.size,
   };
   if (kind === 'image') {
-    const result = await readImageFile(file);
+    const result = isSvgFile(file)
+      ? await readSvgFile(file)
+      : await readImageFile(file);
     return {
       src: result.src,
       meta: {

@@ -9,6 +9,7 @@ import type {
   ShapeKind,
   ShapeObject,
   SlideObject,
+  SvgObject,
   TextObject,
   VideoObject,
   ViewState,
@@ -24,6 +25,15 @@ export type HandleCorner = 'nw' | 'ne' | 'se' | 'sw';
 
 interface SceneCallbacks {
   onImageError: (id: string, message: string) => void;
+  onXRChange?: (active: boolean) => void;
+}
+
+export type LensEffect = 'none' | 'fisheye';
+export type SpaceMode = 'none' | 'stars';
+
+interface XRSessionLike {
+  end: () => Promise<void>;
+  addEventListener: (type: string, listener: () => void) => void;
 }
 
 interface ImageState {
@@ -99,7 +109,6 @@ export class SceneManager {
   private gridKey = '';
   private width = 960;
   private height = 540;
-  private raf = 0;
   private disposed = false;
   private animation: {
     from: ViewState;
@@ -120,6 +129,19 @@ export class SceneManager {
   private dashedGray: THREE.LineDashedMaterial;
   private handleMaterial: THREE.PointsMaterial;
   private maxAnisotropy = 4;
+  private deckBackground = '#10161F';
+  private spaceMode: SpaceMode = 'none';
+  private stars: THREE.Points | null = null;
+  private axes: THREE.Group | null = null;
+  private showAxes = false;
+  private lensEffect: LensEffect = 'none';
+  private lensStrength = 0.45;
+  private lensTarget: THREE.WebGLRenderTarget | null = null;
+  private lensScene: THREE.Scene | null = null;
+  private lensCamera: THREE.OrthographicCamera | null = null;
+  private lensMaterial: THREE.ShaderMaterial | null = null;
+  private xrRig: THREE.Group | null = null;
+  private xrActive = false;
 
   constructor(
     container: HTMLElement,
@@ -127,6 +149,7 @@ export class SceneManager {
     initialView: ViewState,
     mode: StageMode,
     callbacks: SceneCallbacks,
+    options: { autoStart?: boolean } = {},
   ) {
     this.mode = mode;
     this.callbacks = callbacks;
@@ -198,8 +221,9 @@ export class SceneManager {
 
     this.applyView(this.view);
     this.resize(this.width, this.height);
+    this.renderer.xr.enabled = true;
     this.tick = this.tick.bind(this);
-    this.raf = requestAnimationFrame(this.tick);
+    if (options.autoStart !== false) this.renderer.setAnimationLoop(this.tick);
   }
 
   private createPlaceholderTexture(): THREE.CanvasTexture {
@@ -278,7 +302,8 @@ export class SceneManager {
   }
 
   setBackground(color: string) {
-    (this.scene.background as THREE.Color).set(color);
+    this.deckBackground = color;
+    if (this.spaceMode === 'none') (this.scene.background as THREE.Color).set(color);
   }
 
   setMode(mode: StageMode) {
@@ -292,6 +317,348 @@ export class SceneManager {
   setShowGrid(show: boolean) {
     this.showGrid = show;
     this.gridDirty();
+  }
+
+  setLens(effect: LensEffect, strength = this.lensStrength) {
+    this.lensEffect = effect;
+    this.lensStrength = Math.max(0, Math.min(1, strength));
+    if (effect === 'fisheye') {
+      this.ensureLens();
+      if (this.lensMaterial) this.lensMaterial.uniforms.uStrength.value = this.lensStrength;
+      this.updateLensTarget();
+    }
+  }
+
+  getLens(): { effect: LensEffect; strength: number } {
+    return { effect: this.lensEffect, strength: this.lensStrength };
+  }
+
+  setSpaceMode(mode: SpaceMode) {
+    this.spaceMode = mode;
+    if (mode === 'stars') {
+      this.ensureStars();
+      if (this.stars) this.stars.visible = true;
+      (this.scene.background as THREE.Color).set('#04060D');
+    } else {
+      if (this.stars) this.stars.visible = false;
+      (this.scene.background as THREE.Color).set(this.deckBackground);
+    }
+  }
+
+  setShowAxes(show: boolean) {
+    this.showAxes = show;
+    if (show) this.ensureAxes();
+    if (this.axes) this.axes.visible = show;
+  }
+
+  getShowAxes(): boolean {
+    return this.showAxes;
+  }
+
+  setView(view: ViewState) {
+    this.animation?.resolve();
+    this.animation = null;
+    this.applyView({ ...view, target: { ...view.target } });
+  }
+
+  getCanvas(): HTMLCanvasElement {
+    return this.renderer.domElement;
+  }
+
+  renderOnce() {
+    if (this.disposed) return;
+    this.tick(performance.now());
+  }
+
+  setPixelRatio(ratio: number) {
+    this.renderer.setPixelRatio(Math.max(0.5, Math.min(3, ratio)));
+    this.resize(this.width, this.height);
+    if (this.lensMaterial) this.updateLensTarget();
+  }
+
+  /** 等待图片与模型资源就绪，用于离屏导出前预热 */
+  async waitForAssets(timeout = 4000): Promise<void> {
+    const started = performance.now();
+    while (!this.disposed && performance.now() - started < timeout) {
+      let loadingModels = 0;
+      for (const node of this.nodes.values()) {
+        if (node.model?.status === 'loading') loadingModels += 1;
+      }
+      if (this.imagePending.size === 0 && loadingModels === 0) return;
+      this.renderOnce();
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 100));
+    }
+  }
+
+  stopLoop() {
+    this.renderer.setAnimationLoop(null);
+  }
+
+  startLoop() {
+    if (this.disposed) return;
+    this.renderer.setAnimationLoop(this.tick);
+  }
+
+  getXRSupported(): Promise<boolean> {
+    const xr = (navigator as unknown as {
+      xr?: { isSessionSupported?: (mode: string) => Promise<boolean> };
+    }).xr;
+    if (!xr || typeof xr.isSessionSupported !== 'function') return Promise.resolve(false);
+    return xr.isSessionSupported('immersive-vr').catch(() => false);
+  }
+
+  async enterXR(): Promise<boolean> {
+    const xr = (navigator as unknown as {
+      xr?: { requestSession: (mode: string, init?: unknown) => Promise<XRSessionLike> };
+    }).xr;
+    if (!xr || typeof xr.requestSession !== 'function') return false;
+    if (this.xrActive) return true;
+    try {
+      const session = await xr.requestSession('immersive-vr', {
+        optionalFeatures: ['local-floor', 'bounded-floor'],
+      });
+      this.renderer.xr.setReferenceSpaceType('local-floor');
+      await this.renderer.xr.setSession(session as unknown as XRSession);
+      this.xrSession = session;
+      this.xrActive = true;
+      this.setupXrRig();
+      session.addEventListener('end', this.handleXrEnd);
+      this.callbacks.onXRChange?.(true);
+      return true;
+    } catch {
+      this.restoreFromXr();
+      this.xrActive = false;
+      return false;
+    }
+  }
+
+  async exitXR() {
+    const session = this.xrSession;
+    this.xrSession = null;
+    if (!session) return;
+    try {
+      await session.end();
+    } catch {
+      this.handleXrEnd();
+    }
+  }
+
+  private handleXrEnd = () => {
+    this.xrSession = null;
+    this.restoreFromXr();
+    this.xrActive = false;
+    this.callbacks.onXRChange?.(false);
+  };
+
+  /** VR：把画板缩放到 4 米宽、放到眼前 5 米处，像坐在影院里 */
+  private setupXrRig() {
+    if (this.xrRig) return;
+    const rig = new THREE.Group();
+    rig.position.set(0, 1.55, -5);
+    const scale = 4 / Math.max(1, this.deckWidth());
+    // 内容组已翻转 X/Y；VR 相机是标准右手系，rig 再翻转 X/Y 才与桌面画面一致且正立
+    rig.scale.set(-scale, -scale, scale);
+    this.scene.add(rig);
+    rig.add(this.objectsRoot);
+    this.objectsRoot.position.set(0, 0, 0);
+    this.xrRig = rig;
+    if (this.grid) this.grid.visible = false;
+    if (this.axes) this.axes.visible = false;
+  }
+
+  private restoreFromXr() {
+    if (!this.xrRig) return;
+    this.xrRig.remove(this.objectsRoot);
+    this.scene.add(this.objectsRoot);
+    this.scene.remove(this.xrRig);
+    this.xrRig = null;
+    if (this.axes) this.axes.visible = this.showAxes;
+  }
+
+  private deckWidth(): number {
+    let width = 0;
+    for (const node of this.nodes.values()) width = Math.max(width, node.data.width);
+    return Math.max(1600, width);
+  }
+
+  private xrSession: XRSessionLike | null = null;
+
+  private ensureLens() {
+    if (this.lensScene && this.lensMaterial) return;
+    const lensScene = new THREE.Scene();
+    const lensCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    const lensMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        tDiffuse: { value: null },
+        uStrength: { value: this.lensStrength },
+        uVignette: { value: 0.6 },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = vec4(position.xy, 0.0, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D tDiffuse;
+        uniform float uStrength;
+        uniform float uVignette;
+        varying vec2 vUv;
+        void main() {
+          vec2 p = vUv * 2.0 - 1.0;
+          float r2 = dot(p, p);
+          float k = uStrength * 0.55;
+          vec2 warped = p * (1.0 + k * r2) / (1.0 + k * 2.0);
+          vec2 uv = warped * 0.5 + 0.5;
+          vec3 col = texture2D(tDiffuse, clamp(uv, vec2(0.0), vec2(1.0))).rgb;
+          float vignette = smoothstep(1.55, 0.45, length(p));
+          col *= mix(1.0, vignette, uVignette);
+          gl_FragColor = vec4(col, 1.0);
+        }
+      `,
+      depthTest: false,
+      depthWrite: false,
+    });
+    const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), lensMaterial);
+    quad.frustumCulled = false;
+    lensScene.add(quad);
+    this.lensScene = lensScene;
+    this.lensCamera = lensCamera;
+    this.lensMaterial = lensMaterial;
+    this.updateLensTarget();
+  }
+
+  private updateLensTarget() {
+    if (!this.lensMaterial) return;
+    const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
+    const width = Math.max(1, Math.round(size.x));
+    const height = Math.max(1, Math.round(size.y));
+    if (!this.lensTarget) {
+      this.lensTarget = new THREE.WebGLRenderTarget(width, height, {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        depthBuffer: true,
+        stencilBuffer: false,
+      });
+    } else {
+      this.lensTarget.setSize(width, height);
+    }
+    this.lensMaterial.uniforms.tDiffuse.value = this.lensTarget.texture;
+  }
+
+  private ensureStars() {
+    if (this.stars) return;
+    const count = 4200;
+    const positions = new Float32Array(count * 3);
+    const colors = new Float32Array(count * 3);
+    const radius = 26000;
+    for (let i = 0; i < count; i += 1) {
+      const u = Math.random() * 2 - 1;
+      const theta = Math.random() * Math.PI * 2;
+      const r = Math.sqrt(1 - u * u);
+      positions[i * 3] = Math.cos(theta) * r * radius;
+      positions[i * 3 + 1] = u * radius;
+      positions[i * 3 + 2] = Math.sin(theta) * r * radius;
+      const warm = Math.random();
+      colors[i * 3] = 0.75 + warm * 0.25;
+      colors[i * 3 + 1] = 0.8 + warm * 0.18;
+      colors[i * 3 + 2] = 1;
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    const material = new THREE.PointsMaterial({
+      size: 46,
+      sizeAttenuation: true,
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.92,
+      depthWrite: false,
+    });
+    const stars = new THREE.Points(geometry, material);
+    stars.renderOrder = -100;
+    stars.frustumCulled = false;
+    this.scene.add(stars);
+    this.stars = stars;
+  }
+
+  private ensureAxes() {
+    if (this.axes) return;
+    const axes = new THREE.Group();
+    axes.renderOrder = 1100;
+    const length = 1900;
+    const definitions: { axis: 'x' | 'y' | 'z'; color: number; hex: string }[] = [
+      { axis: 'x', color: 0xf87171, hex: '#F87171' },
+      { axis: 'y', color: 0x34d399, hex: '#34D399' },
+      { axis: 'z', color: 0x60a5fa, hex: '#60A5FA' },
+    ];
+    for (const definition of definitions) {
+      const material = new THREE.LineBasicMaterial({
+        color: definition.color,
+        transparent: true,
+        opacity: 0.9,
+        depthTest: false,
+        depthWrite: false,
+      });
+      const positions =
+        definition.axis === 'x'
+          ? [-length, 0, 0, length, 0, 0]
+          : definition.axis === 'y'
+            ? [0, -length, 0, 0, length, 0]
+            : [0, 0, -length, 0, 0, length];
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+      const line = new THREE.LineSegments(geometry, material);
+      line.renderOrder = 1100;
+      axes.add(line);
+      const ends: { label: string; position: [number, number, number] }[] =
+        definition.axis === 'x'
+          ? [
+              { label: '+X', position: [length + 110, 0, 0] },
+              { label: '-X', position: [-length - 110, 0, 0] },
+            ]
+          : definition.axis === 'y'
+            ? [
+                { label: '+Y', position: [0, length + 110, 0] },
+                { label: '-Y', position: [0, -length - 110, 0] },
+              ]
+            : [
+                { label: '+Z', position: [0, 0, length + 110] },
+                { label: '-Z', position: [0, 0, -length - 110] },
+              ];
+      for (const end of ends) {
+        const sprite = this.createAxisLabel(end.label, definition.hex);
+        sprite.position.set(...end.position);
+        axes.add(sprite);
+      }
+    }
+    this.scene.add(axes);
+    this.axes = axes;
+  }
+
+  private createAxisLabel(text: string, color: string): THREE.Sprite {
+    const canvas = document.createElement('canvas');
+    canvas.width = 256;
+    canvas.height = 256;
+    const ctx = canvas.getContext('2d')!;
+    ctx.font = '700 128px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = color;
+    ctx.fillText(text, 128, 132);
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    const material = new THREE.SpriteMaterial({
+      map: texture,
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+    });
+    const sprite = new THREE.Sprite(material);
+    sprite.scale.set(300, 300, 1);
+    sprite.renderOrder = 1101;
+    return sprite;
   }
 
   setSelected(ids: string[]) {
@@ -310,6 +677,7 @@ export class SceneManager {
     this.camera.aspect = ASPECT;
     this.camera.updateProjectionMatrix();
     this.gridDirty();
+    if (this.lensMaterial) this.updateLensTarget();
   }
 
   getView(): ViewState {
@@ -338,7 +706,11 @@ export class SceneManager {
       }
       node.data = object;
       node.group.position.set(object.x, object.y, object.z);
-      node.group.rotation.z = (object.rotation * Math.PI) / 180;
+      node.group.rotation.set(
+        ((object.rotationX ?? 0) * Math.PI) / 180,
+        ((object.rotationY ?? 0) * Math.PI) / 180,
+        (object.rotation * Math.PI) / 180,
+      );
       node.group.renderOrder = index;
       node.group.visible =
         mode === 'present' || mode === 'view' ? object.visible : true;
@@ -365,12 +737,12 @@ export class SceneManager {
     if (object.type === 'text') {
       const t = object as TextObject;
       return [
-        'text', t.text, t.width, t.height, t.fontSize, t.font, t.bold, t.align, t.color, t.lineHeight,
+        'text', t.text, t.width, t.height, t.fontSize, t.font, t.bold, t.align, t.color, t.lineHeight, t.depth3d ?? 0,
       ].join('|');
     }
-    if (object.type === 'image') {
-      const image = object as ImageObject;
-      return ['image', image.src, image.width, image.height, image.fit].join('|');
+    if (object.type === 'image' || object.type === 'svg') {
+      const image = object as ImageObject | SvgObject;
+      return [object.type, image.src, image.width, image.height, image.fit].join('|');
     }
     if (object.type === 'video') {
       const video = object as VideoObject;
@@ -385,7 +757,16 @@ export class SceneManager {
       return ['model', model.src, model.format, model.width, model.height].join('|');
     }
     const shape = object as ShapeObject;
-    return ['shape', shape.shape, shape.width, shape.height, shape.fill, shape.stroke ?? '', shape.strokeWidth].join('|');
+    return [
+      'shape',
+      shape.shape,
+      shape.width,
+      shape.height,
+      shape.fill,
+      shape.stroke ?? '',
+      shape.strokeWidth,
+      shape.points ? shape.points.join(',') : '',
+    ].join('|');
   }
 
   private createNode(object: SlideObject): ObjectNode {
@@ -479,6 +860,7 @@ export class SceneManager {
       opacity < 1 ||
       object.type === 'text' ||
       object.type === 'image' ||
+      object.type === 'svg' ||
       object.type === 'video' ||
       object.type === 'audio' ||
       hiddenInEdit;
@@ -524,7 +906,8 @@ export class SceneManager {
     const object = node.data;
     const group = new THREE.Group();
     group.userData.objectId = object.id;
-    // 世界坐标 Y 轴向下（与画布坐标一致），内容需翻转以保证文字/图片正立
+    // 世界坐标 Y 轴向下、相机 up=(0,-1,0)，画面相对世界是 180° 翻转；内容同时翻转 X/Y 才能正立且不镜像
+    group.scale.x = -1;
     group.scale.y = -1;
     this.buildInto(group, object, node);
     group.traverse((child) => {
@@ -544,8 +927,8 @@ export class SceneManager {
       this.buildText(group, object as TextObject, node);
       return;
     }
-    if (object.type === 'image') {
-      this.buildImage(group, object as ImageObject, node);
+    if (object.type === 'image' || object.type === 'svg') {
+      this.buildImage(group, object as ImageObject | SvgObject, node);
       return;
     }
     if (object.type === 'video') {
@@ -565,15 +948,29 @@ export class SceneManager {
 
   private buildText(group: THREE.Group, object: TextObject, node: ObjectNode) {
     const texture = this.createTextTexture(object, node);
-    const material = new THREE.MeshBasicMaterial({
+    const frontMaterial = new THREE.MeshBasicMaterial({
       map: texture,
       transparent: true,
       depthWrite: false,
       side: THREE.DoubleSide,
     });
-    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(object.width, object.height), material);
+    const depth = Math.max(0, Math.min(600, object.depth3d ?? 0));
+    if (depth <= 0.5) {
+      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(object.width, object.height), frontMaterial);
+      group.add(mesh);
+      node.materials.push(frontMaterial);
+      return;
+    }
+    const sideColor = new THREE.Color(object.color || '#F3EEE4').multiplyScalar(0.42);
+    const sideMaterial = new THREE.MeshBasicMaterial({ color: sideColor, side: THREE.DoubleSide });
+    // BoxGeometry 材质顺序：+X、-X、+Y、-Y、+Z、-Z，正面朝 +Z 使用文字贴图
+    const mesh = new THREE.Mesh(
+      new THREE.BoxGeometry(object.width, object.height, depth),
+      [sideMaterial, sideMaterial, sideMaterial, sideMaterial, frontMaterial, sideMaterial],
+    );
+    mesh.position.z = -depth / 2;
     group.add(mesh);
-    node.materials.push(material);
+    node.materials.push(frontMaterial, sideMaterial);
   }
 
   private createTextTexture(object: TextObject, node: ObjectNode): THREE.CanvasTexture {
@@ -610,7 +1007,7 @@ export class SceneManager {
     return texture;
   }
 
-  private ensureImage(node: ObjectNode, object: ImageObject) {
+  private ensureImage(node: ObjectNode, object: { src: string }) {
     if (node.imageState && node.imageState.src === object.src) return;
     node.imageState = null;
     if (!object.src) {
@@ -679,7 +1076,7 @@ export class SceneManager {
     this.rebuildContent(node);
   }
 
-  private buildImage(group: THREE.Group, object: ImageObject, node: ObjectNode) {
+  private buildImage(group: THREE.Group, object: ImageObject | SvgObject, node: ObjectNode) {
     this.ensureImage(node, object);
     const loaded = node.imageState?.status === 'loaded' && node.imageState.texture;
     let texture: THREE.Texture = this.placeholderTexture;
@@ -735,6 +1132,10 @@ export class SceneManager {
   private buildShape(group: THREE.Group, object: ShapeObject, node: ObjectNode) {
     const strokeEnabled = object.stroke !== null && object.strokeWidth > 0;
     const strokeColor = object.stroke ?? object.fill;
+    if (object.shape === 'path') {
+      this.buildFreePath(group, object, node);
+      return;
+    }
     if (object.shape === 'line') {
       const thickness = Math.max(2, object.strokeWidth || object.height);
       const material = new THREE.MeshBasicMaterial({ color: strokeColor, side: THREE.DoubleSide });
@@ -790,6 +1191,51 @@ export class SceneManager {
       group.add(mesh);
       node.materials.push(material);
     }
+  }
+
+  /** 自由绘制路径：按归一化点生成带宽度的三角带网格 */
+  private buildFreePath(group: THREE.Group, object: ShapeObject, node: ObjectNode) {
+    const raw = object.points ?? [];
+    if (raw.length < 4) return;
+    const w = object.width;
+    const h = object.height;
+    const half = Math.max(1, object.strokeWidth) / 2;
+    const points: THREE.Vector2[] = [];
+    for (let i = 0; i + 1 < raw.length; i += 2) {
+      // 内容组沿 Y 轴镜像，画布坐标需要取负
+      const point = new THREE.Vector2(raw[i] * w - w / 2, h / 2 - raw[i + 1] * h);
+      const previous = points[points.length - 1];
+      if (previous && previous.distanceTo(point) < 1.2) continue;
+      points.push(point);
+    }
+    if (points.length < 2) return;
+    const positions: number[] = [];
+    const indices: number[] = [];
+    for (let i = 0; i < points.length; i += 1) {
+      const current = points[i];
+      const previous = points[Math.max(0, i - 1)];
+      const next = points[Math.min(points.length - 1, i + 1)];
+      const tangent = new THREE.Vector2().subVectors(next, previous);
+      if (tangent.lengthSq() < 1e-6) tangent.set(1, 0);
+      tangent.normalize();
+      const normal = new THREE.Vector2(-tangent.y, tangent.x).multiplyScalar(half);
+      positions.push(current.x + normal.x, current.y + normal.y, 0);
+      positions.push(current.x - normal.x, current.y - normal.y, 0);
+    }
+    for (let i = 0; i < points.length - 1; i += 1) {
+      const a = i * 2;
+      indices.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setIndex(indices);
+    const material = new THREE.MeshBasicMaterial({
+      color: object.stroke ?? object.fill,
+      side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(geometry, material);
+    group.add(mesh);
+    node.materials.push(material);
   }
 
   private buildPathShape(group: THREE.Group, object: ShapeObject, node: ObjectNode) {
@@ -1376,8 +1822,29 @@ export class SceneManager {
       }
     }
     this.updateGrid();
+    this.renderFrame();
+  }
+
+  /** 渲染当前帧：鱼眼走离屏后处理，其余直接渲染（XR 由 WebXR 接管） */
+  private renderFrame() {
+    if (this.xrActive) {
+      this.renderer.render(this.scene, this.camera);
+      return;
+    }
+    if (this.lensEffect !== 'fisheye') {
+      this.renderer.render(this.scene, this.camera);
+      return;
+    }
+    this.ensureLens();
+    if (!this.lensTarget || !this.lensScene || !this.lensCamera) {
+      this.renderer.render(this.scene, this.camera);
+      return;
+    }
+    this.renderer.setRenderTarget(this.lensTarget);
+    this.renderer.clear();
     this.renderer.render(this.scene, this.camera);
-    this.raf = requestAnimationFrame(this.tick);
+    this.renderer.setRenderTarget(null);
+    this.renderer.render(this.lensScene, this.lensCamera);
   }
 
   flyTo(view: ViewState, duration = 0.4): Promise<void> {
@@ -1604,7 +2071,15 @@ export class SceneManager {
 
   dispose() {
     this.disposed = true;
-    cancelAnimationFrame(this.raf);
+    this.renderer.setAnimationLoop(null);
+    if (this.lensTarget) this.lensTarget.dispose();
+    if (this.lensMaterial) this.lensMaterial.dispose();
+    if (!this.xrActive && this.xrRig) {
+      this.xrRig.remove(this.objectsRoot);
+      this.scene.add(this.objectsRoot);
+      this.scene.remove(this.xrRig);
+      this.xrRig = null;
+    }
     if (this.animation) {
       this.animation.resolve();
       this.animation = null;
@@ -1620,6 +2095,23 @@ export class SceneManager {
       if (typeof entry !== 'string') entry.dispose();
     }
     this.imageCache.clear();
+    if (this.stars) {
+      this.scene.remove(this.stars);
+      this.stars.geometry.dispose();
+      (this.stars.material as THREE.Material).dispose();
+      this.stars = null;
+    }
+    if (this.axes) {
+      this.scene.remove(this.axes);
+      this.axes.traverse((child) => {
+        const mesh = child as THREE.Mesh;
+        if (mesh.geometry) mesh.geometry.dispose();
+        const material = mesh.material;
+        if (Array.isArray(material)) material.forEach((item) => item.dispose());
+        else if (material) material.dispose();
+      });
+      this.axes = null;
+    }
     this.placeholderTexture.dispose();
     this.solidAccent.dispose();
     this.dashedAccent.dispose();

@@ -7,9 +7,12 @@ import { exportDeckFile } from '../lib/file';
 import { formatBytes, isAcceptedImage, readImageFile } from '../lib/image';
 import { mediaKindOf, readMediaFile } from '../lib/media';
 import { isModelFile, modelFormatOf, MODEL_ACCEPT } from '../lib/model3d';
+import { isSvgFile, readSvgFile } from '../lib/svg';
 import { flushDeckSave, useDeckStore } from '../store/deckStore';
 import { toast } from '../store/uiStore';
 import { AssetPicker } from './AssetPicker';
+import { AiPanel } from './AiPanel';
+import { ExportDialog } from './ExportDialog';
 import { FrameTrack } from './FrameTrack';
 import { Icon } from './Icon';
 import { Inspector } from './Inspector';
@@ -55,9 +58,13 @@ export function Editor({ deckId, onBack }: EditorProps) {
   const [presentState, setPresentState] = useState<PresentState | null>(null);
   const [saveErrorOpen, setSaveErrorOpen] = useState(false);
   const [leaveOpen, setLeaveOpen] = useState(false);
+  const [exportView, setExportView] = useState<ViewState | null>(null);
+  const [aiOpen, setAiOpen] = useState(false);
   const [retrying, setRetrying] = useState(false);
 
-  const modalOpen = Boolean(startChoice || saveErrorOpen || leaveOpen || presentState || assetsOpen);
+  const modalOpen = Boolean(
+    startChoice || saveErrorOpen || leaveOpen || presentState || assetsOpen || exportView || aiOpen,
+  );
   const modalOpenRef = useRef(modalOpen);
   modalOpenRef.current = modalOpen;
 
@@ -186,8 +193,38 @@ export function Editor({ deckId, onBack }: EditorProps) {
     }
   };
 
+  const handleSvgFile = async (file: File, replaceId: string | null, point?: { x: number; y: number }) => {
+    try {
+      const result = await readSvgFile(file);
+      const state = useDeckStore.getState();
+      if (replaceId) {
+        const object = state.deck?.objects.find((item) => item.id === replaceId);
+        if (!object || (object.type !== 'image' && object.type !== 'svg')) return;
+        state.updateObject(replaceId, {
+          src: result.src,
+          naturalWidth: result.naturalWidth,
+          naturalHeight: result.naturalHeight,
+        });
+        toast('SVG 已替换', 'success');
+        return;
+      }
+      const id = state.addSvg(result.src, result.naturalWidth, result.naturalHeight, point);
+      if (!id) {
+        toast(`已达到单作品 ${LIMITS.objects} 个对象上限`, 'error');
+        return;
+      }
+      toast('SVG 图形已添加到画板', 'success');
+    } catch (error) {
+      toast(error instanceof Error ? error.message : 'SVG 添加失败', 'error');
+    }
+  };
+
   const handleImageFile = async (file: File, replaceId: string | null, point?: { x: number; y: number }) => {
     try {
+      if (isSvgFile(file)) {
+        await handleSvgFile(file, replaceId, point);
+        return;
+      }
       const result = await readImageFile(file);
       const state = useDeckStore.getState();
       if (replaceId) {
@@ -295,7 +332,10 @@ export function Editor({ deckId, onBack }: EditorProps) {
     if (!state.deck) return;
     let id: string | null = null;
     if (asset.kind === 'image') {
-      id = state.addImage(src, asset.width || 1600, asset.height || 900);
+      const isSvg = asset.mime === 'image/svg+xml' || asset.ext === 'svg';
+      id = isSvg
+        ? state.addSvg(src, asset.width || 800, asset.height || 600)
+        : state.addImage(src, asset.width || 1600, asset.height || 900);
     } else if (asset.kind === 'video' || asset.kind === 'audio') {
       id = state.addMedia(
         asset.kind,
@@ -321,7 +361,8 @@ export function Editor({ deckId, onBack }: EditorProps) {
   };
 
   const handleFile = (file: File, replaceId: string | null, point?: { x: number; y: number }) => {
-    if (isAcceptedImage(file)) void handleImageFile(file, replaceId, point);
+    if (isSvgFile(file)) void handleSvgFile(file, replaceId, point);
+    else if (isAcceptedImage(file)) void handleImageFile(file, replaceId, point);
     else if (isModelFile(file)) void handleModelFile(file, replaceId, point);
     else if (mediaKindOf(file)) void handleMediaFile(file, replaceId, point);
     else toast('不支持的文件类型', 'error');
@@ -441,6 +482,8 @@ export function Editor({ deckId, onBack }: EditorProps) {
         onRedo={() => useDeckStore.getState().redo()}
         onPresent={handlePresent}
         onExport={handleExport}
+        onExportVideo={() => setExportView(capture())}
+        onOpenAi={() => setAiOpen(true)}
         onOpenAssets={() => setAssetsOpen(true)}
         onShowSaveError={() => setSaveErrorOpen(true)}
       />
@@ -494,6 +537,10 @@ export function Editor({ deckId, onBack }: EditorProps) {
             onAddShape={(shape) => useDeckStore.getState().addShape(shape)}
             onAddFile={(file, point) => handleFile(file, null, point)}
             onPickImage={() => pickImage()}
+            onDrawPath={(points, box, strokeWidth) => {
+              const id = useDeckStore.getState().addPath(points, box, strokeWidth);
+              if (!id) toast('路径点太少，无法生成图形', 'error');
+            }}
             onTextCommit={(id, text) => {
               if (!text.trim()) useDeckStore.getState().removeObject(id);
               else useDeckStore.getState().updateObject(id, { text });
@@ -516,7 +563,7 @@ export function Editor({ deckId, onBack }: EditorProps) {
         ref={imageInput}
         type="file"
         hidden
-        accept="image/png,image/jpeg,image/webp,image/gif"
+        accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml,.svg"
         onChange={(event) => {
           const file = event.target.files?.[0];
           const replaceId = pendingReplace.current;
@@ -553,6 +600,12 @@ export function Editor({ deckId, onBack }: EditorProps) {
           if (file) void handleModelFile(file, replaceId);
         }}
       />
+
+      {exportView && deck && (
+        <ExportDialog deck={deck} view={exportView} onClose={() => setExportView(null)} />
+      )}
+
+      {aiOpen && deck && <AiPanel deck={deck} onClose={() => setAiOpen(false)} />}
 
       {assetsOpen && (
         <AssetPicker

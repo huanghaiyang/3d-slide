@@ -1,10 +1,18 @@
 import { createPortal } from 'react-dom';
 import { useEffect, useRef, useState } from 'react';
 import type { Deck, ViewState } from '../types';
+import type { MediaPlaybackState } from '../three/SceneManager';
 import { Stage, type StageApi } from './Stage';
 import { Icon } from './Icon';
 
 const HINT_KEY = '3d-slide:present-hint-seen';
+
+function formatTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '0:00';
+  const total = Math.floor(seconds);
+  const minutes = Math.floor(total / 60);
+  return `${minutes}:${String(total % 60).padStart(2, '0')}`;
+}
 
 interface PresentationProps {
   deck: Deck;
@@ -40,6 +48,17 @@ export function Presentation({ deck, startIndex, entryView, fullscreenFailed, on
   });
   const [showFullscreenNote, setShowFullscreenNote] = useState(fullscreenFailed);
   const [cursorHidden, setCursorHidden] = useState(false);
+  const [lens, setLens] = useState(false);
+  const [space, setSpace] = useState(false);
+  const [xrSupported, setXrSupported] = useState(false);
+  const [xrActive, setXrActive] = useState(false);
+  const [mediaState, setMediaState] = useState<MediaPlaybackState | null>(null);
+  const savedViewRef = useRef<ViewState | null>(null);
+  const mediaItems = deck.objects.filter(
+    (object) => object.type === 'video' || object.type === 'audio',
+  ) as { id: string; name: string; type: 'video' | 'audio' }[];
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const activeMedia = activeId ?? mediaItems[0]?.id ?? null;
 
   indexRef.current = index;
   roamRef.current = roam;
@@ -117,6 +136,85 @@ export function Presentation({ deck, startIndex, entryView, fullscreenFailed, on
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
   }, [roam]);
+
+  useEffect(() => {
+    let alive = true;
+    void stageRef.current?.getXRSupported().then((supported) => {
+      if (alive) setXrSupported(supported);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!activeMedia) {
+      setMediaState(null);
+      return;
+    }
+    const update = () => setMediaState(stageRef.current?.mediaState(activeMedia) ?? null);
+    update();
+    const timer = window.setInterval(update, 160);
+    return () => window.clearInterval(timer);
+  }, [activeMedia]);
+
+  useEffect(() => {
+    return () => {
+      void stageRef.current?.exitXR();
+    };
+  }, []);
+
+  const toggleLens = () => {
+    const next = !lens;
+    setLens(next);
+    stageRef.current?.setLens(next ? 'fisheye' : 'none', 0.45);
+  };
+
+  const toggleSpace = () => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    if (!space) {
+      savedViewRef.current = stage.captureView();
+      stage.setSpaceMode('stars');
+      const current = stage.captureView();
+      void stage.flyTo(
+        {
+          target: { x: 0, y: 0, z: 0 },
+          distance: Math.max(current.distance, 6800),
+          yaw: current.yaw,
+          pitch: current.pitch,
+        },
+        0.8,
+      );
+      setSpace(true);
+    } else {
+      stage.setSpaceMode('none');
+      if (savedViewRef.current) void stage.flyTo(savedViewRef.current, 0.7);
+      setSpace(false);
+    }
+  };
+
+  const toggleXR = async () => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    if (xrActive) {
+      await stage.exitXR();
+      setXrActive(false);
+      return;
+    }
+    const ok = await stage.enterXR();
+    setXrActive(ok);
+    if (!ok) setShowFullscreenNote(true);
+  };
+
+  const mediaCommand = (action: 'toggle' | 'seek' | 'volume' | 'mute', value?: number) => {
+    const stage = stageRef.current;
+    if (!stage || !activeMedia) return;
+    if (action === 'toggle') stage.mediaToggle(activeMedia);
+    else if (action === 'seek') stage.mediaSeek(activeMedia, value ?? 0);
+    else if (action === 'volume') stage.mediaVolume(activeMedia, value ?? 0);
+    else stage.mediaMute(activeMedia);
+  };
 
   useEffect(() => {
     const first = deck.frames[startIndex]?.view ?? entryView;
@@ -240,6 +338,93 @@ export function Presentation({ deck, startIndex, entryView, fullscreenFailed, on
       </div>
 
       {deck.showProgress && <div className="present-progress">{progress}</div>}
+
+      <div className="present-tools">
+        <button
+          className={`present-tool ${lens ? 'is-on' : ''}`}
+          onClick={toggleLens}
+          aria-pressed={lens}
+          title="切换鱼眼镜头效果"
+        >
+          <Icon name="fisheye" size={15} />
+          鱼眼
+        </button>
+        <button
+          className={`present-tool ${space ? 'is-on' : ''}`}
+          onClick={toggleSpace}
+          aria-pressed={space}
+          title="远距离空间投射：画板悬浮在星空中，像在 VR 影院"
+        >
+          <Icon name="spark" size={15} />
+          星空剧场
+        </button>
+        {xrSupported && (
+          <button
+            className={`present-tool ${xrActive ? 'is-on' : ''}`}
+            onClick={() => void toggleXR()}
+            aria-pressed={xrActive}
+            title="进入或退出 VR 头显预览"
+          >
+            <Icon name="vr" size={15} />
+            {xrActive ? '退出 VR' : 'VR 预览'}
+          </button>
+        )}
+      </div>
+
+      {activeMedia && mediaState && (
+        <div className="present-media-bar" aria-label="播放控制">
+          {mediaItems.length > 1 && (
+            <select
+              className="present-media-select"
+              value={activeMedia}
+              aria-label="选择媒体"
+              onChange={(event) => setActiveId(event.target.value)}
+            >
+              {mediaItems.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.name}
+                </option>
+              ))}
+            </select>
+          )}
+          <button
+            className="present-media-btn"
+            onClick={() => mediaCommand('toggle')}
+            aria-label={mediaState.playing ? '暂停' : '播放'}
+          >
+            <Icon name={mediaState.playing ? 'pause' : 'play'} size={16} />
+          </button>
+          <span className="present-media-time">{formatTime(mediaState.time)}</span>
+          <input
+            className="present-media-range"
+            type="range"
+            min={0}
+            max={Math.max(0.1, mediaState.duration)}
+            step={0.05}
+            value={Math.min(mediaState.time, mediaState.duration || 0)}
+            aria-label="播放进度"
+            onChange={(event) => mediaCommand('seek', Number(event.target.value))}
+          />
+          <span className="present-media-time">{formatTime(mediaState.duration)}</span>
+          <button
+            className="present-media-btn"
+            onClick={() => mediaCommand('mute')}
+            aria-label={mediaState.muted ? '取消静音' : '静音'}
+          >
+            <Icon name={mediaState.muted ? 'volumeOff' : 'volume'} size={16} />
+          </button>
+          <input
+            className="present-media-range is-volume"
+            type="range"
+            min={0}
+            max={100}
+            value={mediaState.volume}
+            aria-label="音量"
+            onChange={(event) => mediaCommand('volume', Number(event.target.value))}
+          />
+          {mediaState.error && <span className="present-media-error">媒体无法播放</span>}
+        </div>
+      )}
 
       <button
         className={`present-roam-toggle ${roam ? 'is-on' : ''}`}

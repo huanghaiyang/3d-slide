@@ -16,6 +16,8 @@ interface TopBarProps {
   onRedo: () => void;
   onPresent: () => void;
   onExport: () => void;
+  onExportVideo: () => void;
+  onOpenAi: () => void;
   onOpenAssets: () => void;
   onShowSaveError: () => void;
 }
@@ -32,6 +34,8 @@ export function TopBar({
   onRedo,
   onPresent,
   onExport,
+  onExportVideo,
+  onOpenAi,
   onOpenAssets,
   onShowSaveError,
 }: TopBarProps) {
@@ -128,6 +132,14 @@ export function TopBar({
             <span className="topbar-divider" />
           </>
         )}
+        <button className="btn btn-ghost btn-sm" onClick={onOpenAi} title="AI 助手与 MCP 集成">
+          <Icon name="spark" size={15} />
+          AI
+        </button>
+        <button className="btn btn-ghost btn-sm" onClick={onExportVideo} title="离屏渲染导出视频或 PNG 序列">
+          <Icon name="video" size={16} />
+          导出视频
+        </button>
         <button className="btn btn-ghost btn-sm" onClick={onExport}>
           <Icon name="download" size={16} />
           导出

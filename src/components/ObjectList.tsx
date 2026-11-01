@@ -30,6 +30,7 @@ const typeIcon: Record<ObjectType, IconName> = {
   video: 'video',
   audio: 'audio',
   model: 'model',
+  svg: 'svg',
 };
 
 export function ObjectList({

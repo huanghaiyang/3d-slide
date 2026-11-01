@@ -6,6 +6,7 @@ import type {
   ModelObject,
   ShapeObject,
   SlideObject,
+  SvgObject,
   TextObject,
   VideoObject,
 } from '../types';
@@ -308,6 +309,18 @@ function TextFields({ object }: { object: TextObject }) {
           />
         </div>
       </Section>
+      <Section title="3D 文本">
+        <SliderRow
+          label="挤出厚度"
+          value={object.depth3d ?? 0}
+          min={0}
+          max={LIMITS.maxTextDepth}
+          step={1}
+          unit="px"
+          onChange={(depth3d) => updateObject(object.id, { depth3d }, key('depth3d'))}
+        />
+        <span className="field-hint">厚度大于 0 时文字生成实体侧面，配合绕 X / Y 轴倾斜获得立体效果。</span>
+      </Section>
     </>
   );
 }
@@ -390,6 +403,46 @@ function ImageFields({ object, onReplaceImage }: { object: ImageObject; onReplac
         <span className="field-hint">关闭锁定后，可在上方分别调整宽高。</span>
       </Section>
     </>
+  );
+}
+
+function SvgFields({ object, onReplaceImage }: { object: SvgObject; onReplaceImage: (id: string) => void }) {
+  const updateObject = useDeckStore((state) => state.updateObject);
+
+  return (
+    <Section title="SVG 图形">
+      <div className="image-preview">
+        <img src={object.src} alt={object.name} />
+      </div>
+      <div className="button-row">
+        <button className="btn btn-light btn-sm" onClick={() => onReplaceImage(object.id)}>
+          <Icon name="upload" size={14} /> 替换 SVG
+        </button>
+        <button
+          className="btn btn-ghost btn-sm"
+          onClick={() =>
+            updateObject(object.id, {
+              width: object.naturalWidth,
+              height: object.naturalHeight,
+            })
+          }
+        >
+          <Icon name="focus" size={14} /> 还原原始尺寸
+        </button>
+      </div>
+      <span className="field-hint">
+        矢量原始尺寸 {object.naturalWidth} × {object.naturalHeight} · 放大不失真
+      </span>
+      <Segmented
+        value={object.fit}
+        ariaLabel="SVG 适配方式"
+        options={[
+          { value: 'contain', label: '完整显示' },
+          { value: 'cover', label: '填充裁切' },
+        ]}
+        onChange={(fit) => updateObject(object.id, { fit })}
+      />
+    </Section>
   );
 }
 
@@ -702,7 +755,9 @@ function ObjectPanel({
       ? '文本对象'
       : object.type === 'image'
         ? '图片对象'
-        : object.type === 'shape'
+        : object.type === 'svg'
+          ? 'SVG 矢量图形'
+          : object.type === 'shape'
           ? SHAPE_LABELS[object.shape]
           : object.type === 'video'
             ? '视频对象'
@@ -739,6 +794,7 @@ function ObjectPanel({
 
         {object.type === 'text' && <TextFields object={object} />}
         {object.type === 'image' && <ImageFields object={object} onReplaceImage={onReplaceImage} />}
+        {object.type === 'svg' && <SvgFields object={object} onReplaceImage={onReplaceImage} />}
         {(object.type === 'video' || object.type === 'audio') && (
           <MediaFields object={object} onReplaceMedia={onReplaceMedia} />
         )}
@@ -803,7 +859,7 @@ function ObjectPanel({
             </div>
           </div>
           <SliderRow
-            label="旋转"
+            label="旋转 Z"
             value={object.rotation}
             min={LIMITS.minRotation}
             max={LIMITS.maxRotation}
@@ -811,6 +867,27 @@ function ObjectPanel({
             unit="°"
             onChange={(rotation) => updateObject(object.id, { rotation }, key('rotation'))}
           />
+          <SliderRow
+            label="倾斜 X"
+            value={object.rotationX ?? 0}
+            min={-180}
+            max={180}
+            step={1}
+            unit="°"
+            onChange={(rotationX) => updateObject(object.id, { rotationX }, key('rotationX'))}
+          />
+          <SliderRow
+            label="倾斜 Y"
+            value={object.rotationY ?? 0}
+            min={-180}
+            max={180}
+            step={1}
+            unit="°"
+            onChange={(rotationY) => updateObject(object.id, { rotationY }, key('rotationY'))}
+          />
+          {object.type === 'model' && (
+            <span className="field-hint">三维旋转用于在舞台中任意摆放模型，旋转 Z / 倾斜 X / 倾斜 Y 可组合使用。</span>
+          )}
           <SliderRow
             label="不透明度"
             value={object.opacity}

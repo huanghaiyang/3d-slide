@@ -34,6 +34,8 @@ export const LIMITS = {
   maxOpacity: 100,
   minRotation: -180,
   maxRotation: 180,
+  maxTextDepth: 600,
+  maxPathPoints: 2000,
   minLineHeight: 0.8,
   maxLineHeight: 3,
   minStroke: 0,

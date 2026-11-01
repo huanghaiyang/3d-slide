@@ -49,7 +49,7 @@ function DeckThumb({ summary }: { summary: DeckSummary }) {
     <div className="deck-thumb" style={{ background: summary.background }}>
       <div className="thumb-grid" aria-hidden="true" />
       {ordered.slice(0, 10).map((object) => {
-        if (object.type === 'image') {
+        if (object.type === 'image' || object.type === 'svg') {
           return (
             <div className="thumb-object" key={object.id} style={place(object)}>
               <img src={object.src} alt="" />

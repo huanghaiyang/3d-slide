@@ -64,6 +64,8 @@ function normalizeBase(raw: Record<string, unknown>): {
   width: number;
   height: number;
   rotation: number;
+  rotationX: number;
+  rotationY: number;
   opacity: number;
   visible: boolean;
 } {
@@ -78,6 +80,8 @@ function normalizeBase(raw: Record<string, unknown>): {
     width: clamp(num(raw.width, 400), LIMITS.minSize, LIMITS.maxSize),
     height: clamp(num(raw.height, 300), LIMITS.minSize, LIMITS.maxSize),
     rotation: clamp(num(raw.rotation, 0), LIMITS.minRotation, LIMITS.maxRotation),
+    rotationX: clamp(num(raw.rotationX, 0), LIMITS.minRotation, LIMITS.maxRotation),
+    rotationY: clamp(num(raw.rotationY, 0), LIMITS.minRotation, LIMITS.maxRotation),
     opacity: clamp(num(raw.opacity, 100), 0, 100),
     visible: bool(raw.visible, true),
   };
@@ -107,6 +111,7 @@ function normalizeObject(raw: unknown, warnings: string[]): SlideObject {
       align: (['left', 'center', 'right'].includes(String(r.align)) ? r.align : 'left') as TextObject['align'],
       color: str(r.color, DEFAULT_TEXT_COLOR),
       lineHeight,
+      depth3d: clamp(num(r.depth3d, 0), 0, LIMITS.maxTextDepth),
       height: layout.height,
     };
   }
@@ -120,6 +125,19 @@ function normalizeObject(raw: unknown, warnings: string[]): SlideObject {
       src,
       fit: r.fit === 'cover' ? 'cover' : 'contain',
       aspectLocked: bool(r.aspectLocked, false),
+      naturalWidth: Math.max(1, num(r.naturalWidth, 1600)),
+      naturalHeight: Math.max(1, num(r.naturalHeight, 900)),
+    };
+  }
+  if (type === 'svg') {
+    const base = normalizeBase(r);
+    const src = str(r.src, '');
+    if (!src) warnings.push(`SVG「${base.name}」缺少素材，已以占位图导入`);
+    return {
+      ...base,
+      type: 'svg',
+      src,
+      fit: r.fit === 'cover' ? 'cover' : 'contain',
       naturalWidth: Math.max(1, num(r.naturalWidth, 1600)),
       naturalHeight: Math.max(1, num(r.naturalHeight, 900)),
     };
@@ -176,7 +194,7 @@ function normalizeObject(raw: unknown, warnings: string[]): SlideObject {
     return {
       ...base,
       type: 'shape',
-      shape: (['rect', 'roundedRect', 'ellipse', 'triangle', 'diamond', 'star', 'arrow', 'line'].includes(
+      shape: (['rect', 'roundedRect', 'ellipse', 'triangle', 'diamond', 'star', 'arrow', 'line', 'path'].includes(
         String(r.shape),
       )
         ? r.shape
@@ -184,6 +202,12 @@ function normalizeObject(raw: unknown, warnings: string[]): SlideObject {
       fill: str(r.fill, DEFAULT_SHAPE_COLOR),
       stroke: typeof r.stroke === 'string' ? r.stroke : null,
       strokeWidth: clamp(num(r.strokeWidth, 0), LIMITS.minStroke, LIMITS.maxStroke),
+      points: Array.isArray(r.points)
+        ? (r.points as unknown[])
+            .slice(0, LIMITS.maxPathPoints * 2)
+            .filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+            .map((value) => clamp(value, 0, 1))
+        : undefined,
     };
   }
   throw new Error(`未知的对象类型：${String(type)}`);
@@ -261,7 +285,9 @@ export function normalizeDeckWithWarnings(
   const deck = normalizeDeck(raw, options);
   const warnings: string[] = [];
   for (const o of deck.objects) {
-    if (o.type === 'image' && !o.src) warnings.push(`图片「${o.name}」缺少素材，已以占位图显示`);
+    if ((o.type === 'image' || o.type === 'svg') && !o.src) {
+      warnings.push(`图片「${o.name}」缺少素材，已以占位图显示`);
+    }
     if ((o.type === 'video' || o.type === 'audio') && !o.src) {
       warnings.push(`媒体「${o.name}」缺少素材，已以占位卡显示`);
     }

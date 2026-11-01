@@ -18,6 +18,8 @@ import type { MediaPlaybackState, StageMode } from '../three/SceneManager';
 import { Icon } from './Icon';
 import { MediaPlayer } from './MediaPlayer';
 
+export type AxisDir = '+x' | '-x' | '+y' | '-y' | '+z' | '-z';
+
 export interface StageApi {
   captureView: () => ViewState;
   flyTo: (view: ViewState, duration?: number) => Promise<void>;
@@ -25,6 +27,20 @@ export interface StageApi {
   reset: () => Promise<void>;
   projectObject: (id: string) => { left: number; top: number; width: number; height: number } | null;
   roamStep: (forward: number, right: number, up: number, dt: number) => void;
+  lookAlong: (axis: AxisDir) => void;
+  setAxesVisible: (visible: boolean) => void;
+  setLens: (effect: 'none' | 'fisheye', strength?: number) => void;
+  setSpaceMode: (mode: 'none' | 'stars') => void;
+  setViewLocked: (locked: boolean) => void;
+  mediaList: () => { id: string; name: string; kind: 'video' | 'audio' }[];
+  mediaState: (id: string) => MediaPlaybackState | null;
+  mediaToggle: (id: string) => void;
+  mediaSeek: (id: string, time: number) => void;
+  mediaVolume: (id: string, volume: number) => void;
+  mediaMute: (id: string) => void;
+  getXRSupported: () => Promise<boolean>;
+  enterXR: () => Promise<boolean>;
+  exitXR: () => Promise<void>;
 }
 
 interface StageProps {
@@ -47,6 +63,7 @@ interface StageProps {
   onAddFile?: (file: File, point?: { x: number; y: number }) => void;
   onPickImage?: () => void;
   onTextCommit?: (id: string, text: string) => void;
+  onDrawPath?: (points: number[], box: { x: number; y: number; width: number; height: number }, strokeWidth?: number) => void;
   onGestureEnd?: () => void;
   onStageClick?: () => void;
   onStageDoubleClick?: () => void;
@@ -59,7 +76,7 @@ interface EditingState {
   object: TextObject;
 }
 
-type GestureMode = 'pan' | 'orbit' | 'object' | 'resize' | 'marquee' | null;
+type GestureMode = 'pan' | 'orbit' | 'object' | 'resize' | 'marquee' | 'draw' | null;
 
 interface ResizeStart {
   x: number;
@@ -102,6 +119,8 @@ interface GestureState {
   resize?: ResizeStart;
   baseSelection?: string[];
   marquee?: MarqueeRect;
+  drawPoints?: { x: number; y: number }[];
+  drawOrigin?: { left: number; top: number };
   pointerId: number;
 }
 
@@ -126,6 +145,7 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
     onAddFile,
     onPickImage,
     onTextCommit,
+    onDrawPath,
     onGestureEnd,
     onStageClick,
     onStageDoubleClick,
@@ -141,7 +161,14 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
   const [dragOver, setDragOver] = useState(false);
   const [marquee, setMarquee] = useState<MarqueeRect | null>(null);
   const [mediaPanel, setMediaPanel] = useState<MediaPanelState | null>(null);
+  const [penMode, setPenMode] = useState(false);
+  const [viewLocked, setViewLocked] = useState(false);
+  const [showAxes, setShowAxes] = useState(false);
+  const [drawStroke, setDrawStroke] = useState<{ x: number; y: number }[] | null>(null);
   const dismissedMediaRef = useRef<string | null>(null);
+  const penRef = useRef(false);
+  const lockRef = useRef(false);
+  const drawCallbackRef = useRef(onDrawPath);
   const gesture = useRef<GestureState | null>(null);
   const wheelTimer = useRef<number>();
   const zoomBase = useRef((initialView ?? deck.lastView).distance);
@@ -165,6 +192,9 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
   deckRef.current = deck;
   selectedPropRef.current = selectedObjectId;
   selectionRef.current = selectedObjectIds;
+  penRef.current = penMode && mode === 'edit';
+  lockRef.current = viewLocked;
+  drawCallbackRef.current = onDrawPath;
 
   const applySelection = (ids: string[]) => {
     if (onSelectMany) onSelectMany(ids);
@@ -201,6 +231,10 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
   useEffect(() => {
     managerRef.current?.setShowGrid(showGrid && mode === 'edit');
   }, [showGrid, mode]);
+
+  useEffect(() => {
+    managerRef.current?.setShowAxes(showAxes);
+  }, [showAxes, mode]);
 
   useEffect(() => {
     if (!imageRetry) return;
@@ -301,6 +335,60 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
     await flyEdit({ ...DEFAULT_VIEW, target: { ...DEFAULT_VIEW.target } }, 0.35);
   };
 
+  const lookAlong = (axis: AxisDir) => {
+    if (lockRef.current) return;
+    const manager = managerRef.current;
+    if (!manager) return;
+    const current = manager.getView();
+    const angles: Record<AxisDir, { yaw: number; pitch: number }> = {
+      '+x': { yaw: Math.PI / 2, pitch: 0 },
+      '-x': { yaw: -Math.PI / 2, pitch: 0 },
+      '+y': { yaw: 0, pitch: -1.42 },
+      '-y': { yaw: 0, pitch: 1.42 },
+      '+z': { yaw: 0, pitch: 0 },
+      '-z': { yaw: Math.PI, pitch: 0 },
+    };
+    const next = angles[axis];
+    void flyEdit(
+      {
+        target: { ...current.target },
+        distance: current.distance,
+        yaw: next.yaw,
+        pitch: next.pitch,
+      },
+      0.4,
+    );
+  };
+
+  /** 画笔结束：把屏幕点转成世界坐标并按包围盒归一化 */
+  const finalizeDraw = (points: { x: number; y: number }[]) => {
+    const manager = managerRef.current;
+    const callback = drawCallbackRef.current;
+    if (!manager || !callback || points.length < 3) return;
+    const strokeWidth = 6;
+    const padding = strokeWidth / 2;
+    const z = nextDepth(deckRef.current.objects);
+    const world = points.map((point) => manager.screenToWorldOnPlane(point.x, point.y, z));
+    const xs = world.map((point) => point.x);
+    const ys = world.map((point) => point.y);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    const width = Math.max(8, maxX - minX + padding * 2);
+    const height = Math.max(8, maxY - minY + padding * 2);
+    const left = minX - padding;
+    const top = minY - padding;
+    const normalized: number[] = [];
+    for (const point of world) {
+      normalized.push(
+        Math.max(0, Math.min(1, (point.x - left) / width)),
+        Math.max(0, Math.min(1, (point.y - top) / height)),
+      );
+    }
+    callback(normalized, { x: (minX + maxX) / 2, y: (minY + maxY) / 2, width, height }, strokeWidth);
+  };
+
   useImperativeHandle(
     ref,
     () => ({
@@ -318,6 +406,39 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
       reset: resetView,
       projectObject: (id) => managerRef.current?.projectRect(id) ?? null,
       roamStep: (forward, right, up, dt) => managerRef.current?.roamStep(forward, right, up, dt),
+      lookAlong,
+      setAxesVisible: (visible) => {
+        setShowAxes(visible);
+        managerRef.current?.setShowAxes(visible);
+      },
+      setLens: (effect, strength) => managerRef.current?.setLens(effect, strength),
+      setSpaceMode: (next) => managerRef.current?.setSpaceMode(next),
+      setViewLocked: (locked) => {
+        setViewLocked(locked);
+        lockRef.current = locked;
+      },
+      mediaList: () =>
+        deckRef.current.objects
+          .filter((object) => object.type === 'video' || object.type === 'audio')
+          .map((object) => ({
+            id: object.id,
+            name: object.name,
+            kind: object.type as 'video' | 'audio',
+          })),
+      mediaState: (id) => managerRef.current?.getMediaState(id) ?? null,
+      mediaToggle: (id) => managerRef.current?.toggleMedia(id),
+      mediaSeek: (id, time) => managerRef.current?.seekMedia(id, time),
+      mediaVolume: (id, volume) => managerRef.current?.setMediaVolume(id, volume),
+      mediaMute: (id) => {
+        const manager = managerRef.current;
+        if (!manager) return;
+        manager.setMediaMuted(id, !(manager.getMediaState(id)?.muted ?? false));
+      },
+      getXRSupported: () => managerRef.current?.getXRSupported() ?? Promise.resolve(false),
+      enterXR: () => managerRef.current?.enterXR() ?? Promise.resolve(false),
+      exitXR: async () => {
+        await managerRef.current?.exitXR();
+      },
     }),
   );
 
@@ -342,6 +463,7 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
       if (modeRef.current === 'edit' && editingRef.current) return;
       if (event.target instanceof HTMLElement && event.target.tagName === 'TEXTAREA') return;
       event.preventDefault();
+      if (lockRef.current) return;
       const manager = managerRef.current;
       if (!manager) return;
       const factor = Math.exp(event.deltaY * 0.0012);
@@ -393,7 +515,7 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
       pointerId: event.pointerId,
     };
     if (event.button === 2) {
-      if (mode === 'present') return;
+      if (mode === 'present' || lockRef.current) return;
       event.preventDefault();
       event.currentTarget.setPointerCapture(event.pointerId);
       gesture.current = { ...base, mode: 'pan' };
@@ -401,12 +523,26 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
     }
     if (event.button !== 0) return;
     event.currentTarget.setPointerCapture(event.pointerId);
-    if (event.altKey) {
+    if (event.altKey && !lockRef.current) {
       gesture.current = { ...base, mode: 'orbit' };
       return;
     }
     if (mode !== 'edit') {
+      if (lockRef.current) return;
       gesture.current = { ...base, mode: mode === 'present' ? 'orbit' : 'pan' };
+      return;
+    }
+    if (penRef.current) {
+      const rect = boxRef.current?.getBoundingClientRect();
+      const origin = { left: rect?.left ?? 0, top: rect?.top ?? 0 };
+      const start = localPoint(event.clientX, event.clientY);
+      gesture.current = {
+        ...base,
+        mode: 'draw',
+        drawPoints: [{ x: event.clientX, y: event.clientY }],
+        drawOrigin: origin,
+      };
+      setDrawStroke([start]);
       return;
     }
     setEditing(null);
@@ -511,6 +647,17 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
       if (state.moved) setMarquee(next);
       return;
     }
+    if (state.mode === 'draw') {
+      if (!state.drawPoints) return;
+      const previous = state.drawPoints[state.drawPoints.length - 1];
+      if (Math.hypot(event.clientX - previous.x, event.clientY - previous.y) < 2) return;
+      state.drawPoints.push({ x: event.clientX, y: event.clientY });
+      const origin = state.drawOrigin ?? { left: 0, top: 0 };
+      setDrawStroke(
+        state.drawPoints.map((point) => ({ x: point.x - origin.left, y: point.y - origin.top })),
+      );
+      return;
+    }
     if (!state.moved) return;
     const manager = managerRef.current;
     if (!manager) return;
@@ -565,6 +712,12 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
       event.currentTarget.releasePointerCapture(state.pointerId);
     } catch {
       // ignore
+    }
+    if (state.mode === 'draw') {
+      setDrawStroke(null);
+      if (state.moved) finalizeDraw(state.drawPoints ?? []);
+      if (mode === 'edit' || mode === 'view') commitView();
+      return;
     }
     if (state.mode === 'marquee') {
       const rect = state.marquee;
@@ -654,7 +807,7 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
   return (
     <div className={`stage-host stage-${mode}`} ref={hostRef}>
       <div
-        className={`stage-box ${dragOver ? 'is-drop-target' : ''}`}
+        className={`stage-box ${dragOver ? 'is-drop-target' : ''} ${penMode ? 'is-drawing' : ''}`}
         ref={boxRef}
         style={box.width ? { width: box.width, height: box.height } : undefined}
         onPointerDown={onPointerDown}
@@ -697,7 +850,62 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
               <Icon name="focus" size={16} />
               <span>聚焦</span>
             </button>
+            <button
+              className={`stage-tool ${penMode ? 'is-active' : ''}`}
+              onClick={() => setPenMode((value) => !value)}
+              title="画笔：在画板上自由绘制路径"
+              aria-pressed={penMode}
+            >
+              <Icon name="brush" size={16} />
+              <span>画笔</span>
+            </button>
+            <button
+              className={`stage-tool ${showAxes ? 'is-active' : ''}`}
+              onClick={() => setShowAxes((value) => !value)}
+              title="显示 X / Y / Z 坐标轴"
+              aria-pressed={showAxes}
+            >
+              <Icon name="axes" size={16} />
+              <span>坐标轴</span>
+            </button>
+            {showAxes && (
+              <div className="stage-axis-group" role="group" aria-label="轴视角切换">
+                {(['+x', '-x', '+y', '-y', '+z', '-z'] as AxisDir[]).map((axis) => (
+                  <button
+                    key={axis}
+                    className="stage-axis-btn"
+                    onClick={() => lookAlong(axis)}
+                    title={`切换到 ${axis.toUpperCase()} 轴视角`}
+                    disabled={viewLocked}
+                  >
+                    {axis.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+            )}
+            <button
+              className={`stage-tool ${viewLocked ? 'is-active' : ''}`}
+              onClick={() => setViewLocked((value) => !value)}
+              title={viewLocked ? '解锁视角' : '锁定视角，禁止平移/旋转/缩放'}
+              aria-pressed={viewLocked}
+            >
+              <Icon name={viewLocked ? 'lock' : 'unlock'} size={16} />
+              <span>{viewLocked ? '已锁' : '视角'}</span>
+            </button>
           </div>
+        )}
+
+        {drawStroke && drawStroke.length > 1 && (
+          <svg className="stage-draw-layer" aria-hidden="true">
+            <polyline
+              points={drawStroke.map((point) => `${point.x},${point.y}`).join(' ')}
+              fill="none"
+              stroke="#2DD4BF"
+              strokeWidth={6}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
         )}
 
         {mode === 'edit' && deck.objects.length === 0 && (

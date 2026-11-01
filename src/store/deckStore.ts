@@ -8,11 +8,12 @@ import type {
   ModelFormat,
   SaveStatus,
   ShapeKind,
+  ShapeObject,
   SlideObject,
   TextObject,
   ViewState,
 } from '../types';
-import { LIMITS, DEFAULT_VIEW } from '../lib/constants';
+import { LIMITS, DEFAULT_VIEW, DEFAULT_SHAPE_COLOR } from '../lib/constants';
 import {
   autoTextHeight,
   clampNumber,
@@ -20,6 +21,7 @@ import {
   createImageObject,
   createModelObject,
   createShapeObject,
+  createSvgObject,
   createTextObject,
   createVideoObject,
   nameForObject,
@@ -68,8 +70,14 @@ interface DeckStore {
   renameDeck: (title: string) => void;
   updateDeckSettings: (patch: Partial<Pick<Deck, 'background' | 'defaultDuration' | 'showProgress'>>, historyKey?: string) => void;
 
-  addText: () => void;
-  addShape: (shape: ShapeKind) => void;
+  addText: () => string | null;
+  addShape: (shape: ShapeKind) => string | null;
+  addSvg: (src: string, naturalWidth: number, naturalHeight: number, point?: { x: number; y: number }) => string | null;
+  addPath: (
+    points: number[],
+    box: { x: number; y: number; width: number; height: number },
+    strokeWidth?: number,
+  ) => string | null;
   addImage: (src: string, naturalWidth: number, naturalHeight: number, point?: { x: number; y: number }) => string | null;
   addMedia: (
     kind: MediaKind,
@@ -212,6 +220,8 @@ function normalizeEditedObject(object: SlideObject, patch: ObjectPatch): SlideOb
   next.width = clampNumber(next.width, LIMITS.minSize, LIMITS.maxSize, object.width);
   next.height = clampNumber(next.height, LIMITS.minSize, LIMITS.maxSize, object.height);
   next.rotation = clampNumber(next.rotation, LIMITS.minRotation, LIMITS.maxRotation, object.rotation);
+  next.rotationX = clampNumber(next.rotationX ?? 0, LIMITS.minRotation, LIMITS.maxRotation, 0);
+  next.rotationY = clampNumber(next.rotationY ?? 0, LIMITS.minRotation, LIMITS.maxRotation, 0);
   next.opacity = clampNumber(next.opacity, 0, 100, object.opacity);
 
   if (next.type === 'text') {
@@ -219,6 +229,7 @@ function normalizeEditedObject(object: SlideObject, patch: ObjectPatch): SlideOb
     text.text = text.text.slice(0, LIMITS.textChars);
     text.fontSize = clampNumber(text.fontSize, LIMITS.minFontSize, LIMITS.maxFontSize, 48);
     text.lineHeight = clampNumber(text.lineHeight, LIMITS.minLineHeight, LIMITS.maxLineHeight, 1.4);
+    text.depth3d = clampNumber(text.depth3d ?? 0, 0, LIMITS.maxTextDepth, 0);
     text.height = autoTextHeight(text);
   } else if (next.type === 'image') {
     const image = next as ImageObject;
@@ -495,8 +506,8 @@ export const useDeckStore = create<DeckStore>((set, get) => {
 
     addText: () => {
       const state = get();
-      if (!state.deck) return;
-      if (state.deck.objects.length >= LIMITS.objects) return;
+      if (!state.deck) return null;
+      if (state.deck.objects.length >= LIMITS.objects) return null;
       const deckAtStart = state.deck;
       const z = nextDepth(deckAtStart.objects);
       const count = (deckAtStart.counters.text ?? 0) + 1;
@@ -508,13 +519,15 @@ export const useDeckStore = create<DeckStore>((set, get) => {
         objects: [...deck.objects, object],
         counters: { ...deck.counters, text: count },
       }));
-      if (applied) set({ selectedObjectId: id, selectedIds: [id], selectedFrameId: null });
+      if (!applied) return null;
+      set({ selectedObjectId: id, selectedIds: [id], selectedFrameId: null });
+      return id;
     },
 
     addShape: (shape) => {
       const state = get();
-      if (!state.deck) return;
-      if (state.deck.objects.length >= LIMITS.objects) return;
+      if (!state.deck) return null;
+      if (state.deck.objects.length >= LIMITS.objects) return null;
       const deckAtStart = state.deck;
       const z = nextDepth(deckAtStart.objects);
       const count = (deckAtStart.counters[shape] ?? 0) + 1;
@@ -526,7 +539,73 @@ export const useDeckStore = create<DeckStore>((set, get) => {
         objects: [...deck.objects, object],
         counters: { ...deck.counters, [shape]: count },
       }));
-      if (applied) set({ selectedObjectId: id, selectedIds: [id], selectedFrameId: null });
+      if (!applied) return null;
+      set({ selectedObjectId: id, selectedIds: [id], selectedFrameId: null });
+      return id;
+    },
+
+    addSvg: (src, naturalWidth, naturalHeight, point) => {
+      const state = get();
+      if (!state.deck) return null;
+      if (state.deck.objects.length >= LIMITS.objects) return null;
+      const deckAtStart = state.deck;
+      const z = nextDepth(deckAtStart.objects);
+      const count = (deckAtStart.counters.svg ?? 0) + 1;
+      const name = nameForObject(deckAtStart, 'svg', 'SVG');
+      const id = crypto.randomUUID();
+      const object = createSvgObject(id, name, src, naturalWidth, naturalHeight, state.view, z);
+      if (point) {
+        object.x = clampNumber(point.x, -LIMITS.coord, LIMITS.coord, object.x);
+        object.y = clampNumber(point.y, -LIMITS.coord, LIMITS.coord, object.y);
+      }
+      const applied = applyDeck((deck) => ({
+        ...deck,
+        objects: [...deck.objects, object],
+        counters: { ...deck.counters, svg: count },
+      }));
+      if (!applied) return null;
+      set({ selectedObjectId: id, selectedIds: [id], selectedFrameId: null });
+      return id;
+    },
+
+    addPath: (points, box, strokeWidth = 6) => {
+      const state = get();
+      if (!state.deck || points.length < 4) return null;
+      if (state.deck.objects.length >= LIMITS.objects) return null;
+      const deckAtStart = state.deck;
+      const z = nextDepth(deckAtStart.objects);
+      const count = (deckAtStart.counters.path ?? 0) + 1;
+      const id = crypto.randomUUID();
+      const safeWidth = Math.max(LIMITS.minSize, box.width);
+      const safeHeight = Math.max(LIMITS.minSize, box.height);
+      const object: ShapeObject = {
+        id,
+        type: 'shape',
+        name: nameForObject(deckAtStart, 'path', '手绘'),
+        x: clampNumber(box.x + safeWidth / 2, -LIMITS.coord, LIMITS.coord, 0),
+        y: clampNumber(box.y + safeHeight / 2, -LIMITS.coord, LIMITS.coord, 0),
+        z,
+        width: clampNumber(safeWidth, LIMITS.minSize, LIMITS.maxSize, 400),
+        height: clampNumber(safeHeight, LIMITS.minSize, LIMITS.maxSize, 300),
+        rotation: 0,
+        rotationX: 0,
+        rotationY: 0,
+        opacity: 100,
+        visible: true,
+        shape: 'path',
+        fill: DEFAULT_SHAPE_COLOR,
+        stroke: DEFAULT_SHAPE_COLOR,
+        strokeWidth: clampNumber(strokeWidth, 1, LIMITS.maxStroke, 6),
+        points: points.slice(0, LIMITS.maxPathPoints * 2).map((value) => clampNumber(value, 0, 1, 0)),
+      };
+      const applied = applyDeck((deck) => ({
+        ...deck,
+        objects: [...deck.objects, object],
+        counters: { ...deck.counters, path: count },
+      }));
+      if (!applied) return null;
+      set({ selectedObjectId: id, selectedIds: [id], selectedFrameId: null });
+      return id;
     },
 
     addImage: (src, naturalWidth, naturalHeight, point) => {

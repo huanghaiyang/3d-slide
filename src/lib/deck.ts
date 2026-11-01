@@ -7,6 +7,7 @@ import type {
   ShapeKind,
   ShapeObject,
   SlideObject,
+  SvgObject,
   TextObject,
   VideoObject,
   ViewState,
@@ -83,6 +84,7 @@ export function createTextObject(
     align: 'left',
     color: DEFAULT_TEXT_COLOR,
     lineHeight,
+    depth3d: 0,
   };
 }
 
@@ -229,6 +231,26 @@ export function createShapeObject(
     fill: DEFAULT_SHAPE_COLOR,
     stroke: shape === 'line' ? DEFAULT_SHAPE_COLOR : null,
     strokeWidth: shape === 'line' ? 6 : 0,
+    points: shape === 'path' ? [] : undefined,
+  };
+}
+
+export function createSvgObject(
+  id: string,
+  name: string,
+  src: string,
+  naturalWidth: number,
+  naturalHeight: number,
+  view: ViewState,
+  z: number,
+): SvgObject {
+  const base = defaultImageObject(id, name, src, naturalWidth, naturalHeight, 0, 0, z);
+  const center = viewCenterAtZ(view, z);
+  return {
+    ...base,
+    type: 'svg',
+    x: center.x,
+    y: center.y,
   };
 }
 
