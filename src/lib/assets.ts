@@ -1,11 +1,12 @@
 import type { ModelFormat } from '../types';
 import { LIMITS } from './constants';
 import { formatBytes, isAcceptedImage, readImageFile } from './image';
+import { readLottieFile } from './lottie';
 import { mediaKindOf, readMediaFile } from './media';
 import { modelFormatOf } from './model3d';
 import { isSvgFile, readSvgFile } from './svg';
 
-export type AssetKind = 'image' | 'video' | 'audio' | 'model' | 'file';
+export type AssetKind = 'image' | 'video' | 'audio' | 'model' | 'lottie' | 'file';
 
 export interface AssetMeta {
   id: string;
@@ -44,10 +45,11 @@ export const ASSET_KIND_LABELS: Record<AssetKind, string> = {
   video: '视频',
   audio: '音频',
   model: '3D 模型',
+  lottie: 'Lottie 动画',
   file: '文件',
 };
 
-export const ASSET_KIND_ORDER: AssetKind[] = ['image', 'video', 'audio', 'model', 'file'];
+export const ASSET_KIND_ORDER: AssetKind[] = ['image', 'video', 'audio', 'model', 'lottie', 'file'];
 
 function readAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -70,6 +72,7 @@ export function assetKindOf(file: File): AssetKind {
   if (isSvgFile(file)) return 'image';
   if (isAcceptedImage(file)) return 'image';
   if (modelFormatOf(file.name)) return 'model';
+  if (extOf(file.name) === 'lottie') return 'lottie';
   const media = mediaKindOf(file);
   if (media) return media;
   return 'file';
@@ -202,6 +205,24 @@ export async function readAssetFile(file: File): Promise<AssetPayload> {
       src: result.src,
       meta: { ...base, width: 0, height: 0, duration: result.duration, thumb: '' },
     };
+  }
+  if (kind === 'lottie' || (extOf(name) === 'json' && kind === 'file')) {
+    try {
+      const payload = await readLottieFile(file);
+      return {
+        src: payload.src,
+        meta: {
+          ...base,
+          kind: 'lottie',
+          width: payload.naturalWidth,
+          height: payload.naturalHeight,
+          duration: payload.duration,
+          thumb: '',
+        },
+      };
+    } catch (error) {
+      if (kind === 'lottie') throw error;
+    }
   }
   if (file.size > LIMITS.mediaBytes) {
     throw new Error(`资源超过 ${formatBytes(LIMITS.mediaBytes)} 上限（当前 ${formatBytes(file.size)}）`);

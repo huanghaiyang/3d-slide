@@ -12,7 +12,7 @@ export interface ViewState {
   pitch: number;
 }
 
-export type ObjectType = 'text' | 'image' | 'shape' | 'video' | 'audio' | 'model' | 'svg';
+export type ObjectType = 'text' | 'image' | 'shape' | 'video' | 'audio' | 'model' | 'svg' | 'lottie';
 export type ShapeKind =
   | 'rect'
   | 'roundedRect'
@@ -88,6 +88,20 @@ export interface SvgObject extends ObjectBase {
   naturalHeight: number;
 }
 
+export interface LottieObject extends ObjectBase {
+  type: 'lottie';
+  /** Lottie JSON 的 data URL */
+  src: string;
+  fit: ImageFit;
+  naturalWidth: number;
+  naturalHeight: number;
+  /** 秒 */
+  duration: number;
+  loop: boolean;
+  /** 播放速度倍率 */
+  speed: number;
+}
+
 export interface VideoObject extends ObjectBase {
   type: 'video';
   src: string;
@@ -132,7 +146,8 @@ export type SlideObject =
   | VideoObject
   | AudioObject
   | ModelObject
-  | SvgObject;
+  | SvgObject
+  | LottieObject;
 
 export interface Frame {
   id: string;
@@ -191,6 +206,7 @@ export const OBJECT_LABELS: Record<ObjectType, string> = {
   audio: '音频',
   model: '3D 模型',
   svg: 'SVG 图形',
+  lottie: 'Lottie 动画',
 };
 
 export const MODEL_FORMAT_LABELS: Record<ModelFormat, string> = {

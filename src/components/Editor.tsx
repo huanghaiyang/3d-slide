@@ -5,6 +5,7 @@ import { readAssetFile } from '../lib/assets';
 import { LIMITS } from '../lib/constants';
 import { exportDeckFile } from '../lib/file';
 import { formatBytes, isAcceptedImage, readImageFile } from '../lib/image';
+import { isLottieFile, readLottieFile } from '../lib/lottie';
 import { mediaKindOf, readMediaFile } from '../lib/media';
 import { isModelFile, modelFormatOf, MODEL_ACCEPT } from '../lib/model3d';
 import { isSvgFile, readSvgFile } from '../lib/svg';
@@ -50,6 +51,7 @@ export function Editor({ deckId, onBack }: EditorProps) {
   const imageInput = useRef<HTMLInputElement>(null);
   const mediaInput = useRef<HTMLInputElement>(null);
   const modelInput = useRef<HTMLInputElement>(null);
+  const lottieInput = useRef<HTMLInputElement>(null);
   const pendingReplace = useRef<string | null>(null);
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [narrow, setNarrow] = useState(() => window.innerWidth < 1024);
@@ -327,6 +329,44 @@ export function Editor({ deckId, onBack }: EditorProps) {
     modelInput.current?.click();
   };
 
+  const handleLottieFile = async (file: File, replaceId: string | null, point?: { x: number; y: number }) => {
+    try {
+      const payload = await readLottieFile(file);
+      const state = useDeckStore.getState();
+      if (replaceId) {
+        const object = state.deck?.objects.find((item) => item.id === replaceId);
+        if (!object || object.type !== 'lottie') return;
+        state.updateObject(replaceId, {
+          src: payload.src,
+          naturalWidth: payload.naturalWidth,
+          naturalHeight: payload.naturalHeight,
+          duration: payload.duration,
+        });
+        toast('Lottie 动画已替换', 'success');
+        return;
+      }
+      const id = state.addLottie(
+        payload.src,
+        payload.naturalWidth,
+        payload.naturalHeight,
+        payload.duration,
+        point,
+      );
+      if (!id) {
+        toast(`已达到单作品 ${LIMITS.objects} 个对象上限`, 'error');
+        return;
+      }
+      toast('Lottie 动画已添加到画板', 'success');
+    } catch (error) {
+      toast(error instanceof Error ? error.message : 'Lottie 添加失败', 'error');
+    }
+  };
+
+  const pickLottie = (replaceId?: string) => {
+    pendingReplace.current = replaceId ?? null;
+    lottieInput.current?.click();
+  };
+
   const handleAssetPick = (asset: AssetMeta, src: string) => {
     const state = useDeckStore.getState();
     if (!state.deck) return;
@@ -349,6 +389,8 @@ export function Editor({ deckId, onBack }: EditorProps) {
         return;
       }
       id = state.addModel(src, format);
+    } else if (asset.kind === 'lottie') {
+      id = state.addLottie(src, asset.width || 800, asset.height || 600, asset.duration);
     } else {
       toast('该资源类型暂不支持插入画板', 'error');
       return;
@@ -365,6 +407,7 @@ export function Editor({ deckId, onBack }: EditorProps) {
     else if (isAcceptedImage(file)) void handleImageFile(file, replaceId, point);
     else if (isModelFile(file)) void handleModelFile(file, replaceId, point);
     else if (mediaKindOf(file)) void handleMediaFile(file, replaceId, point);
+    else if (isLottieFile(file)) void handleLottieFile(file, replaceId, point);
     else toast('不支持的文件类型', 'error');
   };
 
@@ -514,6 +557,7 @@ export function Editor({ deckId, onBack }: EditorProps) {
           onAddVideo={() => pickMedia()}
           onAddAudio={() => pickMedia()}
           onAddModel={() => pickModel()}
+          onAddLottie={() => pickLottie()}
           onAddShape={() => useDeckStore.getState().addShape('rect')}
         />
 
@@ -553,6 +597,7 @@ export function Editor({ deckId, onBack }: EditorProps) {
           onReplaceImage={(id) => pickImage(id)}
           onReplaceMedia={(id) => pickMedia(id)}
           onReplaceModel={(id) => pickModel(id)}
+          onReplaceLottie={(id) => pickLottie(id)}
           onUpdateFrameView={updateFrameView}
         />
       </div>
@@ -601,6 +646,20 @@ export function Editor({ deckId, onBack }: EditorProps) {
         }}
       />
 
+      <input
+        ref={lottieInput}
+        type="file"
+        hidden
+        accept=".json,.lottie,application/json"
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          const replaceId = pendingReplace.current;
+          pendingReplace.current = null;
+          event.target.value = '';
+          if (file) void handleLottieFile(file, replaceId);
+        }}
+      />
+
       {exportView && deck && (
         <ExportDialog deck={deck} view={exportView} onClose={() => setExportView(null)} />
       )}
@@ -609,7 +668,7 @@ export function Editor({ deckId, onBack }: EditorProps) {
 
       {assetsOpen && (
         <AssetPicker
-          kinds={['image', 'video', 'audio', 'model']}
+          kinds={['image', 'video', 'audio', 'model', 'lottie']}
           onPick={handleAssetPick}
           onClose={() => setAssetsOpen(false)}
         />

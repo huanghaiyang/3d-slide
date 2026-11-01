@@ -3,6 +3,7 @@ import type {
   AudioObject,
   Deck,
   ImageObject,
+  LottieObject,
   ModelObject,
   ShapeObject,
   SlideObject,
@@ -22,6 +23,7 @@ interface InspectorProps {
   onReplaceImage: (id: string) => void;
   onReplaceMedia: (id: string) => void;
   onReplaceModel: (id: string) => void;
+  onReplaceLottie: (id: string) => void;
   onUpdateFrameView: (id: string) => void;
 }
 
@@ -680,7 +682,23 @@ function ShapeFields({ object }: { object: ShapeObject }) {
             key={kind}
             type="button"
             className={`shape-chip${object.shape === kind ? ' is-active' : ''}`}
-            onClick={() => updateObject(object.id, { shape: kind })}
+            onClick={() => {
+              if (kind === 'line' && object.shape !== 'line') {
+                const thickness = Math.max(6, object.strokeWidth || 0);
+                updateObject(object.id, {
+                  shape: kind,
+                  height: thickness,
+                  strokeWidth: thickness,
+                  stroke: object.stroke ?? object.fill,
+                });
+                return;
+              }
+              if (kind !== 'line' && object.shape === 'line' && object.height < 20) {
+                updateObject(object.id, { shape: kind, height: 340 });
+                return;
+              }
+              updateObject(object.id, { shape: kind });
+            }}
           >
             {SHAPE_LABELS[kind]}
           </button>
@@ -735,6 +753,75 @@ function ShapeFields({ object }: { object: ShapeObject }) {
   );
 }
 
+function LottieFields({
+  object,
+  onReplaceLottie,
+}: {
+  object: LottieObject;
+  onReplaceLottie: (id: string) => void;
+}) {
+  const updateObject = useDeckStore((state) => state.updateObject);
+  const retryImage = useDeckStore((state) => state.retryImage);
+  const error = useDeckStore((state) => state.imageErrors[object.id]);
+  const key = (field: string) => `${object.id}:${field}`;
+  return (
+    <>
+      <Section title="Lottie 动画">
+        <div className="media-meta">
+          <div>
+            <b>{object.naturalWidth}×{object.naturalHeight}</b>
+            <span>画布尺寸</span>
+          </div>
+          <div>
+            <b>{object.duration > 0 ? `${object.duration.toFixed(1)} s` : '循环'}</b>
+            <span>时长</span>
+          </div>
+        </div>
+        <div className="button-row">
+          <button className="btn btn-light btn-sm" onClick={() => onReplaceLottie(object.id)}>
+            <Icon name="upload" size={14} /> 替换动画
+          </button>
+          <button className="btn btn-ghost btn-sm" onClick={() => retryImage(object.id)}>
+            <Icon name="reset" size={14} /> 重新加载
+          </button>
+        </div>
+        <div className="prop-row">
+          <span className="field-label">循环播放</span>
+          <Switch
+            checked={object.loop}
+            label="Lottie 循环播放"
+            onChange={(loop) => updateObject(object.id, { loop })}
+          />
+        </div>
+        <SliderRow
+          label="播放速度"
+          value={object.speed}
+          min={0.1}
+          max={3}
+          step={0.1}
+          unit="×"
+          onChange={(speed) => updateObject(object.id, { speed }, key('speed'))}
+        />
+        <span className="field-hint">Lottie 支持导入 .json / .lottie 动画文件，编辑与演示时实时播放。</span>
+      </Section>
+      {error && (
+        <div className="image-error-box">
+          <Icon name="alert" size={15} />
+          <div>
+            <b>Lottie 无法加载</b>
+            <p>{error}</p>
+            <div className="button-row">
+              <button className="btn btn-light btn-sm" onClick={() => retryImage(object.id)}>
+                重试
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 function ObjectPanel({
   deck,
   object,
@@ -742,6 +829,7 @@ function ObjectPanel({
   onReplaceImage,
   onReplaceMedia,
   onReplaceModel,
+  onReplaceLottie,
 }: {
   deck: Deck;
   object: SlideObject;
@@ -749,6 +837,7 @@ function ObjectPanel({
   onReplaceImage: (id: string) => void;
   onReplaceMedia: (id: string) => void;
   onReplaceModel: (id: string) => void;
+  onReplaceLottie: (id: string) => void;
 }) {
   const subtitle =
     object.type === 'text'
@@ -763,7 +852,9 @@ function ObjectPanel({
             ? '视频对象'
             : object.type === 'audio'
               ? '音频对象'
-              : `${MODEL_FORMAT_LABELS[object.format]} 模型`;
+              : object.type === 'lottie'
+                ? 'Lottie 动画'
+                : `${MODEL_FORMAT_LABELS[object.format]} 模型`;
   const updateObject = useDeckStore((state) => state.updateObject);
   const removeObject = useDeckStore((state) => state.removeObject);
   const moveObjectLayer = useDeckStore((state) => state.moveObjectLayer);
@@ -799,6 +890,7 @@ function ObjectPanel({
           <MediaFields object={object} onReplaceMedia={onReplaceMedia} />
         )}
         {object.type === 'model' && <ModelFields object={object} onReplaceModel={onReplaceModel} />}
+        {object.type === 'lottie' && <LottieFields object={object} onReplaceLottie={onReplaceLottie} />}
         {object.type === 'shape' && <ShapeFields object={object} />}
 
         <Section title="变换">
@@ -1061,7 +1153,7 @@ function MultiPanel({ deck, ids, readonly }: { deck: Deck; ids: string[]; readon
                 onClick={() => selectObjects([object.id, ...ids.filter((id) => id !== object.id)])}
                 title="设为主选中对象"
               >
-                <Icon name={object.type} size={14} />
+                <Icon name={object.type === 'lottie' ? 'spark' : object.type} size={14} />
                 <span>{object.name}</span>
                 <small>{OBJECT_LABELS[object.type]}</small>
               </button>
@@ -1109,6 +1201,7 @@ export function Inspector({
   onReplaceImage,
   onReplaceMedia,
   onReplaceModel,
+  onReplaceLottie,
   onUpdateFrameView,
 }: InspectorProps) {
   const deck = useDeckStore((state) => state.deck);
@@ -1135,6 +1228,7 @@ export function Inspector({
           onReplaceImage={onReplaceImage}
           onReplaceMedia={onReplaceMedia}
           onReplaceModel={onReplaceModel}
+          onReplaceLottie={onReplaceLottie}
         />
       </aside>
     );

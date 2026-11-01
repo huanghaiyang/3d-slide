@@ -3,6 +3,7 @@ import type {
   AudioObject,
   Deck,
   ImageObject,
+  LottieObject,
   MediaKind,
   ModelFormat,
   ModelObject,
@@ -17,6 +18,10 @@ import type {
 import { ACCENT, ASPECT, FOV } from '../lib/constants';
 import { cameraPosition, clampPitch, lerpView } from '../lib/camera';
 import { disposeObject3D, loadModelGroup } from '../lib/model3d';
+import { parseLottieSource } from '../lib/lottie';
+import type { AnimationItem } from 'lottie-web';
+import { sampleBezierPath } from '../lib/curve';
+import { buildTextExtrudeGeometry } from './text3d';
 import { fontCss, layoutText } from '../lib/text';
 
 export type StageMode = 'edit' | 'view' | 'present';
@@ -56,6 +61,17 @@ interface ModelRuntime {
   format: ModelFormat;
   status: 'loading' | 'ready' | 'error';
   group: THREE.Group | null;
+  animations: THREE.AnimationClip[];
+  mixer: THREE.AnimationMixer | null;
+  error?: string;
+}
+
+interface LottieRuntime {
+  src: string;
+  status: 'loading' | 'ready' | 'error';
+  canvas: HTMLCanvasElement | null;
+  texture: THREE.CanvasTexture | null;
+  animation: AnimationItem | null;
   error?: string;
 }
 
@@ -83,6 +99,7 @@ interface ObjectNode {
   imageState: ImageState | null;
   media: MediaRuntime | null;
   model: ModelRuntime | null;
+  lottie: LottieRuntime | null;
   data: SlideObject;
   objectId: string;
   pickRoot: THREE.Group | null;
@@ -104,7 +121,7 @@ export class SceneManager {
   private objectsRoot = new THREE.Group();
   private nodes = new Map<string, ObjectNode>();
   private selectedIds: string[] = [];
-  private showGrid = true;
+  private showGrid = false;
   private grid: THREE.LineSegments | null = null;
   private gridKey = '';
   private width = 960;
@@ -120,9 +137,12 @@ export class SceneManager {
   private imageCache = new Map<string, CacheEntry>();
   private imagePending = new Set<string>();
   private mediaAutoplayArmed = false;
+  private mediaAutoPaused = new Set<string>();
+  private mediaVisibilityAt = 0;
   private placeholderTexture: THREE.Texture;
   private modelLoadingTexture: THREE.Texture;
   private modelErrorTexture: THREE.Texture;
+  private lottieErrorTexture: THREE.Texture;
   private lastTickAt = performance.now();
   private solidAccent: THREE.LineBasicMaterial;
   private dashedAccent: THREE.LineDashedMaterial;
@@ -218,6 +238,7 @@ export class SceneManager {
     this.placeholderTexture = this.createPlaceholderTexture();
     this.modelLoadingTexture = this.createModelPlaceholderTexture('正在加载 3D 模型…');
     this.modelErrorTexture = this.createModelPlaceholderTexture('模型无法加载');
+    this.lottieErrorTexture = this.createModelPlaceholderTexture('Lottie 无法加载');
 
     this.applyView(this.view);
     this.resize(this.width, this.height);
@@ -383,6 +404,7 @@ export class SceneManager {
       let loadingModels = 0;
       for (const node of this.nodes.values()) {
         if (node.model?.status === 'loading') loadingModels += 1;
+        if (node.lottie?.status === 'loading') loadingModels += 1;
       }
       if (this.imagePending.size === 0 && loadingModels === 0) return;
       this.renderOnce();
@@ -756,6 +778,10 @@ export class SceneManager {
       const model = object as ModelObject;
       return ['model', model.src, model.format, model.width, model.height].join('|');
     }
+    if (object.type === 'lottie') {
+      const lottie = object as LottieObject;
+      return ['lottie', lottie.src, lottie.width, lottie.height, lottie.loop, lottie.speed].join('|');
+    }
     const shape = object as ShapeObject;
     return [
       'shape',
@@ -798,6 +824,7 @@ export class SceneManager {
       imageState: null,
       media: null,
       model: null,
+      lottie: null,
       data: object,
       objectId: object.id,
       pickRoot: null,
@@ -863,6 +890,7 @@ export class SceneManager {
       object.type === 'svg' ||
       object.type === 'video' ||
       object.type === 'audio' ||
+      object.type === 'lottie' ||
       hiddenInEdit;
     for (const material of node.materials) {
       const mat = material as THREE.MeshBasicMaterial;
@@ -943,11 +971,16 @@ export class SceneManager {
       this.buildModel(group, object as ModelObject, node);
       return;
     }
+    if (object.type === 'lottie') {
+      this.buildLottie(group, object as LottieObject, node);
+      return;
+    }
     this.buildShape(group, object as ShapeObject, node);
   }
 
   private buildText(group: THREE.Group, object: TextObject, node: ObjectNode) {
-    const texture = this.createTextTexture(object, node);
+    const canvas = this.renderTextCanvas(object);
+    const texture = this.textureFromCanvas(canvas, node);
     const frontMaterial = new THREE.MeshBasicMaterial({
       map: texture,
       transparent: true,
@@ -961,19 +994,32 @@ export class SceneManager {
       node.materials.push(frontMaterial);
       return;
     }
+    const geometry = buildTextExtrudeGeometry(canvas, {
+      width: object.width,
+      height: object.height,
+      depth,
+    });
+    if (!geometry) {
+      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(object.width, object.height), frontMaterial);
+      mesh.position.z = -depth / 2;
+      group.add(mesh);
+      node.materials.push(frontMaterial);
+      return;
+    }
     const sideColor = new THREE.Color(object.color || '#F3EEE4').multiplyScalar(0.42);
-    const sideMaterial = new THREE.MeshBasicMaterial({ color: sideColor, side: THREE.DoubleSide });
-    // BoxGeometry 材质顺序：+X、-X、+Y、-Y、+Z、-Z，正面朝 +Z 使用文字贴图
-    const mesh = new THREE.Mesh(
-      new THREE.BoxGeometry(object.width, object.height, depth),
-      [sideMaterial, sideMaterial, sideMaterial, sideMaterial, frontMaterial, sideMaterial],
-    );
-    mesh.position.z = -depth / 2;
+    const sideMaterial = new THREE.MeshStandardMaterial({
+      color: sideColor,
+      roughness: 0.62,
+      metalness: 0.08,
+      side: THREE.DoubleSide,
+    });
+    // ExtrudeGeometry 材质分组：0 = 正背文字面（贴文字纹理），1 = 挤出侧壁
+    const mesh = new THREE.Mesh(geometry, [frontMaterial, sideMaterial]);
     group.add(mesh);
     node.materials.push(frontMaterial, sideMaterial);
   }
 
-  private createTextTexture(object: TextObject, node: ObjectNode): THREE.CanvasTexture {
+  private renderTextCanvas(object: TextObject): HTMLCanvasElement {
     const density = Math.min(
       2,
       4096 / Math.max(1, object.width),
@@ -997,6 +1043,10 @@ export class SceneManager {
     layout.lines.forEach((line, index) => {
       ctx.fillText(line, x, paddingTop + fontPx * 0.8 + index * lineHeightPx);
     });
+    return canvas;
+  }
+
+  private textureFromCanvas(canvas: HTMLCanvasElement, node: ObjectNode): THREE.CanvasTexture {
     const texture = new THREE.CanvasTexture(canvas);
     texture.colorSpace = THREE.SRGBColorSpace;
     texture.minFilter = THREE.LinearFilter;
@@ -1137,9 +1187,18 @@ export class SceneManager {
       return;
     }
     if (object.shape === 'line') {
-      const thickness = Math.max(2, object.strokeWidth || object.height);
+      // 直线用圆头胶囊形，避免把切换类型后的对象画成一个大矩形
+      const thickness = Math.max(1, object.strokeWidth || 6);
+      const radius = thickness / 2;
+      const half = Math.max(radius, object.width / 2);
+      const shape = new THREE.Shape();
+      shape.moveTo(-half + radius, -radius);
+      shape.lineTo(half - radius, -radius);
+      shape.absarc(half - radius, 0, radius, -Math.PI / 2, Math.PI / 2, false);
+      shape.lineTo(-half + radius, radius);
+      shape.absarc(-half + radius, 0, radius, Math.PI / 2, Math.PI * 1.5, false);
       const material = new THREE.MeshBasicMaterial({ color: strokeColor, side: THREE.DoubleSide });
-      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(object.width, thickness), material);
+      const mesh = new THREE.Mesh(new THREE.ShapeGeometry(shape, 16), material);
       group.add(mesh);
       node.materials.push(material);
       return;
@@ -1202,19 +1261,28 @@ export class SceneManager {
     const half = Math.max(1, object.strokeWidth) / 2;
     const points: THREE.Vector2[] = [];
     for (let i = 0; i + 1 < raw.length; i += 2) {
-      // 内容组沿 Y 轴镜像，画布坐标需要取负
-      const point = new THREE.Vector2(raw[i] * w - w / 2, h / 2 - raw[i + 1] * h);
+      // 内容组已沿 X/Y 翻转，归一化画布坐标映射到局部坐标时需要同时取反 X
+      const point = new THREE.Vector2(w / 2 - raw[i] * w, h / 2 - raw[i + 1] * h);
       const previous = points[points.length - 1];
       if (previous && previous.distanceTo(point) < 1.2) continue;
       points.push(point);
     }
     if (points.length < 2) return;
+    // 用三次贝塞尔（Catmull-Rom 控制点）平滑手绘折线
+    const smooth = sampleBezierPath(points, 6);
+    const curve: THREE.Vector2[] = [];
+    for (const point of smooth) {
+      const previous = curve[curve.length - 1];
+      if (previous && previous.distanceTo(point as THREE.Vector2) < 0.6) continue;
+      curve.push(new THREE.Vector2(point.x, point.y));
+    }
+    if (curve.length < 2) return;
     const positions: number[] = [];
     const indices: number[] = [];
-    for (let i = 0; i < points.length; i += 1) {
-      const current = points[i];
-      const previous = points[Math.max(0, i - 1)];
-      const next = points[Math.min(points.length - 1, i + 1)];
+    for (let i = 0; i < curve.length; i += 1) {
+      const current = curve[i];
+      const previous = curve[Math.max(0, i - 1)];
+      const next = curve[Math.min(curve.length - 1, i + 1)];
       const tangent = new THREE.Vector2().subVectors(next, previous);
       if (tangent.lengthSq() < 1e-6) tangent.set(1, 0);
       tangent.normalize();
@@ -1222,7 +1290,7 @@ export class SceneManager {
       positions.push(current.x + normal.x, current.y + normal.y, 0);
       positions.push(current.x - normal.x, current.y - normal.y, 0);
     }
-    for (let i = 0; i < points.length - 1; i += 1) {
+    for (let i = 0; i < curve.length - 1; i += 1) {
       const a = i * 2;
       indices.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
     }
@@ -1328,6 +1396,8 @@ export class SceneManager {
       format: object.format,
       status: 'loading',
       group: null,
+      animations: [],
+      mixer: null,
     };
     node.model = runtime;
     if (!object.src) {
@@ -1336,13 +1406,18 @@ export class SceneManager {
       return;
     }
     void loadModelGroup(object.src, object.format, object.name)
-      .then(({ group }) => {
+      .then(({ group, animations }) => {
         if (this.nodes.get(node.objectId) !== node || node.model !== runtime || this.disposed) {
           disposeObject3D(group);
           return;
         }
         runtime.group = group;
+        runtime.animations = animations;
         runtime.status = 'ready';
+        if (animations.length > 0) {
+          runtime.mixer = new THREE.AnimationMixer(group);
+          for (const clip of animations) runtime.mixer.clipAction(clip).play();
+        }
         node.visualKey = '';
         this.rebuildContent(node);
       })
@@ -1360,7 +1435,122 @@ export class SceneManager {
     const runtime = node.model;
     if (!runtime) return;
     node.model = null;
+    if (runtime.mixer && runtime.group) {
+      runtime.mixer.stopAllAction();
+      runtime.mixer.uncacheRoot(runtime.group);
+    }
+    runtime.mixer = null;
     if (runtime.group) disposeObject3D(runtime.group);
+  }
+
+  private buildLottie(group: THREE.Group, object: LottieObject, node: ObjectNode) {
+    this.ensureLottie(node, object);
+    const runtime = node.lottie;
+    if (runtime?.animation) {
+      runtime.animation.setLoop(object.loop);
+      runtime.animation.setSpeed(Math.max(0.1, object.speed || 1));
+    }
+    if (runtime?.status === 'ready' && runtime.texture) {
+      const material = new THREE.MeshBasicMaterial({
+        map: runtime.texture,
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      });
+      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(object.width, object.height), material);
+      group.add(mesh);
+      node.materials.push(material);
+      return;
+    }
+    const texture = runtime?.status === 'error' ? this.lottieErrorTexture : this.modelLoadingTexture;
+    const material = new THREE.MeshBasicMaterial({
+      map: texture,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(object.width, object.height), material);
+    group.add(mesh);
+    node.materials.push(material);
+  }
+
+  private ensureLottie(node: ObjectNode, object: LottieObject) {
+    const existing = node.lottie;
+    if (existing && existing.src === object.src) return;
+    this.disposeLottie(node);
+    const runtime: LottieRuntime = {
+      src: object.src,
+      status: 'loading',
+      canvas: null,
+      texture: null,
+      animation: null,
+    };
+    node.lottie = runtime;
+    const data = parseLottieSource(object.src);
+    if (!data) {
+      runtime.status = 'error';
+      runtime.error = 'Lottie 数据无法解析';
+      this.callbacks.onImageError(node.objectId, 'Lottie 动画数据无法解析');
+      return;
+    }
+    const naturalWidth = Math.max(1, object.naturalWidth || 800);
+    const naturalHeight = Math.max(1, object.naturalHeight || 600);
+    const scale = Math.min(1, 2048 / Math.max(naturalWidth, naturalHeight));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(2, Math.round(naturalWidth * scale));
+    canvas.height = Math.max(2, Math.round(naturalHeight * scale));
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.generateMipmaps = false;
+    runtime.canvas = canvas;
+    runtime.texture = texture;
+
+    void import('lottie-web')
+      .then(({ default: lottie }) => {
+        if (this.nodes.get(node.objectId) !== node || node.lottie !== runtime || this.disposed) return;
+        const context = canvas.getContext('2d');
+        if (!context) throw new Error('无法创建 Lottie 画布');
+        const animation = lottie.loadAnimation<'canvas'>({
+          container: canvas,
+          renderer: 'canvas',
+          loop: object.loop,
+          autoplay: true,
+          animationData: data,
+          rendererSettings: {
+            context,
+            clearCanvas: true,
+            preserveAspectRatio: 'xMidYMid meet',
+          },
+        });
+        animation.setSpeed(Math.max(0.1, object.speed || 1));
+        runtime.animation = animation;
+        runtime.status = 'ready';
+        node.visualKey = '';
+        this.rebuildContent(node);
+      })
+      .catch((error: unknown) => {
+        if (node.lottie !== runtime) return;
+        runtime.status = 'error';
+        runtime.error = error instanceof Error ? error.message : 'Lottie 加载失败';
+        this.callbacks.onImageError(node.objectId, `Lottie 无法加载：${runtime.error}`);
+        node.visualKey = '';
+        this.rebuildContent(node);
+      });
+  }
+
+  private disposeLottie(node: ObjectNode) {
+    const runtime = node.lottie;
+    if (!runtime) return;
+    node.lottie = null;
+    if (runtime.animation) {
+      runtime.animation.destroy();
+      runtime.animation = null;
+    }
+    if (runtime.texture) runtime.texture.dispose();
+    runtime.texture = null;
+    runtime.canvas = null;
   }
 
   private buildModel(group: THREE.Group, object: ModelObject, node: ObjectNode) {
@@ -1656,6 +1846,7 @@ export class SceneManager {
   }
 
   pauseMedia(id: string) {
+    this.mediaAutoPaused.delete(id);
     this.nodes.get(id)?.media?.element?.pause();
   }
 
@@ -1663,7 +1854,10 @@ export class SceneManager {
     const element = this.nodes.get(id)?.media?.element;
     if (!element) return;
     if (element.paused) this.playMedia(id);
-    else element.pause();
+    else {
+      this.mediaAutoPaused.delete(id);
+      element.pause();
+    }
   }
 
   seekMedia(id: string, time: number) {
@@ -1689,7 +1883,36 @@ export class SceneManager {
   }
 
   private pauseAllMedia() {
+    this.mediaAutoPaused.clear();
     for (const node of this.nodes.values()) node.media?.element?.pause();
+  }
+
+  /** 预览时检测相机视锥：离开视野的音视频自动暂停，回到视野后恢复 */
+  private updateMediaVisibility(now: number) {
+    if (this.mode !== 'present') return;
+    if (now - this.mediaVisibilityAt < 140) return;
+    this.mediaVisibilityAt = now;
+    this.camera.updateMatrixWorld();
+    const frustum = new THREE.Frustum().setFromProjectionMatrix(
+      new THREE.Matrix4().multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse),
+    );
+    const sphere = new THREE.Sphere();
+    for (const node of this.nodes.values()) {
+      const element = node.media?.element;
+      if (!element) continue;
+      const object = node.data;
+      if (object.type !== 'video' && object.type !== 'audio') continue;
+      node.group.getWorldPosition(sphere.center);
+      sphere.radius = Math.max(object.width, object.height) / 2;
+      const inView = frustum.intersectsSphere(sphere);
+      if (!inView && !element.paused) {
+        element.pause();
+        this.mediaAutoPaused.add(node.objectId);
+      } else if (inView && this.mediaAutoPaused.has(node.objectId)) {
+        this.mediaAutoPaused.delete(node.objectId);
+        this.playMedia(node.objectId);
+      }
+    }
   }
 
   private handleModeMedia(previousMode: StageMode, mode: StageMode) {
@@ -1712,6 +1935,7 @@ export class SceneManager {
   private removeNode(node: ObjectNode) {
     this.disposeMedia(node);
     this.disposeModel(node);
+    this.disposeLottie(node);
     this.clearContent(node);
     node.group.remove(node.outline);
     node.outline.geometry.dispose();
@@ -1804,9 +2028,11 @@ export class SceneManager {
     const dt = Math.min(0.06, Math.max(0, (now - this.lastTickAt) / 1000));
     this.lastTickAt = now;
     for (const node of this.nodes.values()) {
+      if (node.lottie?.texture) node.lottie.texture.needsUpdate = true;
       const runtime = node.model;
       const object = node.data;
       if (!runtime || runtime.status !== 'ready' || !runtime.group) continue;
+      if (runtime.mixer) runtime.mixer.update(dt);
       if (object.type !== 'model' || !object.autoRotate) continue;
       runtime.group.rotation.y += ((object.rotateSpeed || 0) * Math.PI / 180) * dt;
     }
@@ -1821,6 +2047,7 @@ export class SceneManager {
         resolve();
       }
     }
+    this.updateMediaVisibility(now);
     this.updateGrid();
     this.renderFrame();
   }
@@ -2010,8 +2237,8 @@ export class SceneManager {
     const fx = -Math.sin(view.yaw) * cp;
     const fy = Math.sin(view.pitch);
     const fz = -Math.cos(view.yaw) * cp;
-    const rx = Math.cos(view.yaw);
-    const rz = -Math.sin(view.yaw);
+    const rx = -Math.cos(view.yaw);
+    const rz = Math.sin(view.yaw);
     const speed = Math.max(view.distance * 1.25, 180);
     const distance = speed * Math.max(0, Math.min(0.1, dt));
     view.target.x += (fx * forward + rx * right) * distance;

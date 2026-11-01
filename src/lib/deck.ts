@@ -2,6 +2,7 @@ import type {
   AudioObject,
   Deck,
   ImageObject,
+  LottieObject,
   ModelFormat,
   ModelObject,
   ShapeKind,
@@ -232,6 +233,40 @@ export function createShapeObject(
     stroke: shape === 'line' ? DEFAULT_SHAPE_COLOR : null,
     strokeWidth: shape === 'line' ? 6 : 0,
     points: shape === 'path' ? [] : undefined,
+  };
+}
+
+export function createLottieObject(
+  id: string,
+  name: string,
+  src: string,
+  naturalWidth: number,
+  naturalHeight: number,
+  duration: number,
+  view: ViewState,
+  z: number,
+): LottieObject {
+  const center = viewCenterAtZ(view, z);
+  const size = fitMediaSize(naturalWidth || 800, naturalHeight || 600, 720);
+  return {
+    id,
+    type: 'lottie',
+    name,
+    x: center.x,
+    y: center.y,
+    z,
+    width: size.width,
+    height: size.height,
+    rotation: 0,
+    opacity: 100,
+    visible: true,
+    src,
+    fit: 'contain',
+    naturalWidth: Math.max(1, Math.round(naturalWidth || 800)),
+    naturalHeight: Math.max(1, Math.round(naturalHeight || 600)),
+    duration,
+    loop: true,
+    speed: 1,
   };
 }
 

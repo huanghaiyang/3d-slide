@@ -142,6 +142,22 @@ function normalizeObject(raw: unknown, warnings: string[]): SlideObject {
       naturalHeight: Math.max(1, num(r.naturalHeight, 900)),
     };
   }
+  if (type === 'lottie') {
+    const base = normalizeBase(r);
+    const src = str(r.src, '');
+    if (!src) warnings.push(`Lottie「${base.name}」缺少动画数据，已以占位卡导入`);
+    return {
+      ...base,
+      type: 'lottie',
+      src,
+      fit: r.fit === 'cover' ? 'cover' : 'contain',
+      naturalWidth: Math.max(1, num(r.naturalWidth, 800)),
+      naturalHeight: Math.max(1, num(r.naturalHeight, 600)),
+      duration: Math.max(0, num(r.duration, 0)),
+      loop: bool(r.loop, true),
+      speed: clamp(num(r.speed, 1), 0.1, 4),
+    };
+  }
   if (type === 'video') {
     const base = normalizeBase(r);
     const src = str(r.src, '');
@@ -290,6 +306,9 @@ export function normalizeDeckWithWarnings(
     }
     if ((o.type === 'video' || o.type === 'audio') && !o.src) {
       warnings.push(`媒体「${o.name}」缺少素材，已以占位卡显示`);
+    }
+    if (o.type === 'lottie' && !o.src) {
+      warnings.push(`Lottie「${o.name}」缺少动画数据，已以占位卡显示`);
     }
   }
   return { deck, warnings };

@@ -50,7 +50,12 @@ function geometryToMesh(geometry: THREE.BufferGeometry, color: number): THREE.Me
   return new THREE.Mesh(geometry, material);
 }
 
-function parseWithLoader(format: ModelFormat, src: string, name: string): Promise<THREE.Object3D> {
+interface ParsedModel {
+  object: THREE.Object3D;
+  animations: THREE.AnimationClip[];
+}
+
+function parseWithLoader(format: ModelFormat, src: string, name: string): Promise<ParsedModel> {
   const buffer = dataUrlToBuffer(src);
   return new Promise((resolve, reject) => {
     const fail = (error: unknown) => reject(error instanceof Error ? error : new Error(`无法解析 ${name}`));
@@ -64,7 +69,7 @@ function parseWithLoader(format: ModelFormat, src: string, name: string): Promis
             loader.parse(
               payload,
               '',
-              (gltf) => resolve(gltf.scene),
+              (gltf) => resolve({ object: gltf.scene, animations: gltf.animations ?? [] }),
               fail,
             );
           })
@@ -75,7 +80,7 @@ function parseWithLoader(format: ModelFormat, src: string, name: string): Promis
         void import('three/examples/jsm/loaders/OBJLoader.js')
           .then(({ OBJLoader }) => {
             const group = new OBJLoader().parse(new TextDecoder().decode(buffer));
-            resolve(group);
+            resolve({ object: group, animations: [] });
           })
           .catch(fail);
         return;
@@ -84,20 +89,24 @@ function parseWithLoader(format: ModelFormat, src: string, name: string): Promis
         void import('three/examples/jsm/loaders/FBXLoader.js')
           .then(({ FBXLoader }) => {
             const group = new FBXLoader().parse(buffer, '');
-            resolve(group);
+            resolve({ object: group, animations: group.animations ?? [] });
           })
           .catch(fail);
         return;
       }
       case 'stl': {
         void import('three/examples/jsm/loaders/STLLoader.js')
-          .then(({ STLLoader }) => resolve(geometryToMesh(new STLLoader().parse(buffer), 0xc7d2de)))
+          .then(({ STLLoader }) =>
+            resolve({ object: geometryToMesh(new STLLoader().parse(buffer), 0xc7d2de), animations: [] }),
+          )
           .catch(fail);
         return;
       }
       case 'ply': {
         void import('three/examples/jsm/loaders/PLYLoader.js')
-          .then(({ PLYLoader }) => resolve(geometryToMesh(new PLYLoader().parse(buffer), 0xc7d2de)))
+          .then(({ PLYLoader }) =>
+            resolve({ object: geometryToMesh(new PLYLoader().parse(buffer), 0xc7d2de), animations: [] }),
+          )
           .catch(fail);
         return;
       }
@@ -105,20 +114,30 @@ function parseWithLoader(format: ModelFormat, src: string, name: string): Promis
         void import('three/examples/jsm/loaders/ColladaLoader.js')
           .then(({ ColladaLoader }) => {
             const result = new ColladaLoader().parse(new TextDecoder().decode(buffer), '');
-            resolve(result.scene);
+            resolve({
+              object: result.scene,
+              animations: (result as unknown as { animations?: THREE.AnimationClip[] }).animations ?? [],
+            });
           })
           .catch(fail);
         return;
       }
       case '3mf': {
         void import('three/examples/jsm/loaders/3MFLoader.js')
-          .then(({ ThreeMFLoader }) => resolve(new ThreeMFLoader().parse(buffer)))
+          .then(({ ThreeMFLoader }) =>
+            resolve({ object: new ThreeMFLoader().parse(buffer), animations: [] }),
+          )
           .catch(fail);
         return;
       }
       case 'usdz': {
         void import('three/examples/jsm/loaders/USDZLoader.js')
-          .then(({ USDZLoader }) => resolve(new USDZLoader().parse(buffer) as unknown as THREE.Group))
+          .then(({ USDZLoader }) =>
+            resolve({
+              object: new USDZLoader().parse(buffer) as unknown as THREE.Group,
+              animations: [],
+            }),
+          )
           .catch(fail);
         return;
       }
@@ -133,10 +152,13 @@ export interface LoadedModel {
   group: THREE.Group;
   /** 归一化后的尺寸 */
   size: THREE.Vector3;
+  /** 模型自带的动画片段（FBX / GLTF / Collada） */
+  animations: THREE.AnimationClip[];
 }
 
 export async function loadModelGroup(src: string, format: ModelFormat, name: string): Promise<LoadedModel> {
-  const object = await parseWithLoader(format, src, name);
+  const parsed = await parseWithLoader(format, src, name);
+  const object = parsed.object;
   object.updateMatrixWorld(true);
   const box = new THREE.Box3().setFromObject(object);
   if (box.isEmpty()) throw new Error('模型中没有可显示的网格');
@@ -152,7 +174,7 @@ export async function loadModelGroup(src: string, format: ModelFormat, name: str
   const group = new THREE.Group();
   group.add(inner);
   size.multiplyScalar(1 / maxDimension);
-  return { group, size };
+  return { group, size, animations: parsed.animations };
 }
 
 export function disposeObject3D(root: THREE.Object3D) {

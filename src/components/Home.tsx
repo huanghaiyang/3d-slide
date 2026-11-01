@@ -56,7 +56,7 @@ function DeckThumb({ summary }: { summary: DeckSummary }) {
             </div>
           );
         }
-        if (object.type === 'video' || object.type === 'audio' || object.type === 'model') {
+        if (object.type === 'video' || object.type === 'audio' || object.type === 'model' || object.type === 'lottie') {
           return (
             <div
               className={`thumb-object thumb-media is-${object.type}`}
@@ -64,7 +64,15 @@ function DeckThumb({ summary }: { summary: DeckSummary }) {
               style={place(object)}
             >
               <Icon
-                name={object.type === 'video' ? 'play' : object.type === 'audio' ? 'audio' : 'model'}
+                name={
+                  object.type === 'video'
+                    ? 'play'
+                    : object.type === 'audio'
+                      ? 'audio'
+                      : object.type === 'model'
+                        ? 'model'
+                        : 'spark'
+                }
                 size={11}
               />
             </div>

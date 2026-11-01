@@ -13,6 +13,7 @@ import type { CameraRequest, Deck, ShapeKind, TextObject, ViewState } from '../t
 import { ASPECT, DEFAULT_VIEW, FONT_STACKS } from '../lib/constants';
 import { fitDistance, formatZoom } from '../lib/camera';
 import { nextDepth } from '../lib/deck';
+import { smoothPathD } from '../lib/curve';
 import { SceneManager } from '../three/SceneManager';
 import type { MediaPlaybackState, StageMode } from '../three/SceneManager';
 import { Icon } from './Icon';
@@ -156,7 +157,10 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
   const managerRef = useRef<SceneManager | null>(null);
   const [box, setBox] = useState({ width: 0, height: 0 });
   const [liveView, setLiveView] = useState<ViewState>(initialView ?? deck.lastView);
-  const [showGrid, setShowGrid] = useState(true);
+  const [showGrid, setShowGrid] = useState(false);
+  const [activeAxis, setActiveAxis] = useState<AxisDir | null>(null);
+  const [lensOn, setLensOn] = useState(false);
+  const [lensStrength, setLensStrength] = useState(50);
   const [editing, setEditing] = useState<EditingState | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [marquee, setMarquee] = useState<MarqueeRect | null>(null);
@@ -235,6 +239,11 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
   useEffect(() => {
     managerRef.current?.setShowAxes(showAxes);
   }, [showAxes, mode]);
+
+  useEffect(() => {
+    if (mode !== 'edit') return;
+    managerRef.current?.setLens(lensOn ? 'fisheye' : 'none', lensStrength / 100);
+  }, [lensOn, lensStrength, mode]);
 
   useEffect(() => {
     if (!imageRetry) return;
@@ -339,6 +348,7 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
     if (lockRef.current) return;
     const manager = managerRef.current;
     if (!manager) return;
+    setActiveAxis(axis);
     const current = manager.getView();
     const angles: Record<AxisDir, { yaw: number; pitch: number }> = {
       '+x': { yaw: Math.PI / 2, pitch: 0 },
@@ -386,7 +396,7 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
         Math.max(0, Math.min(1, (point.y - top) / height)),
       );
     }
-    callback(normalized, { x: (minX + maxX) / 2, y: (minY + maxY) / 2, width, height }, strokeWidth);
+    callback(normalized, { x: left, y: top, width, height }, strokeWidth);
   };
 
   useImperativeHandle(
@@ -471,6 +481,7 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
       const min = modeRef.current === 'present' ? base / 8 : 20;
       const max = modeRef.current === 'present' ? base * 10 : 60000;
       manager.zoomAt(event.clientX, event.clientY, factor, min, max);
+      setActiveAxis(null);
       const view = manager.getView();
       setLiveView(view);
       if (wheelTimer.current) window.clearTimeout(wheelTimer.current);
@@ -697,8 +708,10 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
       onResizeObject?.(state.objectId!, { x: cx, y: cy, width, height });
     } else if (state.mode === 'orbit') {
       manager.orbitBy(dx, dy);
+      setActiveAxis(null);
     } else if (state.mode === 'pan') {
       manager.panBy(dx, dy);
+      setActiveAxis(null);
     }
   };
 
@@ -860,6 +873,29 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
               <span>画笔</span>
             </button>
             <button
+              className={`stage-tool ${lensOn ? 'is-active' : ''}`}
+              onClick={() => setLensOn((value) => !value)}
+              title="鱼眼预览，可在右侧调节强度"
+              aria-pressed={lensOn}
+            >
+              <Icon name="fisheye" size={16} />
+              <span>鱼眼</span>
+            </button>
+            {lensOn && (
+              <label className="stage-lens-control" title="鱼眼强度">
+                <input
+                  type="range"
+                  min={10}
+                  max={100}
+                  step={1}
+                  value={lensStrength}
+                  aria-label="鱼眼强度"
+                  onChange={(event) => setLensStrength(Number(event.target.value))}
+                />
+                <span>{lensStrength}%</span>
+              </label>
+            )}
+            <button
               className={`stage-tool ${showAxes ? 'is-active' : ''}`}
               onClick={() => setShowAxes((value) => !value)}
               title="显示 X / Y / Z 坐标轴"
@@ -873,7 +909,7 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
                 {(['+x', '-x', '+y', '-y', '+z', '-z'] as AxisDir[]).map((axis) => (
                   <button
                     key={axis}
-                    className="stage-axis-btn"
+                    className={`stage-axis-btn${activeAxis === axis ? ' is-active' : ''}`}
                     onClick={() => lookAlong(axis)}
                     title={`切换到 ${axis.toUpperCase()} 轴视角`}
                     disabled={viewLocked}
@@ -897,8 +933,8 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
 
         {drawStroke && drawStroke.length > 1 && (
           <svg className="stage-draw-layer" aria-hidden="true">
-            <polyline
-              points={drawStroke.map((point) => `${point.x},${point.y}`).join(' ')}
+            <path
+              d={smoothPathD(drawStroke)}
               fill="none"
               stroke="#2DD4BF"
               strokeWidth={6}

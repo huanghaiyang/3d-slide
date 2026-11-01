@@ -3695,9 +3695,41 @@ button:disabled {
   color: #bfdbfe;
 }
 
+.stage-axis-btn.is-active {
+  border-color: rgba(45, 212, 191, 0.75);
+  background: rgba(45, 212, 191, 0.22);
+  color: #99f6e4;
+  box-shadow: 0 0 0 1px rgba(45, 212, 191, 0.25) inset;
+}
+
 .stage-axis-btn:disabled {
   opacity: 0.35;
   cursor: not-allowed;
+}
+
+.stage-lens-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 5px;
+  background: rgba(10, 16, 24, 0.55);
+  color: #c9d2df;
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.stage-lens-control input[type='range'] {
+  width: 96px;
+  height: 14px;
+  accent-color: #2dd4bf;
+}
+
+.stage-lens-control span {
+  min-width: 30px;
+  text-align: right;
 }
 
 /* -------------------------------- Export -------------------------------- */

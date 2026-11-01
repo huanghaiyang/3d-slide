@@ -19,6 +19,7 @@ import {
   clampNumber,
   createAudioObject,
   createImageObject,
+  createLottieObject,
   createModelObject,
   createShapeObject,
   createSvgObject,
@@ -73,6 +74,13 @@ interface DeckStore {
   addText: () => string | null;
   addShape: (shape: ShapeKind) => string | null;
   addSvg: (src: string, naturalWidth: number, naturalHeight: number, point?: { x: number; y: number }) => string | null;
+  addLottie: (
+    src: string,
+    naturalWidth: number,
+    naturalHeight: number,
+    duration: number,
+    point?: { x: number; y: number },
+  ) => string | null;
   addPath: (
     points: number[],
     box: { x: number; y: number; width: number; height: number },
@@ -562,6 +570,30 @@ export const useDeckStore = create<DeckStore>((set, get) => {
         ...deck,
         objects: [...deck.objects, object],
         counters: { ...deck.counters, svg: count },
+      }));
+      if (!applied) return null;
+      set({ selectedObjectId: id, selectedIds: [id], selectedFrameId: null });
+      return id;
+    },
+
+    addLottie: (src, naturalWidth, naturalHeight, duration, point) => {
+      const state = get();
+      if (!state.deck) return null;
+      if (state.deck.objects.length >= LIMITS.objects) return null;
+      const deckAtStart = state.deck;
+      const z = nextDepth(deckAtStart.objects);
+      const count = (deckAtStart.counters.lottie ?? 0) + 1;
+      const name = nameForObject(deckAtStart, 'lottie', 'Lottie');
+      const id = crypto.randomUUID();
+      const object = createLottieObject(id, name, src, naturalWidth, naturalHeight, duration, state.view, z);
+      if (point) {
+        object.x = clampNumber(point.x, -LIMITS.coord, LIMITS.coord, object.x);
+        object.y = clampNumber(point.y, -LIMITS.coord, LIMITS.coord, object.y);
+      }
+      const applied = applyDeck((deck) => ({
+        ...deck,
+        objects: [...deck.objects, object],
+        counters: { ...deck.counters, lottie: count },
       }));
       if (!applied) return null;
       set({ selectedObjectId: id, selectedIds: [id], selectedFrameId: null });

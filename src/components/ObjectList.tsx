@@ -20,6 +20,7 @@ interface ObjectListProps {
   onAddVideo: () => void;
   onAddAudio: () => void;
   onAddModel: () => void;
+  onAddLottie: () => void;
   onAddShape: () => void;
 }
 
@@ -31,6 +32,7 @@ const typeIcon: Record<ObjectType, IconName> = {
   audio: 'audio',
   model: 'model',
   svg: 'svg',
+  lottie: 'spark',
 };
 
 export function ObjectList({
@@ -49,6 +51,7 @@ export function ObjectList({
   onAddVideo,
   onAddAudio,
   onAddModel,
+  onAddLottie,
   onAddShape,
 }: ObjectListProps) {
   const [dragId, setDragId] = useState<string | null>(null);
@@ -233,6 +236,14 @@ export function ObjectList({
             title={atLimit ? '已达到单作品对象上限' : '添加 3D 模型'}
           >
             <Icon name="model" size={14} /> 模型
+          </button>
+          <button
+            className="btn btn-light btn-sm"
+            onClick={onAddLottie}
+            disabled={atLimit}
+            title={atLimit ? '已达到单作品对象上限' : '添加 Lottie 动画'}
+          >
+            <Icon name="spark" size={14} /> Lottie
           </button>
           <button
             className="btn btn-light btn-sm"
