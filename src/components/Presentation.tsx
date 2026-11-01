@@ -1,6 +1,7 @@
 import { createPortal } from 'react-dom';
 import { useEffect, useRef, useState } from 'react';
 import type { Deck, ViewState } from '../types';
+import { DEFAULT_HOLD } from '../lib/constants';
 import type { MediaPlaybackState } from '../three/SceneManager';
 import { Stage, type StageApi } from './Stage';
 import { Icon } from './Icon';
@@ -31,6 +32,8 @@ export function Presentation({ deck, startIndex, entryView, fullscreenFailed, on
   const hideTimer = useRef<number>();
   const pressedKeys = useRef<Set<string>>(new Set());
   const roamRef = useRef(false);
+  const touchStart = useRef<{ x: number; y: number } | null>(null);
+  const suppressClick = useRef(0);
   const hadFullscreen = useRef(Boolean(document.fullscreenElement));
   const reduced = useRef(
     typeof window !== 'undefined' && window.matchMedia
@@ -39,6 +42,8 @@ export function Presentation({ deck, startIndex, entryView, fullscreenFailed, on
   );
   const [index, setIndex] = useState(startIndex);
   const [roam, setRoam] = useState(false);
+  const [playing, setPlaying] = useState(false);
+  const [notesOpen, setNotesOpen] = useState(false);
   const [hint, setHint] = useState(() => {
     try {
       return localStorage.getItem(HINT_KEY) !== '1';
@@ -86,7 +91,8 @@ export function Presentation({ deck, startIndex, entryView, fullscreenFailed, on
     busy.current = false;
   };
 
-  const go = (delta: 1 | -1) => {
+  const go = (delta: 1 | -1, auto = false) => {
+    if (!auto) setPlaying(false);
     if (busy.current || exiting.current) return;
     const frames = deck.frames;
     if (frames.length === 0) return;
@@ -104,7 +110,59 @@ export function Presentation({ deck, startIndex, entryView, fullscreenFailed, on
     void flyTo(frame.view, frame.duration);
   };
 
+  const togglePlay = () => {
+    if (exiting.current) return;
+    if (playing) {
+      setPlaying(false);
+      return;
+    }
+    if (deck.frames.length === 0) return;
+    if (clickTimer.current) window.clearTimeout(clickTimer.current);
+    if (indexRef.current < 0 || indexRef.current >= deck.frames.length - 1) {
+      const first = deck.frames[0];
+      setIndex(0);
+      void flyTo(first.view, first.duration);
+    }
+    setPlaying(true);
+  };
+
+  useEffect(() => {
+    if (!playing) return;
+    if (deck.frames.length === 0) {
+      setPlaying(false);
+      return;
+    }
+    let cancelled = false;
+    let timer = 0;
+    let waitTimer = 0;
+    const schedule = () => {
+      if (cancelled) return;
+      if (busy.current) {
+        waitTimer = window.setTimeout(schedule, 220);
+        return;
+      }
+      const frame = indexRef.current >= 0 ? deck.frames[indexRef.current] : null;
+      const hold = Math.max(0.5, frame?.hold ?? DEFAULT_HOLD);
+      timer = window.setTimeout(() => {
+        if (cancelled) return;
+        if (indexRef.current >= deck.frames.length - 1) {
+          setPlaying(false);
+          return;
+        }
+        go(1, true);
+      }, hold * 1000);
+    };
+    schedule();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      window.clearTimeout(waitTimer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playing, index, deck.frames.length]);
+
   const returnToPath = () => {
+    setPlaying(false);
     if (busy.current || exiting.current) return;
     const frame = indexRef.current >= 0 ? deck.frames[indexRef.current] : null;
     void flyTo(frame?.view ?? entryView, 0.6);
@@ -112,6 +170,7 @@ export function Presentation({ deck, startIndex, entryView, fullscreenFailed, on
 
   const toggleRoam = () => {
     if (exiting.current) return;
+    setPlaying(false);
     pressedKeys.current.clear();
     if (clickTimer.current) window.clearTimeout(clickTimer.current);
     setRoam((value) => !value);
@@ -247,6 +306,11 @@ export function Presentation({ deck, startIndex, entryView, fullscreenFailed, on
         toggleRoam();
         return;
       }
+      if (key === 'n') {
+        event.preventDefault();
+        setNotesOpen((value) => !value);
+        return;
+      }
       if (roamRef.current) {
         if (key === 'w' || key === 'a' || key === 's' || key === 'd' || key === 'q' || key === 'e') {
           event.preventDefault();
@@ -319,13 +383,35 @@ export function Presentation({ deck, startIndex, entryView, fullscreenFailed, on
 
   return createPortal(
     <div className={`present-layer ${cursorHidden ? 'is-cursor-hidden' : ''}`}>
-      <div className="present-stage">
+      <div
+        className="present-stage"
+        onTouchStart={(event) => {
+          const touch = event.touches[0];
+          if (!touch) return;
+          touchStart.current = { x: touch.clientX, y: touch.clientY };
+        }}
+        onTouchEnd={(event) => {
+          const start = touchStart.current;
+          touchStart.current = null;
+          if (!start || busy.current || roamRef.current) return;
+          const touch = event.changedTouches[0];
+          if (!touch) return;
+          const dx = touch.clientX - start.x;
+          const dy = touch.clientY - start.y;
+          if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.2) {
+            suppressClick.current = Date.now();
+            if (clickTimer.current) window.clearTimeout(clickTimer.current);
+            go(dx < 0 ? 1 : -1);
+          }
+        }}
+      >
         <Stage
           ref={stageRef}
           deck={deck}
           mode="present"
           initialView={initialView}
           onStageClick={() => {
+            if (Date.now() - suppressClick.current < 500) return;
             if (busy.current || roamRef.current) return;
             if (clickTimer.current) window.clearTimeout(clickTimer.current);
             clickTimer.current = window.setTimeout(() => go(1), 260);
@@ -340,6 +426,25 @@ export function Presentation({ deck, startIndex, entryView, fullscreenFailed, on
       {deck.showProgress && <div className="present-progress">{progress}</div>}
 
       <div className="present-tools">
+        <button
+          className={`present-tool ${playing ? 'is-on' : ''}`}
+          onClick={togglePlay}
+          aria-pressed={playing}
+          disabled={deck.frames.length === 0}
+          title="按每个视点的停留时长自动播放"
+        >
+          <Icon name={playing ? 'pause' : 'play'} size={15} />
+          {playing ? '暂停' : '自动播放'}
+        </button>
+        <button
+          className={`present-tool ${notesOpen ? 'is-on' : ''}`}
+          onClick={() => setNotesOpen((value) => !value)}
+          aria-pressed={notesOpen}
+          title="显示演讲者备注（N）"
+        >
+          <Icon name="text" size={15} />
+          备注
+        </button>
         <button
           className={`present-tool ${lens ? 'is-on' : ''}`}
           onClick={toggleLens}
@@ -474,9 +579,31 @@ export function Presentation({ deck, startIndex, entryView, fullscreenFailed, on
             <b>M</b> 空间漫游
           </span>
           <span>
+            <b>N</b> 备注
+          </span>
+          <span className="present-hint-touch">
+            <b>左右滑动</b> 切换视点
+          </span>
+          <span>
             <b>Esc</b> 退出
           </span>
         </div>
+      )}
+
+      {notesOpen && (
+        <aside className="present-notes" aria-label="演讲者备注">
+          <div className="present-notes-head">
+            <span>演讲者备注 · {currentFrame?.name ?? '自由视图'}</span>
+            <button className="icon-btn" onClick={() => setNotesOpen(false)} aria-label="关闭备注">
+              <Icon name="close" size={13} />
+            </button>
+          </div>
+          {currentFrame?.notes ? (
+            <p>{currentFrame.notes}</p>
+          ) : (
+            <p className="is-empty">该视点还没有备注。可在编辑器的「视点属性」里补充。</p>
+          )}
+        </aside>
       )}
 
       {showFullscreenNote && (

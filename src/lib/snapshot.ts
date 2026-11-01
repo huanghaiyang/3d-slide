@@ -162,6 +162,8 @@ export function buildWorkspaceSnapshot(
         id: frame.id,
         name: frame.name,
         duration: frame.duration,
+        hold: frame.hold,
+        notes: frame.notes ? frame.notes.slice(0, 400) : undefined,
         view: frameView(frame.view),
       })),
       lastView: frameView(deck.lastView),

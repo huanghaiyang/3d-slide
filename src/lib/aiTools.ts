@@ -328,6 +328,10 @@ function createView(args: Record<string, unknown>): AiToolOutcome {
   if (name) useDeckStore.getState().renameFrame(captured.id, name);
   const duration = num(args.duration);
   if (duration !== undefined) useDeckStore.getState().setFrameDuration(captured.id, duration);
+  const hold = num(args.hold);
+  if (hold !== undefined) useDeckStore.getState().setFrameHold(captured.id, hold);
+  const notes = str(args.notes);
+  if (notes) useDeckStore.getState().setFrameNotes(captured.id, notes.slice(0, LIMITS.frameNotesChars));
   return ok(`已创建视点${name ? `「${name}」` : ''}`, true, { id: captured.id });
 }
 
@@ -381,6 +385,8 @@ function getDeckState(): AiToolOutcome {
       id: frame.id,
       name: frame.name,
       duration: frame.duration,
+      hold: frame.hold,
+      notes: frame.notes ? frame.notes.slice(0, 200) : undefined,
       view: {
         target: frame.view.target,
         distance: Math.round(frame.view.distance),
@@ -661,6 +667,8 @@ export const AI_TOOLS: AiToolDef[] = [
         properties: {
           name: { type: 'string', description: '视点名称' },
           duration: { type: 'number', description: '进入该视点的过渡时长（秒）' },
+          hold: { type: 'number', description: '自动播放时在该视点停留的秒数（0.5–120）' },
+          notes: { type: 'string', description: '演讲者备注，仅演示端可见' },
           target: {
             type: 'object',
             description: '相机看向的世界坐标点',

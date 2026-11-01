@@ -15,6 +15,7 @@ import {
   type DeckSummary,
 } from '../lib/storage';
 import { parseSlideFile, uniqueTitle } from '../lib/validate';
+import { DECK_TEMPLATES, buildTemplateDeck, type DeckTemplate } from '../lib/templates';
 import { toast } from '../store/uiStore';
 import { Icon } from './Icon';
 import { ConfirmDialog, Modal } from './ui';
@@ -203,6 +204,21 @@ export function Home({ onOpen, onOpenAssets }: HomeProps) {
     }
   };
 
+  const createFromTemplate = async (template: DeckTemplate) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const deck = buildTemplateDeck(template.id, uniqueTitle(template.name, titles()));
+      await putDeck(deck);
+      toast(`已从「${template.name}」创建`, 'success');
+      onOpen(deck.id);
+    } catch (error) {
+      toast(error instanceof Error ? error.message : '模板创建失败', 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const importFile = async (file: File) => {
     if (!file.name.toLowerCase().endsWith('.slide')) {
       toast('请选择 .slide 工程文件', 'error');
@@ -344,6 +360,36 @@ export function Home({ onOpen, onOpenAssets }: HomeProps) {
             <span>单文件 .slide 可离线带走</span>
           </div>
         </section>
+
+        {decks !== null && !loadError && (
+          <section className="deck-section template-section">
+            <div className="deck-section-head">
+              <h2>从模板开始</h2>
+              <span>内置结构 · 一键生成对象与视点</span>
+            </div>
+            <div className="template-grid">
+              {DECK_TEMPLATES.map((template, index) => (
+                <button
+                  key={template.id}
+                  className="template-card"
+                  disabled={busy}
+                  onClick={() => void createFromTemplate(template)}
+                  title={`使用「${template.name}」模板`}
+                >
+                  <span className="template-art" style={{ background: template.background }}>
+                    <span className="template-glow" style={{ background: template.accent }} />
+                    <span className="template-index">{String(index + 1).padStart(2, '0')}</span>
+                    <span className="template-frame-count">{template.frameCount} 视点</span>
+                  </span>
+                  <span className="template-info">
+                    <strong>{template.name}</strong>
+                    <span>{template.description}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
 
         {decks === null ? (
           <div className="deck-grid">

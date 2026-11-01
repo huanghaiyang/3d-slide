@@ -13,7 +13,7 @@ import type {
   TextObject,
   ViewState,
 } from '../types';
-import { LIMITS, DEFAULT_VIEW, DEFAULT_SHAPE_COLOR } from '../lib/constants';
+import { LIMITS, DEFAULT_VIEW, DEFAULT_SHAPE_COLOR, DEFAULT_HOLD } from '../lib/constants';
 import {
   autoTextHeight,
   clampNumber,
@@ -105,6 +105,8 @@ interface DeckStore {
   updateFrameView: (id: string, view: ViewState) => void;
   renameFrame: (id: string, name: string) => void;
   setFrameDuration: (id: string, duration: number) => void;
+  setFrameNotes: (id: string, notes: string) => void;
+  setFrameHold: (id: string, hold: number) => void;
   deleteFrame: (id: string) => void;
   reorderFrame: (sourceId: string, targetId: string) => void;
 
@@ -867,6 +869,35 @@ export const useDeckStore = create<DeckStore>((set, get) => {
           ),
         }),
         { historyKey: `frame-duration:${id}` },
+      );
+    },
+
+    setFrameNotes: (id, notes) => {
+      const limited = notes.slice(0, LIMITS.frameNotesChars);
+      applyDeck(
+        (deck) => ({
+          ...deck,
+          frames: deck.frames.map((frame) =>
+            frame.id === id
+              ? { ...frame, notes: limited.trim() ? limited : undefined }
+              : frame,
+          ),
+        }),
+        { historyKey: `frame-notes:${id}` },
+      );
+    },
+
+    setFrameHold: (id, hold) => {
+      applyDeck(
+        (deck) => ({
+          ...deck,
+          frames: deck.frames.map((frame) =>
+            frame.id === id
+              ? { ...frame, hold: clampNumber(hold, LIMITS.minHold, LIMITS.maxHold, frame.hold ?? DEFAULT_HOLD) }
+              : frame,
+          ),
+        }),
+        { historyKey: `frame-hold:${id}` },
       );
     },
 

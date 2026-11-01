@@ -11,7 +11,7 @@ import type {
   TextObject,
   VideoObject,
 } from '../types';
-import { LIMITS } from '../lib/constants';
+import { LIMITS, DEFAULT_HOLD } from '../lib/constants';
 import { formatDuration } from '../lib/media';
 import { useDeckStore } from '../store/deckStore';
 import { FONT_LABELS, MODEL_FORMAT_LABELS, OBJECT_LABELS, SHAPE_LABELS } from '../types';
@@ -1042,9 +1042,17 @@ function FramePanel({ deck, onUpdateFrameView }: { deck: Deck; onUpdateFrameView
   const selectedFrameId = useDeckStore((state) => state.selectedFrameId);
   const renameFrame = useDeckStore((state) => state.renameFrame);
   const setFrameDuration = useDeckStore((state) => state.setFrameDuration);
+  const setFrameNotes = useDeckStore((state) => state.setFrameNotes);
+  const setFrameHold = useDeckStore((state) => state.setFrameHold);
   const deleteFrame = useDeckStore((state) => state.deleteFrame);
   const selectFrame = useDeckStore((state) => state.selectFrame);
   const frame = deck.frames.find((item) => item.id === selectedFrameId);
+  const [notes, setNotes] = useState(frame?.notes ?? '');
+
+  useEffect(() => {
+    setNotes(frame?.notes ?? '');
+  }, [frame?.id, frame?.notes]);
+
   if (!frame) return null;
   const index = deck.frames.findIndex((item) => item.id === frame.id);
 
@@ -1080,7 +1088,37 @@ function FramePanel({ deck, onUpdateFrameView }: { deck: Deck; onUpdateFrameView
             onCommit={(duration) => setFrameDuration(frame.id, duration)}
           />
         </div>
-        <span className="field-hint">时长属于被进入的视点；从上一个视点飞到这里时生效。</span>
+        <div className="prop-row">
+          <span className="field-label">自动停留</span>
+          <NumberField
+            value={frame.hold ?? DEFAULT_HOLD}
+            min={LIMITS.minHold}
+            max={LIMITS.maxHold}
+            step={0.5}
+            unit="秒"
+            ariaLabel="自动播放停留时长"
+            onCommit={(hold) => setFrameHold(frame.id, hold)}
+          />
+        </div>
+        <span className="field-hint">过渡时长属于被进入的视点；自动停留用于演示自动播放。</span>
+      </Section>
+      <Section title="演讲者备注">
+        <textarea
+          className="text-input text-area"
+          rows={4}
+          maxLength={LIMITS.frameNotesChars}
+          value={notes}
+          placeholder="仅演示端可见，例如口播要点、停顿提示…"
+          aria-label="演讲者备注"
+          onChange={(event) => {
+            const value = event.target.value;
+            setNotes(value);
+            setFrameNotes(frame.id, value);
+          }}
+        />
+        <span className="field-hint">
+          {notes.length} / {LIMITS.frameNotesChars} · 演示时按 N 显示或隐藏
+        </span>
       </Section>
       <Section title="取景">
         <div className="button-row">
@@ -1134,6 +1172,37 @@ function MultiPanel({ deck, ids, readonly }: { deck: Deck; ids: string[]; readon
     }
   };
 
+  const distribute = (axis: 'x' | 'y') => {
+    if (objects.length < 3) return;
+    const sorted = [...objects].sort((a, b) => (axis === 'x' ? a.x - b.x : a.y - b.y));
+    const start =
+      axis === 'x'
+        ? Math.min(...sorted.map((object) => object.x - object.width / 2))
+        : Math.min(...sorted.map((object) => object.y - object.height / 2));
+    const end =
+      axis === 'x'
+        ? Math.max(...sorted.map((object) => object.x + object.width / 2))
+        : Math.max(...sorted.map((object) => object.y + object.height / 2));
+    const total = sorted.reduce((sum, object) => sum + (axis === 'x' ? object.width : object.height), 0);
+    const gap = (end - start - total) / (sorted.length - 1);
+    let cursor = start;
+    for (const object of sorted) {
+      const size = axis === 'x' ? object.width : object.height;
+      const value = cursor + size / 2;
+      const current = axis === 'x' ? object.x : object.y;
+      if (Math.abs(value - current) > 0.01) {
+        updateObject(object.id, axis === 'x' ? { x: value } : { y: value }, `multi-distribute:${axis}`);
+      }
+      cursor += size + gap;
+    }
+  };
+
+  const setAllVisible = (visible: boolean) => {
+    for (const object of objects) {
+      if (object.visible !== visible) updateObject(object.id, { visible }, 'multi-visible');
+    }
+  };
+
   return (
     <div className="inspector-body">
       <div className="inspector-head">
@@ -1171,6 +1240,27 @@ function MultiPanel({ deck, ids, readonly }: { deck: Deck; ids: string[]; readon
             <button className="btn btn-light btn-sm" onClick={() => align('bottom')}>底对齐</button>
           </div>
         </Section>
+        <Section title="等距分布">
+          <div className="button-row">
+            <button
+              className="btn btn-light btn-sm"
+              disabled={objects.length < 3}
+              onClick={() => distribute('x')}
+            >
+              水平等距
+            </button>
+            <button
+              className="btn btn-light btn-sm"
+              disabled={objects.length < 3}
+              onClick={() => distribute('y')}
+            >
+              垂直等距
+            </button>
+          </div>
+          <span className="field-hint">
+            {objects.length < 3 ? '选中 3 个以上对象后可等距排列。' : '保持两端对象不动，按尺寸补齐中间间距。'}
+          </span>
+        </Section>
         <Section title="统一不透明度">
           <SliderRow
             label="不透明度"
@@ -1187,6 +1277,14 @@ function MultiPanel({ deck, ids, readonly }: { deck: Deck; ids: string[]; readon
           />
         </Section>
         <Section title="批量操作">
+          <div className="button-row">
+            <button className="btn btn-light btn-sm" onClick={() => setAllVisible(true)}>
+              <Icon name="eye" size={14} /> 全部显示
+            </button>
+            <button className="btn btn-light btn-sm" onClick={() => setAllVisible(false)}>
+              <Icon name="eyeOff" size={14} /> 全部隐藏
+            </button>
+          </div>
           <button className="btn btn-danger btn-sm btn-block" onClick={() => removeObjects(objects.map((object) => object.id))}>
             <Icon name="trash" size={14} /> 删除 {objects.length} 个对象
           </button>

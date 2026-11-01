@@ -154,6 +154,10 @@ export interface Frame {
   name: string;
   /** 被进入时的过渡时长（秒） */
   duration: number;
+  /** 演讲者备注，仅在演示端可见 */
+  notes?: string;
+  /** 自动播放时在该视点停留的秒数 */
+  hold?: number;
   view: ViewState;
 }
 

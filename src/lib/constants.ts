@@ -24,6 +24,7 @@ export const LIMITS = {
   titleChars: 80,
   objectNameChars: 60,
   frameNameChars: 40,
+  frameNotesChars: 2000,
   coord: 99999,
   depth: 10000,
   minSize: 8,
@@ -42,10 +43,14 @@ export const LIMITS = {
   maxStroke: 40,
   minDuration: 0.2,
   maxDuration: 5,
+  minHold: 0.5,
+  maxHold: 120,
 } as const;
 
 export const DEFAULT_BACKGROUND = '#10161F';
 export const DEFAULT_DURATION = 1.2;
+/** 自动播放时每个视点的默认停留时长（秒） */
+export const DEFAULT_HOLD = 5;
 export const DEFAULT_TEXT_COLOR = '#F3EEE4';
 export const DEFAULT_SHAPE_COLOR = '#2DD4BF';
 export const ACCENT = '#14B8A6';

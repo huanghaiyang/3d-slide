@@ -11,6 +11,7 @@ import type {
 import {
   DEFAULT_BACKGROUND,
   DEFAULT_DURATION,
+  DEFAULT_HOLD,
   DEFAULT_SHAPE_COLOR,
   DEFAULT_TEXT_COLOR,
   DEFAULT_VIEW,
@@ -233,10 +234,13 @@ function normalizeFrame(raw: unknown, index: number): Frame {
   if (!raw || typeof raw !== 'object') throw new Error('存在无效的视点');
   const r = raw as Record<string, unknown>;
   if (typeof r.id !== 'string' || !r.id) throw new Error('视点缺少 id');
+  const notes = typeof r.notes === 'string' ? r.notes.slice(0, LIMITS.frameNotesChars) : '';
   return {
     id: r.id,
     name: str(r.name, `视点 ${index + 1}`).slice(0, LIMITS.frameNameChars) || `视点 ${index + 1}`,
     duration: clamp(num(r.duration, DEFAULT_DURATION), LIMITS.minDuration, LIMITS.maxDuration),
+    notes: notes.trim() ? notes : undefined,
+    hold: clamp(num(r.hold, DEFAULT_HOLD), LIMITS.minHold, LIMITS.maxHold),
     view: normalizeView(r.view),
   };
 }

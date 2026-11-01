@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { LIMITS } from '../lib/constants';
+import { LIMITS, DEFAULT_HOLD } from '../lib/constants';
 import { useDeckStore } from '../store/deckStore';
 import { Icon } from './Icon';
 
@@ -75,6 +75,11 @@ export function FrameTrack({ readonly, onCapture }: FrameTrackProps) {
                   <span className="frame-top">
                     <span className="frame-index">{String(index + 1).padStart(2, '0')}</span>
                     <span className="frame-name">{frame.name}</span>
+                    {frame.notes && (
+                      <span className="frame-note-flag" title={frame.notes}>
+                        备注
+                      </span>
+                    )}
                     {current && <span className="frame-flag">当前</span>}
                   </span>
                   <span className="frame-meta">
@@ -83,7 +88,7 @@ export function FrameTrack({ readonly, onCapture }: FrameTrackProps) {
                     </span>
                     <span>{frame.duration.toFixed(1)}s</span>
                     <span className="frame-dot" />
-                    <span>取景已记录</span>
+                    <span>停留 {frame.hold ?? DEFAULT_HOLD}s</span>
                   </span>
                 </button>
               </div>
