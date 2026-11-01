@@ -97,6 +97,7 @@ interface ObjectNode {
   outlineWidth: number;
   outlineHeight: number;
   imageState: ImageState | null;
+  posterState: ImageState | null;
   media: MediaRuntime | null;
   model: ModelRuntime | null;
   lottie: LottieRuntime | null;
@@ -135,6 +136,7 @@ export class SceneManager {
     resolve: () => void;
   } | null = null;
   private imageCache = new Map<string, CacheEntry>();
+  private posterCache = new Map<string, CacheEntry>();
   private imagePending = new Set<string>();
   private mediaAutoplayArmed = false;
   private mediaAutoPaused = new Set<string>();
@@ -847,6 +849,7 @@ export class SceneManager {
       outlineWidth: object.width,
       outlineHeight: Math.max(object.height, 8),
       imageState: null,
+      posterState: null,
       media: null,
       model: null,
       lottie: null,
@@ -1146,9 +1149,66 @@ export class SceneManager {
       this.imageCache.delete(src);
       this.imagePending.delete(src);
     }
+    const poster = node.posterState?.src;
+    if (poster && this.posterCache.get(poster) === 'error') this.posterCache.delete(poster);
     node.imageState = null;
+    node.posterState = null;
     node.visualKey = '';
     this.rebuildContent(node);
+  }
+
+  /** 视频 / Lottie 加载完成前，先用插入时保存的首帧截图作为占位纹理 */
+  private ensurePoster(node: ObjectNode, src: string | undefined) {
+    if (!src) {
+      node.posterState = null;
+      return;
+    }
+    if (node.posterState?.src === src) return;
+    const cached = this.posterCache.get(src);
+    if (cached === 'error') {
+      node.posterState = { src, status: 'error' };
+      return;
+    }
+    if (cached && cached !== 'loading') {
+      node.posterState = { src, status: 'loaded', texture: cached };
+      return;
+    }
+    node.posterState = { src, status: 'pending' };
+    if (cached === 'loading') return;
+    this.posterCache.set(src, 'loading');
+    this.imagePending.add(src);
+    const loader = new THREE.TextureLoader();
+    loader.load(
+      src,
+      (texture) => {
+        texture.colorSpace = THREE.SRGBColorSpace;
+        texture.minFilter = THREE.LinearFilter;
+        texture.magFilter = THREE.LinearFilter;
+        texture.generateMipmaps = false;
+        texture.anisotropy = this.maxAnisotropy;
+        this.posterCache.set(src, texture);
+        this.imagePending.delete(src);
+        for (const other of this.nodes.values()) {
+          if (other.posterState?.src === src && other.posterState.status === 'pending') {
+            other.posterState = { src, status: 'loaded', texture };
+            other.visualKey = '';
+            this.rebuildContent(other);
+          }
+        }
+      },
+      undefined,
+      () => {
+        this.posterCache.set(src, 'error');
+        this.imagePending.delete(src);
+        for (const other of this.nodes.values()) {
+          if (other.posterState?.src === src && other.posterState.status === 'pending') {
+            other.posterState = { src, status: 'error' };
+            other.visualKey = '';
+            this.rebuildContent(other);
+          }
+        }
+      },
+    );
   }
 
   private buildImage(group: THREE.Group, object: ImageObject | SvgObject, node: ObjectNode) {
@@ -1470,6 +1530,7 @@ export class SceneManager {
 
   private buildLottie(group: THREE.Group, object: LottieObject, node: ObjectNode) {
     this.ensureLottie(node, object);
+    this.ensurePoster(node, object.poster);
     const runtime = node.lottie;
     if (runtime?.animation) {
       runtime.animation.setLoop(object.loop);
@@ -1487,7 +1548,9 @@ export class SceneManager {
       node.materials.push(material);
       return;
     }
-    const texture = runtime?.status === 'error' ? this.lottieErrorTexture : this.modelLoadingTexture;
+    // 动画加载完成前优先显示插入时保存的首帧截图
+    const poster = node.posterState?.status === 'loaded' ? node.posterState.texture : null;
+    const texture = poster ?? (runtime?.status === 'error' ? this.lottieErrorTexture : this.modelLoadingTexture);
     const material = new THREE.MeshBasicMaterial({
       map: texture,
       transparent: true,
@@ -1724,19 +1787,15 @@ export class SceneManager {
 
   private buildVideo(group: THREE.Group, object: VideoObject, node: ObjectNode) {
     this.ensureMedia(node, object);
+    this.ensurePoster(node, object.poster);
     const runtime = node.media;
     const ready = Boolean(runtime && !runtime.error && runtime.ready && runtime.texture);
     let texture: THREE.Texture = this.placeholderTexture;
     let drawWidth = object.width;
     let drawHeight = object.height;
-    if (ready && runtime?.texture) {
-      const source = runtime.texture;
-      source.repeat.set(1, 1);
-      source.offset.set(0, 0);
-      source.wrapS = THREE.ClampToEdgeWrapping;
-      source.wrapT = THREE.ClampToEdgeWrapping;
-      const imageAspect = object.naturalWidth / object.naturalHeight || 16 / 9;
-      const boxAspect = object.width / object.height || 1;
+    const imageAspect = object.naturalWidth / object.naturalHeight || 16 / 9;
+    const boxAspect = object.width / object.height || 1;
+    const applyFit = (source: THREE.Texture) => {
       if (object.fit === 'contain') {
         if (imageAspect >= boxAspect) {
           drawWidth = object.width;
@@ -1745,10 +1804,24 @@ export class SceneManager {
           drawHeight = object.height;
           drawWidth = object.height * imageAspect;
         }
-      } else {
-        this.applyCoverCrop(source, imageAspect, boxAspect);
+        return source;
       }
-      texture = source;
+      const clone = source.clone();
+      clone.needsUpdate = true;
+      this.applyCoverCrop(clone, imageAspect, boxAspect);
+      node.ownedTextures.push(clone);
+      return clone;
+    };
+    if (ready && runtime?.texture) {
+      const source = runtime.texture;
+      source.repeat.set(1, 1);
+      source.offset.set(0, 0);
+      source.wrapS = THREE.ClampToEdgeWrapping;
+      source.wrapT = THREE.ClampToEdgeWrapping;
+      texture = applyFit(source);
+    } else if (node.posterState?.status === 'loaded' && node.posterState.texture) {
+      // 视频解码完成前用插入时保存的首帧截图，避免露出占位卡
+      texture = applyFit(node.posterState.texture);
     }
     const material = new THREE.MeshBasicMaterial({
       map: texture,
@@ -2234,8 +2307,9 @@ export class SceneManager {
   orbitBy(dx: number, dy: number) {
     if (this.animation) return;
     const view = this.getView();
-    view.yaw -= dx * 0.007;
-    view.pitch = clampPitch(view.pitch - dy * 0.007);
+    // camera.up 为 (0, -1, 0)、屏幕右为世界 -X：正方向拖动才与画面同向旋转
+    view.yaw += dx * 0.007;
+    view.pitch = clampPitch(view.pitch + dy * 0.007);
     this.applyView(view);
   }
 
@@ -2348,6 +2422,10 @@ export class SceneManager {
       if (typeof entry !== 'string') entry.dispose();
     }
     this.imageCache.clear();
+    for (const entry of this.posterCache.values()) {
+      if (typeof entry !== 'string') entry.dispose();
+    }
+    this.posterCache.clear();
     if (this.stars) {
       this.scene.remove(this.stars);
       this.stars.geometry.dispose();

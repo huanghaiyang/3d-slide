@@ -207,7 +207,7 @@ async function addAsset(args: Record<string, unknown>): Promise<AiToolOutcome> {
     id = store.addMedia(
       meta.kind,
       src,
-      { width: meta.width, height: meta.height, duration: meta.duration },
+      { width: meta.width, height: meta.height, duration: meta.duration, poster: meta.thumb || undefined },
       point,
     );
   } else if (meta.kind === 'model') {
@@ -218,7 +218,7 @@ async function addAsset(args: Record<string, unknown>): Promise<AiToolOutcome> {
         : 'glb';
     id = store.addModel(src, format, point);
   } else if (meta.kind === 'lottie') {
-    id = store.addLottie(src, meta.width, meta.height, meta.duration, point);
+    id = store.addLottie(src, meta.width, meta.height, meta.duration, point, meta.thumb || undefined);
   } else {
     return fail(`资源「${meta.name}」是普通文件，无法直接放到画布`);
   }

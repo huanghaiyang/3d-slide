@@ -80,6 +80,7 @@ interface DeckStore {
     naturalHeight: number,
     duration: number,
     point?: { x: number; y: number },
+    poster?: string,
   ) => string | null;
   addPath: (
     points: number[],
@@ -90,7 +91,7 @@ interface DeckStore {
   addMedia: (
     kind: MediaKind,
     src: string,
-    meta: { width: number; height: number; duration: number },
+    meta: { width: number; height: number; duration: number; poster?: string },
     point?: { x: number; y: number },
   ) => string | null;
   addModel: (src: string, format: ModelFormat, point?: { x: number; y: number }) => string | null;
@@ -578,7 +579,7 @@ export const useDeckStore = create<DeckStore>((set, get) => {
       return id;
     },
 
-    addLottie: (src, naturalWidth, naturalHeight, duration, point) => {
+    addLottie: (src, naturalWidth, naturalHeight, duration, point, poster) => {
       const state = get();
       if (!state.deck) return null;
       if (state.deck.objects.length >= LIMITS.objects) return null;
@@ -587,7 +588,7 @@ export const useDeckStore = create<DeckStore>((set, get) => {
       const count = (deckAtStart.counters.lottie ?? 0) + 1;
       const name = nameForObject(deckAtStart, 'lottie', 'Lottie');
       const id = crypto.randomUUID();
-      const object = createLottieObject(id, name, src, naturalWidth, naturalHeight, duration, state.view, z);
+      const object = createLottieObject(id, name, src, naturalWidth, naturalHeight, duration, state.view, z, poster);
       if (point) {
         object.x = clampNumber(point.x, -LIMITS.coord, LIMITS.coord, object.x);
         object.y = clampNumber(point.y, -LIMITS.coord, LIMITS.coord, object.y);
@@ -677,7 +678,7 @@ export const useDeckStore = create<DeckStore>((set, get) => {
       const id = crypto.randomUUID();
       const object =
         kind === 'video'
-          ? createVideoObject(id, name, src, meta.width, meta.height, meta.duration, state.view, z)
+          ? createVideoObject(id, name, src, meta.width, meta.height, meta.duration, state.view, z, meta.poster)
           : createAudioObject(id, name, src, meta.duration, state.view, z);
       if (point) {
         object.x = clampNumber(point.x, -LIMITS.coord, LIMITS.coord, object.x);

@@ -1,7 +1,7 @@
 import type { ModelFormat } from '../types';
 import { LIMITS } from './constants';
 import { formatBytes, isAcceptedImage, readImageFile } from './image';
-import { readLottieFile } from './lottie';
+import { readLottieFile, renderLottieThumbnail } from './lottie';
 import { mediaKindOf, readMediaFile } from './media';
 import { modelFormatOf } from './model3d';
 import { isSvgFile, readSvgFile } from './svg';
@@ -103,7 +103,11 @@ function imageThumb(src: string, max = 360): Promise<string> {
   });
 }
 
-function videoThumb(src: string, max = 360): Promise<{ thumb: string; duration: number; width: number; height: number }> {
+export function readVideoThumb(
+  src: string,
+  max = 360,
+  timeout = 6000,
+): Promise<{ thumb: string; duration: number; width: number; height: number }> {
   return new Promise((resolve) => {
     const video = document.createElement('video');
     let settled = false;
@@ -121,7 +125,7 @@ function videoThumb(src: string, max = 360): Promise<{ thumb: string; duration: 
       video.load();
       resolve(result);
     };
-    const timer = window.setTimeout(() => finish(''), 6000);
+    const timer = window.setTimeout(() => finish(''), timeout);
     video.preload = 'auto';
     video.muted = true;
     video.playsInline = true;
@@ -189,7 +193,7 @@ export async function readAssetFile(file: File): Promise<AssetPayload> {
   if (kind === 'video' || kind === 'audio') {
     const result = await readMediaFile(file);
     if (kind === 'video') {
-      const captured = await videoThumb(result.src);
+      const captured = await readVideoThumb(result.src);
       return {
         src: result.src,
         meta: {
@@ -217,7 +221,7 @@ export async function readAssetFile(file: File): Promise<AssetPayload> {
           width: payload.naturalWidth,
           height: payload.naturalHeight,
           duration: payload.duration,
-          thumb: '',
+          thumb: await renderLottieThumbnail(payload.src),
         },
       };
     } catch (error) {

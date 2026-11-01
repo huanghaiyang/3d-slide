@@ -2353,6 +2353,31 @@ button:disabled {
   border-radius: 0;
 }
 
+.present-buffer {
+  position: absolute;
+  inset: 0;
+  z-index: 320;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  background: #000;
+  color: rgba(226, 238, 250, 0.68);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  pointer-events: none;
+}
+
+.present-buffer .loading-mark i {
+  border-color: rgba(45, 212, 191, 0.55);
+}
+
+.present-buffer .loading-mark i:nth-child(3) {
+  background: rgba(45, 212, 191, 0.12);
+}
+
 .present-progress {
   position: fixed;
   right: 24px;

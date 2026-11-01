@@ -1,3 +1,4 @@
+import type { AnimationConfigWithData, AnimationItem } from 'lottie-web';
 import { LIMITS } from './constants';
 import { formatBytes } from './image';
 
@@ -83,4 +84,61 @@ export async function readLottieFile(file: File): Promise<LottiePayload> {
     naturalHeight: size.height,
     duration: size.duration,
   };
+}
+
+/** 用离屏 canvas 渲染 Lottie 第一帧，返回 PNG dataURL（失败时返回空串） */
+export async function renderLottieThumbnail(src: string, max = 480): Promise<string> {
+  const data = parseLottieSource(src);
+  if (!data) return '';
+  const width = Math.max(1, Number(data.w) || 0);
+  const height = Math.max(1, Number(data.h) || 0);
+  const scale = Math.min(1, max / Math.max(width, height));
+  let animation: AnimationItem | null = null;
+  try {
+    const { default: lottie } = await import('lottie-web');
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
+    const context = canvas.getContext('2d');
+    if (!context) return '';
+    let failed = false;
+    animation = lottie.loadAnimation<'canvas'>({
+      renderer: 'canvas',
+      loop: false,
+      autoplay: false,
+      animationData: data,
+      rendererSettings: {
+        context,
+        clearCanvas: true,
+        preserveAspectRatio: 'xMidYMid meet',
+      },
+      // 与舞台一致：不传 container，直接绘制到传入的 context
+    } as unknown as AnimationConfigWithData<'canvas'>);
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      animation!.addEventListener('DOMLoaded', done);
+      animation!.addEventListener('data_failed', () => {
+        failed = true;
+        done();
+      });
+      animation!.addEventListener('error', () => {
+        failed = true;
+        done();
+      });
+      window.setTimeout(done, 1200);
+    });
+    if (failed) return '';
+    animation.goToAndStop(0, true);
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 40));
+    return canvas.toDataURL('image/png');
+  } catch {
+    return '';
+  } finally {
+    animation?.destroy();
+  }
 }

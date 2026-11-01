@@ -58,6 +58,7 @@ export function Presentation({ deck, startIndex, entryView, fullscreenFailed, on
   const [xrSupported, setXrSupported] = useState(false);
   const [xrActive, setXrActive] = useState(false);
   const [mediaState, setMediaState] = useState<MediaPlaybackState | null>(null);
+  const [buffering, setBuffering] = useState(true);
   const savedViewRef = useRef<ViewState | null>(null);
   const mediaItems = deck.objects.filter(
     (object) => object.type === 'video' || object.type === 'audio',
@@ -203,6 +204,21 @@ export function Presentation({ deck, startIndex, entryView, fullscreenFailed, on
     });
     return () => {
       alive = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const api = stageRef.current;
+    if (!api) {
+      setBuffering(false);
+      return;
+    }
+    void api.waitAssets(6000).finally(() => {
+      if (!cancelled) setBuffering(false);
+    });
+    return () => {
+      cancelled = true;
     };
   }, []);
 
@@ -421,6 +437,16 @@ export function Presentation({ deck, startIndex, entryView, fullscreenFailed, on
             returnToPath();
           }}
         />
+        {buffering && (
+          <div className="present-buffer" role="status">
+            <div className="loading-mark" aria-hidden="true">
+              <i />
+              <i />
+              <i />
+            </div>
+            <span>正在缓冲素材…</span>
+          </div>
+        )}
       </div>
 
       {deck.showProgress && <div className="present-progress">{progress}</div>}

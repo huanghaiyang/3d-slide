@@ -100,6 +100,8 @@ export interface LottieObject extends ObjectBase {
   loop: boolean;
   /** 播放速度倍率 */
   speed: number;
+  /** 首帧截图（dataURL），加载动画前先作为占位图显示 */
+  poster?: string;
 }
 
 export interface VideoObject extends ObjectBase {
@@ -115,6 +117,8 @@ export interface VideoObject extends ObjectBase {
   /** 0–100 */
   volume: number;
   autoplay: boolean;
+  /** 首帧截图（dataURL），视频解码完成前先作为占位图显示 */
+  poster?: string;
 }
 
 export interface AudioObject extends ObjectBase {

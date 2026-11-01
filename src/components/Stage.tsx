@@ -23,6 +23,7 @@ export type AxisDir = '+x' | '-x' | '+y' | '-y' | '+z' | '-z';
 
 export interface StageApi {
   captureView: () => ViewState;
+  waitAssets: (timeout?: number) => Promise<void>;
   flyTo: (view: ViewState, duration?: number) => Promise<void>;
   focus: (objectId: string) => Promise<void>;
   reset: () => Promise<void>;
@@ -403,6 +404,9 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
     ref,
     () => ({
       captureView: () => managerRef.current?.getView() ?? initialViewRef.current,
+      waitAssets: async (timeout) => {
+        await managerRef.current?.waitForAssets(timeout);
+      },
       flyTo: async (view, duration = 0.4) => {
         const manager = managerRef.current;
         if (!manager) return;

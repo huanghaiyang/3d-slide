@@ -9,7 +9,7 @@ import {
   readAssetFile,
 } from '../lib/assets';
 import { formatStamp } from '../lib/file';
-import { parseLottieSource } from '../lib/lottie';
+import { parseLottieSource, renderLottieThumbnail } from '../lib/lottie';
 import { formatDuration } from '../lib/media';
 import { MODEL_ACCEPT } from '../lib/model3d';
 import {
@@ -330,6 +330,7 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
   const [previewAsset, setPreviewAsset] = useState<AssetMeta | null>(null);
   const [previewSrc, setPreviewSrc] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const thumbBackfill = useRef(new Set<string>());
 
   const reload = async () => {
     const [metas, nextFolders] = await Promise.all([listAssetMetas(), listFolders()]);
@@ -363,6 +364,30 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
 
   const activeAssets = useMemo(() => assets.filter((asset) => asset.deletedAt === null), [assets]);
   const trashedAssets = useMemo(() => assets.filter((asset) => asset.deletedAt !== null), [assets]);
+
+  // 旧版上传的 Lottie 没有首帧缩略图，读取资源内容后补渲染一帧并回填
+  useEffect(() => {
+    const missing = activeAssets.filter(
+      (asset) => asset.kind === 'lottie' && !asset.thumb && !thumbBackfill.current.has(asset.id),
+    );
+    if (missing.length === 0) return;
+    let cancelled = false;
+    void (async () => {
+      for (const asset of missing) {
+        if (cancelled) return;
+        thumbBackfill.current.add(asset.id);
+        const src = await getAssetSource(asset.id);
+        if (!src) continue;
+        const thumb = await renderLottieThumbnail(src);
+        if (cancelled || !thumb) continue;
+        await updateAssetMeta(asset.id, { thumb });
+        setAssets((prev) => prev.map((item) => (item.id === asset.id ? { ...item, thumb } : item)));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeAssets]);
 
   const counts = useMemo(() => {
     const map = new Map<string, number>();
@@ -406,16 +431,6 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
   }, [visible]);
 
   const canPick = (asset: AssetMeta) => !hasKindFilter || allowedKinds.has(asset.kind);
-
-  const pickAsset = async (asset: AssetMeta) => {
-    if (!onPick || !canPick(asset)) return;
-    const src = await getAssetSource(asset.id);
-    if (!src) {
-      toast('资源内容缺失，请重新上传', 'error');
-      return;
-    }
-    onPick(asset, src);
-  };
 
   const toggleSelect = (asset: AssetMeta) => {
     setSelectedIds((prev) =>
@@ -762,7 +777,7 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
                   className={`asset-card ${selected ? 'is-selected' : ''} ${!pickable ? 'is-disabled' : ''}`}
                   onClick={() => {
                     if (mode === 'pick') {
-                      if (pickable) void pickAsset(asset);
+                      setPreviewAsset(asset);
                     } else {
                       toggleSelect(asset);
                     }
@@ -849,7 +864,7 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
                   </div>
                   {mode === 'pick' && pickable && (
                     <span className="asset-use">
-                      <Icon name="plus" size={12} /> 插入
+                      <Icon name="eye" size={12} /> 预览
                     </span>
                   )}
                 </article>

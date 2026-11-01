@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ViewState } from '../types';
 import type { AssetMeta } from '../lib/assets';
-import { readAssetFile } from '../lib/assets';
+import { readAssetFile, readVideoThumb } from '../lib/assets';
 import { LIMITS } from '../lib/constants';
 import { exportDeckFile } from '../lib/file';
 import { formatBytes, isAcceptedImage, readImageFile } from '../lib/image';
-import { isLottieFile, readLottieFile } from '../lib/lottie';
+import { isLottieFile, readLottieFile, renderLottieThumbnail } from '../lib/lottie';
 import { mediaKindOf, readMediaFile } from '../lib/media';
 import { isModelFile, modelFormatOf, MODEL_ACCEPT } from '../lib/model3d';
 import { isSvgFile, readSvgFile } from '../lib/svg';
@@ -259,6 +259,8 @@ export function Editor({ deckId, onBack }: EditorProps) {
   const handleMediaFile = async (file: File, replaceId: string | null, point?: { x: number; y: number }) => {
     try {
       const result = await readMediaFile(file);
+      const poster =
+        result.kind === 'video' ? (await readVideoThumb(result.src, 480, 2500)).thumb : '';
       const state = useDeckStore.getState();
       if (replaceId) {
         const object = state.deck?.objects.find((item) => item.id === replaceId);
@@ -274,6 +276,7 @@ export function Editor({ deckId, onBack }: EditorProps) {
                 naturalWidth: result.width,
                 naturalHeight: result.height,
                 duration: result.duration,
+                poster: poster || undefined,
               }
             : { src: result.src, duration: result.duration };
         state.updateObject(replaceId, patch);
@@ -282,7 +285,7 @@ export function Editor({ deckId, onBack }: EditorProps) {
         const id = state.addMedia(
           result.kind,
           result.src,
-          { width: result.width, height: result.height, duration: result.duration },
+          { width: result.width, height: result.height, duration: result.duration, poster: poster || undefined },
           point,
         );
         if (!id) {
@@ -332,6 +335,7 @@ export function Editor({ deckId, onBack }: EditorProps) {
   const handleLottieFile = async (file: File, replaceId: string | null, point?: { x: number; y: number }) => {
     try {
       const payload = await readLottieFile(file);
+      const poster = await renderLottieThumbnail(payload.src, 480);
       const state = useDeckStore.getState();
       if (replaceId) {
         const object = state.deck?.objects.find((item) => item.id === replaceId);
@@ -341,6 +345,7 @@ export function Editor({ deckId, onBack }: EditorProps) {
           naturalWidth: payload.naturalWidth,
           naturalHeight: payload.naturalHeight,
           duration: payload.duration,
+          poster: poster || undefined,
         });
         toast('Lottie 动画已替换', 'success');
         return;
@@ -351,6 +356,7 @@ export function Editor({ deckId, onBack }: EditorProps) {
         payload.naturalHeight,
         payload.duration,
         point,
+        poster || undefined,
       );
       if (!id) {
         toast(`已达到单作品 ${LIMITS.objects} 个对象上限`, 'error');
@@ -367,9 +373,12 @@ export function Editor({ deckId, onBack }: EditorProps) {
     lottieInput.current?.click();
   };
 
-  const handleAssetPick = (asset: AssetMeta, src: string) => {
+  const handleAssetPick = async (asset: AssetMeta, src: string) => {
     const state = useDeckStore.getState();
     if (!state.deck) return;
+    let poster = asset.kind === 'video' || asset.kind === 'lottie' ? asset.thumb : '';
+    if (!poster && asset.kind === 'video') poster = (await readVideoThumb(src, 480, 2500)).thumb;
+    if (!poster && asset.kind === 'lottie') poster = await renderLottieThumbnail(src, 480);
     let id: string | null = null;
     if (asset.kind === 'image') {
       const isSvg = asset.mime === 'image/svg+xml' || asset.ext === 'svg';
@@ -380,7 +389,12 @@ export function Editor({ deckId, onBack }: EditorProps) {
       id = state.addMedia(
         asset.kind,
         src,
-        { width: asset.width || 1280, height: asset.height || 720, duration: asset.duration },
+        {
+          width: asset.width || 1280,
+          height: asset.height || 720,
+          duration: asset.duration,
+          poster: poster || undefined,
+        },
       );
     } else if (asset.kind === 'model') {
       const format = asset.format ?? modelFormatOf(asset.name);
@@ -390,7 +404,7 @@ export function Editor({ deckId, onBack }: EditorProps) {
       }
       id = state.addModel(src, format);
     } else if (asset.kind === 'lottie') {
-      id = state.addLottie(src, asset.width || 800, asset.height || 600, asset.duration);
+      id = state.addLottie(src, asset.width || 800, asset.height || 600, asset.duration, undefined, poster || undefined);
     } else {
       toast('该资源类型暂不支持插入画板', 'error');
       return;

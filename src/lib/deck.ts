@@ -122,6 +122,7 @@ export function createVideoObject(
   duration: number,
   view: ViewState,
   z: number,
+  poster?: string,
 ): VideoObject {
   const center = viewCenterAtZ(view, z);
   const size = fitMediaSize(naturalWidth || 1280, naturalHeight || 720, 960);
@@ -146,6 +147,7 @@ export function createVideoObject(
     muted: false,
     volume: 80,
     autoplay: false,
+    poster: poster || undefined,
   };
 }
 
@@ -245,6 +247,7 @@ export function createLottieObject(
   duration: number,
   view: ViewState,
   z: number,
+  poster?: string,
 ): LottieObject {
   const center = viewCenterAtZ(view, z);
   const size = fitMediaSize(naturalWidth || 800, naturalHeight || 600, 720);
@@ -267,6 +270,7 @@ export function createLottieObject(
     duration,
     loop: true,
     speed: 1,
+    poster: poster || undefined,
   };
 }
 
