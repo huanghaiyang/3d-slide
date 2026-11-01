@@ -72,6 +72,10 @@ interface LottieRuntime {
   canvas: HTMLCanvasElement | null;
   texture: THREE.CanvasTexture | null;
   animation: AnimationItem | null;
+  /** 画布长边像素，用于判断是否需要按当前缩放重新栅格化 */
+  rasterSide: number;
+  /** 高分辨率重建进行中，避免重复触发 */
+  resizing: boolean;
   error?: string;
 }
 
@@ -97,6 +101,8 @@ interface ObjectNode {
   outlineWidth: number;
   outlineHeight: number;
   imageState: ImageState | null;
+  /** SVG 按屏幕像素重绘后独占的矢量纹理，随节点销毁 */
+  svgTexture: THREE.CanvasTexture | null;
   posterState: ImageState | null;
   media: MediaRuntime | null;
   model: ModelRuntime | null;
@@ -138,6 +144,12 @@ export class SceneManager {
   private imageCache = new Map<string, CacheEntry>();
   private posterCache = new Map<string, CacheEntry>();
   private imagePending = new Set<string>();
+  /** 正在异步重绘中的 SVG 节点，供预热等待 */
+  private vectorPending = new Set<string>();
+  private vectorTimer = 0;
+  private lastVectorDistance = -1;
+  private lastVectorChangeAt = 0;
+  private svgImageCache = new Map<string, Promise<HTMLImageElement | null>>();
   private mediaAutoplayArmed = false;
   private mediaAutoPaused = new Set<string>();
   private mediaVisibilityAt = 0;
@@ -419,7 +431,7 @@ export class SceneManager {
           loading += 1;
         }
       }
-      if (this.imagePending.size === 0 && loading === 0) return;
+      if (this.imagePending.size === 0 && this.vectorPending.size === 0 && loading === 0) return;
       this.renderOnce();
       await new Promise<void>((resolve) => window.setTimeout(resolve, 100));
     }
@@ -780,6 +792,9 @@ export class SceneManager {
     });
     this.gridDirty();
     this.handleModeMedia(previousMode, mode);
+    if (deck.objects.some((object) => object.type === 'svg' || object.type === 'lottie')) {
+      this.scheduleVectorRefresh(180);
+    }
   }
 
   private visualKey(object: SlideObject): string {
@@ -849,6 +864,7 @@ export class SceneManager {
       outlineWidth: object.width,
       outlineHeight: Math.max(object.height, 8),
       imageState: null,
+      svgTexture: null,
       posterState: null,
       media: null,
       model: null,
@@ -1151,6 +1167,11 @@ export class SceneManager {
     }
     const poster = node.posterState?.src;
     if (poster && this.posterCache.get(poster) === 'error') this.posterCache.delete(poster);
+    if (node.svgTexture) {
+      node.svgTexture.dispose();
+      node.svgTexture = null;
+    }
+    if (node.data.type === 'svg') this.svgImageCache.delete(node.data.src);
     node.imageState = null;
     node.posterState = null;
     node.visualKey = '';
@@ -1211,8 +1232,165 @@ export class SceneManager {
     );
   }
 
+  /** 矢量纹理允许的最大长边像素（限制显存占用） */
+  private vectorMaxSide(): number {
+    const max = this.renderer.capabilities.maxTextureSize || 4096;
+    return Math.min(4096, max);
+  }
+
+  /** Lottie 每帧都要重绘并整幅上传 GPU，长边上限比 SVG 更保守，避免放大后掉帧 */
+  private lottieMaxSide(): number {
+    return Math.min(2048, this.vectorMaxSide());
+  }
+
+  /** 按当前相机到对象的距离，计算该对象在屏幕上实际占用的像素长边 */
+  private vectorTargetSide(object: {
+    x: number;
+    y: number;
+    z: number;
+    width: number;
+    height: number;
+    naturalWidth: number;
+    naturalHeight: number;
+  }): number {
+    const cam = this.camera.position;
+    const dx = object.x - cam.x;
+    const dy = object.y - cam.y;
+    const dz = object.z - cam.z;
+    const distance = Math.max(1, Math.sqrt(dx * dx + dy * dy + dz * dz));
+    const physicalHeight = this.height * this.renderer.getPixelRatio();
+    const visibleHeight = 2 * distance * Math.tan(((FOV / 2) * Math.PI) / 180);
+    const projected = Math.max(1, object.width, object.height) * (physicalHeight / Math.max(1, visibleHeight));
+    const natural = Math.max(object.naturalWidth || 0, object.naturalHeight || 0, 1);
+    return Math.min(this.vectorMaxSide(), Math.max(projected, natural));
+  }
+
+  /** 把目标像素量化到档位，避免缩放过程中频繁重绘 */
+  private vectorBucket(side: number): number {
+    const step = 512;
+    return Math.max(256, Math.min(this.vectorMaxSide(), Math.ceil(side / step) * step));
+  }
+
+  /** 按目标长边等比计算画布尺寸 */
+  private fitVectorCanvas(side: number, naturalWidth: number, naturalHeight: number) {
+    const target = Math.max(2, Math.min(this.vectorMaxSide(), Math.round(side)));
+    const ratio = naturalWidth / naturalHeight || 1;
+    if (ratio >= 1) {
+      return { width: target, height: Math.max(2, Math.round(target / ratio)) };
+    }
+    return { width: Math.max(2, Math.round(target * ratio)), height: target };
+  }
+
+  private scheduleVectorRefresh(delay = 220) {
+    if (this.disposed) return;
+    if (this.vectorTimer) window.clearTimeout(this.vectorTimer);
+    this.vectorTimer = window.setTimeout(() => {
+      this.vectorTimer = 0;
+      this.refreshVectorTextures();
+    }, delay);
+  }
+
+  /** 相机缩放稳定后，把 SVG / Lottie 重绘到与屏幕像素匹配的分辨率 */
+  private refreshVectorTextures() {
+    if (this.disposed) return;
+    // 连续缩放中直接重绘会与手势抢主线程，等相机稳定后再做
+    if (performance.now() - this.lastVectorChangeAt < 120) {
+      this.scheduleVectorRefresh(220);
+      return;
+    }
+    for (const node of this.nodes.values()) {
+      if (!node.group.visible) continue;
+      const object = node.data;
+      if (object.type === 'svg') {
+        if (this.vectorPending.has(node.objectId)) continue;
+        if (!node.svgTexture && node.imageState?.status === 'error') continue;
+        const target = this.vectorBucket(this.vectorTargetSide(object));
+        const canvas = node.svgTexture?.image as HTMLCanvasElement | undefined;
+        const current = canvas ? Math.max(canvas.width, canvas.height) : 0;
+        if (current === 0 || target >= current * 1.4) {
+          void this.rasterizeSvgNode(node, object, target);
+        }
+        continue;
+      }
+      if (object.type === 'lottie') this.resizeLottie(node, object);
+    }
+  }
+
+  private loadSvgImage(src: string): Promise<HTMLImageElement | null> {
+    const cached = this.svgImageCache.get(src);
+    if (cached) return cached;
+    const pending = new Promise<HTMLImageElement | null>((resolve) => {
+      const image = new Image();
+      image.onload = () => resolve(image);
+      image.onerror = () => resolve(null);
+      image.src = src;
+    });
+    this.svgImageCache.set(src, pending);
+    return pending;
+  }
+
+  private ensureSvg(node: ObjectNode, object: SvgObject) {
+    if (node.imageState && node.imageState.src === object.src) return;
+    node.imageState = { src: object.src, status: 'pending' };
+    void this.rasterizeSvgNode(node, object, this.vectorBucket(this.vectorTargetSide(object)));
+  }
+
+  /** SVG 不经过 TextureLoader，直接按目标像素绘制到 canvas，保证任何缩放下都是矢量重采样 */
+  private async rasterizeSvgNode(node: ObjectNode, object: SvgObject, side: number): Promise<void> {
+    const key = node.objectId;
+    if (this.vectorPending.has(key)) return;
+    const src = object.src;
+    this.vectorPending.add(key);
+    try {
+      const image = await this.loadSvgImage(src);
+      if (this.disposed || this.nodes.get(key) !== node) return;
+      if (node.data.type !== 'svg' || node.data.src !== src) return;
+      if (!image) {
+        this.svgImageCache.delete(src);
+        node.imageState = { src, status: 'error' };
+        node.visualKey = '';
+        this.rebuildContent(node);
+        this.callbacks.onImageError(key, '图片无法加载');
+        return;
+      }
+      const naturalWidth = Math.max(1, object.naturalWidth || image.naturalWidth || object.width);
+      const naturalHeight = Math.max(1, object.naturalHeight || image.naturalHeight || object.height);
+      const { width, height } = this.fitVectorCanvas(side, naturalWidth, naturalHeight);
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext('2d');
+      if (!context) return;
+      context.drawImage(image, 0, 0, width, height);
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.colorSpace = THREE.SRGBColorSpace;
+      texture.anisotropy = this.maxAnisotropy;
+      texture.minFilter = THREE.LinearMipmapLinearFilter;
+      texture.magFilter = THREE.LinearFilter;
+      // 先挂载新纹理再重建，旧纹理最后释放，替换过程不闪
+      const previous = node.svgTexture;
+      node.svgTexture = texture;
+      node.imageState = { src, status: 'loaded', texture };
+      node.visualKey = '';
+      this.rebuildContent(node);
+      previous?.dispose();
+      // 重绘期间若又放大了，按最新缩放再补一档
+      this.scheduleVectorRefresh(80);
+    } finally {
+      this.vectorPending.delete(key);
+    }
+  }
+
   private buildImage(group: THREE.Group, object: ImageObject | SvgObject, node: ObjectNode) {
-    this.ensureImage(node, object);
+    if (object.type === 'svg') {
+      this.ensureSvg(node, object);
+    } else {
+      if (node.svgTexture) {
+        node.svgTexture.dispose();
+        node.svgTexture = null;
+      }
+      this.ensureImage(node, object);
+    }
     const loaded = node.imageState?.status === 'loaded' && node.imageState.texture;
     let texture: THREE.Texture = this.placeholderTexture;
     let drawWidth = object.width;
@@ -1572,6 +1750,8 @@ export class SceneManager {
       canvas: null,
       texture: null,
       animation: null,
+      rasterSide: 0,
+      resizing: false,
     };
     node.lottie = runtime;
     const data = parseLottieSource(object.src);
@@ -1583,10 +1763,11 @@ export class SceneManager {
     }
     const naturalWidth = Math.max(1, object.naturalWidth || 800);
     const naturalHeight = Math.max(1, object.naturalHeight || 600);
-    const scale = Math.min(1, 2048 / Math.max(naturalWidth, naturalHeight));
+    const side = Math.min(this.lottieMaxSide(), this.vectorBucket(this.vectorTargetSide(object)));
+    const { width, height } = this.fitVectorCanvas(side, naturalWidth, naturalHeight);
     const canvas = document.createElement('canvas');
-    canvas.width = Math.max(2, Math.round(naturalWidth * scale));
-    canvas.height = Math.max(2, Math.round(naturalHeight * scale));
+    canvas.width = width;
+    canvas.height = height;
     const texture = new THREE.CanvasTexture(canvas);
     texture.colorSpace = THREE.SRGBColorSpace;
     texture.minFilter = THREE.LinearFilter;
@@ -1594,6 +1775,7 @@ export class SceneManager {
     texture.generateMipmaps = false;
     runtime.canvas = canvas;
     runtime.texture = texture;
+    runtime.rasterSide = Math.max(width, height);
 
     void import('lottie-web')
       .then(({ default: lottie }) => {
@@ -1627,6 +1809,100 @@ export class SceneManager {
         node.visualKey = '';
         this.rebuildContent(node);
       });
+  }
+
+  /** 缩放稳定后按目标像素重建 Lottie 画布，保留当前帧与播放状态，旧纹理保留到新动画绘制完成才切换 */
+  private resizeLottie(node: ObjectNode, object: LottieObject) {
+    const runtime = node.lottie;
+    if (!runtime || runtime.status !== 'ready' || runtime.resizing || !runtime.animation) return;
+    const key = node.objectId;
+    if (this.vectorPending.has(key)) return;
+    const side = Math.min(this.lottieMaxSide(), this.vectorBucket(this.vectorTargetSide(object)));
+    if (side < runtime.rasterSide * 1.4) return;
+    const data = parseLottieSource(object.src);
+    if (!data) return;
+    const naturalWidth = Math.max(1, object.naturalWidth || 800);
+    const naturalHeight = Math.max(1, object.naturalHeight || 600);
+    const { width, height } = this.fitVectorCanvas(side, naturalWidth, naturalHeight);
+    runtime.resizing = true;
+    this.vectorPending.add(key);
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.generateMipmaps = false;
+    let swapped = false;
+    let swapFrame = 0;
+    const fail = () => {
+      if (swapped) return;
+      texture.dispose();
+      runtime.resizing = false;
+      this.vectorPending.delete(key);
+    };
+    void import('lottie-web')
+      .then(({ default: lottie }) => {
+        if (this.disposed || this.nodes.get(key) !== node || node.lottie !== runtime) {
+          fail();
+          return;
+        }
+        const context = canvas.getContext('2d');
+        if (!context) {
+          fail();
+          return;
+        }
+        const animation = lottie.loadAnimation<'canvas'>({
+          renderer: 'canvas',
+          loop: object.loop,
+          autoplay: false,
+          animationData: data,
+          rendererSettings: {
+            context,
+            clearCanvas: true,
+            preserveAspectRatio: 'xMidYMid meet',
+          },
+        } as unknown as AnimationConfigWithData<'canvas'>);
+        animation.setSpeed(Math.max(0.1, object.speed || 1));
+        const swap = () => {
+          if (swapped) return;
+          if (this.disposed || this.nodes.get(key) !== node || node.lottie !== runtime) {
+            animation.destroy();
+            fail();
+            return;
+          }
+          swapped = true;
+          const oldAnimation = runtime.animation;
+          const oldTexture = runtime.texture;
+          if (oldAnimation) swapFrame = oldAnimation.currentFrame;
+          animation.goToAndStop(swapFrame, true);
+          runtime.animation = animation;
+          runtime.canvas = canvas;
+          runtime.texture = texture;
+          runtime.rasterSide = Math.max(width, height);
+          runtime.resizing = false;
+          this.vectorPending.delete(key);
+          // Lottie 在舞台上始终自动播放，重建后从原帧继续，避免旧动画尚未起播时新动画停在首帧
+          animation.play();
+          if (oldAnimation) oldAnimation.destroy();
+          if (oldTexture) oldTexture.dispose();
+          node.visualKey = '';
+          this.rebuildContent(node);
+        };
+        animation.addEventListener('DOMLoaded', () => {
+          if (swapped) {
+            // 兜底切换发生在 DOMLoaded 之前时，动画尚未起播，等就绪后回到原帧继续播放
+            animation.goToAndStop(swapFrame, true);
+            animation.play();
+            return;
+          }
+          swap();
+        });
+        // 隐藏窗口等场景下 DOMLoaded 可能不触发，仍需完成分辨率切换
+        window.setTimeout(swap, 500);
+      })
+      .catch(() => fail());
   }
 
   private disposeLottie(node: ObjectNode) {
@@ -2035,6 +2311,10 @@ export class SceneManager {
     this.disposeMedia(node);
     this.disposeModel(node);
     this.disposeLottie(node);
+    if (node.svgTexture) {
+      node.svgTexture.dispose();
+      node.svgTexture = null;
+    }
     this.clearContent(node);
     node.group.remove(node.outline);
     node.outline.geometry.dispose();
@@ -2127,7 +2407,7 @@ export class SceneManager {
     const dt = Math.min(0.06, Math.max(0, (now - this.lastTickAt) / 1000));
     this.lastTickAt = now;
     for (const node of this.nodes.values()) {
-      if (node.lottie?.texture) node.lottie.texture.needsUpdate = true;
+      if (node.lottie?.texture && node.group.visible) node.lottie.texture.needsUpdate = true;
       const runtime = node.model;
       const object = node.data;
       if (!runtime || runtime.status !== 'ready' || !runtime.group) continue;
@@ -2145,6 +2425,11 @@ export class SceneManager {
         this.applyView(to);
         resolve();
       }
+    }
+    if (Math.abs(this.view.distance - this.lastVectorDistance) > 0.5) {
+      this.lastVectorDistance = this.view.distance;
+      this.lastVectorChangeAt = performance.now();
+      this.scheduleVectorRefresh();
     }
     this.updateMediaVisibility(now);
     this.updateGrid();
@@ -2399,6 +2684,12 @@ export class SceneManager {
   dispose() {
     this.disposed = true;
     this.renderer.setAnimationLoop(null);
+    if (this.vectorTimer) {
+      window.clearTimeout(this.vectorTimer);
+      this.vectorTimer = 0;
+    }
+    this.vectorPending.clear();
+    this.svgImageCache.clear();
     if (this.lensTarget) this.lensTarget.dispose();
     if (this.lensMaterial) this.lensMaterial.dispose();
     if (!this.xrActive && this.xrRig) {
