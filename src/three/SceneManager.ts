@@ -19,7 +19,7 @@ import { ACCENT, ASPECT, FOV } from '../lib/constants';
 import { cameraPosition, clampPitch, lerpView } from '../lib/camera';
 import { disposeObject3D, loadModelGroup } from '../lib/model3d';
 import { parseLottieSource } from '../lib/lottie';
-import type { AnimationItem } from 'lottie-web';
+import type { AnimationConfigWithData, AnimationItem } from 'lottie-web';
 import { sampleBezierPath } from '../lib/curve';
 import { buildTextExtrudeGeometry } from './text3d';
 import { fontCss, layoutText } from '../lib/text';
@@ -1538,7 +1538,6 @@ export class SceneManager {
         const context = canvas.getContext('2d');
         if (!context) throw new Error('无法创建 Lottie 画布');
         const animation = lottie.loadAnimation<'canvas'>({
-          container: canvas,
           renderer: 'canvas',
           loop: object.loop,
           autoplay: true,
@@ -1548,7 +1547,9 @@ export class SceneManager {
             clearCanvas: true,
             preserveAspectRatio: 'xMidYMid meet',
           },
-        });
+          // 不传 container：lottie-web 会忽略 context 并新建子 canvas，
+          // 这里要让动画直接绘制到 CanvasTexture 使用的画布上。
+        } as unknown as AnimationConfigWithData<'canvas'>);
         animation.setSpeed(Math.max(0.1, object.speed || 1));
         runtime.animation = animation;
         runtime.status = 'ready';

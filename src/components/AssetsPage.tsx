@@ -9,6 +9,7 @@ import {
   readAssetFile,
 } from '../lib/assets';
 import { formatStamp } from '../lib/file';
+import { parseLottieSource } from '../lib/lottie';
 import { formatDuration } from '../lib/media';
 import { MODEL_ACCEPT } from '../lib/model3d';
 import {
@@ -25,6 +26,7 @@ import {
   updateAssetMeta,
 } from '../lib/storage';
 import { toast } from '../store/uiStore';
+import type { AnimationItem } from 'lottie-web';
 import { Icon } from './Icon';
 import { ModelViewer } from './ModelViewer';
 import { ConfirmDialog, Modal } from './ui';
@@ -200,6 +202,56 @@ function AssetThumb({ asset }: { asset: AssetMeta }) {
   );
 }
 
+function LottiePreview({ src }: { src: string }) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    const data = parseLottieSource(src);
+    if (!data) {
+      setError('Lottie 数据无法解析');
+      return;
+    }
+    setError(null);
+    let cancelled = false;
+    let animation: AnimationItem | null = null;
+    void import('lottie-web')
+      .then(({ default: lottie }) => {
+        if (cancelled || !hostRef.current) return;
+        animation = lottie.loadAnimation({
+          container: host,
+          renderer: 'canvas',
+          loop: true,
+          autoplay: true,
+          animationData: data,
+          rendererSettings: { clearCanvas: true, preserveAspectRatio: 'xMidYMid meet' },
+        });
+        animation.addEventListener('data_failed', () => setError('Lottie 加载失败'));
+        animation.addEventListener('error', () => setError('Lottie 加载失败'));
+      })
+      .catch((reason: unknown) => {
+        setError(reason instanceof Error ? reason.message : 'Lottie 加载失败');
+      });
+    return () => {
+      cancelled = true;
+      animation?.destroy();
+      animation = null;
+    };
+  }, [src]);
+
+  if (error) {
+    return (
+      <div className="asset-preview-file">
+        <Icon name="spark" size={38} />
+        <p>{error}。资源文件仍已完整保存。</p>
+      </div>
+    );
+  }
+  return <div className="asset-preview-lottie" ref={hostRef} aria-label="Lottie 动画预览" />;
+}
+
 function AssetPreviewContent({ asset, src }: { asset: AssetMeta; src: string }) {
   if (asset.kind === 'image') {
     return <img className="asset-preview-img" src={src} alt={asset.name} />;
@@ -216,6 +268,9 @@ function AssetPreviewContent({ asset, src }: { asset: AssetMeta; src: string }) 
         <audio src={src} controls autoPlay />
       </div>
     );
+  }
+  if (asset.kind === 'lottie') {
+    return <LottiePreview src={src} />;
   }
   if (asset.kind === 'model' && asset.format) {
     return <ModelViewer src={src} format={asset.format} name={asset.name} height={440} />;
