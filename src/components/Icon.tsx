@@ -39,7 +39,8 @@ export type IconName =
   | 'vr'
   | 'fisheye'
   | 'svg'
-  | 'plug';
+  | 'plug'
+  | 'gear';
 
 interface IconProps extends SVGProps<SVGSVGElement> {
   name: IconName;
@@ -117,6 +118,12 @@ const paths: Record<IconName, ReactNode> = {
     </>
   ),
   spark: <path d="M12 3v4m0 10v4M3 12h4m10 0h4M6 6l2.6 2.6M15.4 15.4 18 18M18 6l-2.6 2.6M8.6 15.4 6 18" />,
+  gear: (
+    <>
+      <circle cx="12" cy="12" r="3.2" />
+      <path d="M19.4 14.6a7.7 7.7 0 0 0 0-5.2l2-1.5-2-3.4-2.4 1a7.6 7.6 0 0 0-2.2-1.3L14.5 2h-5l-.3 2.2A7.6 7.6 0 0 0 7 5.5l-2.4-1-2 3.4 2 1.5a7.7 7.7 0 0 0 0 5.2l-2 1.5 2 3.4 2.4-1a7.6 7.6 0 0 0 2.2 1.3L9.5 22h5l.3-2.2a7.6 7.6 0 0 0 2.2-1.3l2.4 1 2-3.4-2-1.5Z" />
+    </>
+  ),
   check: <path d="m4 12 5 5L20 6" />,
   video: (
     <>

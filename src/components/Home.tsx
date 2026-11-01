@@ -1,10 +1,19 @@
 import { useEffect, useRef, useState } from 'react';
 import type { SlideObject } from '../types';
 import { LIMITS } from '../lib/constants';
+import { ensureDeckCover } from '../lib/cover';
 import { createDeck } from '../lib/deck';
 import { formatStamp } from '../lib/file';
 import { formatBytes } from '../lib/image';
-import { deleteDeck, getDeck, listDecks, putDeck, type DeckSummary } from '../lib/storage';
+import {
+  deleteDeck,
+  getDeck,
+  listDeckCovers,
+  listDecks,
+  putDeck,
+  type DeckCover,
+  type DeckSummary,
+} from '../lib/storage';
 import { parseSlideFile, uniqueTitle } from '../lib/validate';
 import { toast } from '../store/uiStore';
 import { Icon } from './Icon';
@@ -15,7 +24,15 @@ interface HomeProps {
   onOpenAssets: () => void;
 }
 
-function DeckThumb({ summary }: { summary: DeckSummary }) {
+function DeckThumb({ summary, cover }: { summary: DeckSummary; cover?: DeckCover }) {
+  if (cover?.dataUrl) {
+    return (
+      <div className="deck-thumb" style={{ background: summary.background }}>
+        <img className="deck-cover" src={cover.dataUrl} alt="" loading="lazy" decoding="async" />
+        {summary.broken && <div className="thumb-broken">无法打开</div>}
+      </div>
+    );
+  }
   const objects = summary.objects.filter((object) => object.visible);
   const bounds = objects.reduce(
     (acc, object) => ({
@@ -112,18 +129,57 @@ function DeckThumb({ summary }: { summary: DeckSummary }) {
 
 export function Home({ onOpen, onOpenAssets }: HomeProps) {
   const [decks, setDecks] = useState<DeckSummary[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [covers, setCovers] = useState<Record<string, DeckCover>>({});
   const [busy, setBusy] = useState(false);
   const [renameTarget, setRenameTarget] = useState<DeckSummary | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<DeckSummary | null>(null);
   const importRef = useRef<HTMLInputElement>(null);
+  const coverJobs = useRef(new Set<string>());
+
+  const generateCovers = (summaries: DeckSummary[], cached: DeckCover[]) => {
+    const map: Record<string, DeckCover> = {};
+    const missing: DeckSummary[] = [];
+    const byId = new Map(cached.map((cover) => [cover.id, cover]));
+    for (const summary of summaries) {
+      const cover = byId.get(summary.id);
+      if (cover && cover.dataUrl && cover.deckUpdatedAt === summary.updatedAt) {
+        map[summary.id] = cover;
+      } else if (!summary.broken && summary.objectCount > 0) {
+        missing.push(summary);
+      }
+    }
+    setCovers(map);
+    const pending = missing.filter((summary) => !coverJobs.current.has(`${summary.id}:${summary.updatedAt}`));
+    if (pending.length === 0) return;
+    // 串行逐个补齐封面：后面的作品不会因为批次上限一直停留在 DOM 拼装缩略图
+    void (async () => {
+      for (const summary of pending) {
+        const key = `${summary.id}:${summary.updatedAt}`;
+        if (coverJobs.current.has(key)) continue;
+        coverJobs.current.add(key);
+        const cover = await ensureDeckCover(summary);
+        coverJobs.current.delete(key);
+        if (cover) setCovers((prev) => ({ ...prev, [cover.id]: cover }));
+      }
+    })();
+  };
 
   const load = async () => {
     try {
-      setDecks(await listDecks());
+      const [summaries, cached] = await Promise.all([
+        listDecks(),
+        listDeckCovers().catch(() => [] as DeckCover[]),
+      ]);
+      setLoadError(null);
+      setDecks(summaries);
+      generateCovers(summaries, cached);
     } catch (error) {
+      const message = error instanceof Error ? error.message : '作品列表读取失败';
       setDecks([]);
-      toast(error instanceof Error ? error.message : '作品列表读取失败', 'error');
+      setLoadError(message);
+      toast(message, 'error');
     }
   };
 
@@ -299,6 +355,22 @@ export function Home({ onOpen, onOpenAssets }: HomeProps) {
               </div>
             ))}
           </div>
+        ) : loadError ? (
+          <section className="home-empty">
+            <div className="empty-mark" aria-hidden="true">
+              <i />
+              <i />
+              <i />
+            </div>
+            <h2>无法读取本地作品</h2>
+            <p>{loadError}</p>
+            <div className="empty-actions">
+              <button className="btn btn-ghost" disabled={busy} onClick={() => void load()}>
+                <Icon name="reset" size={16} />
+                重试
+              </button>
+            </div>
+          </section>
         ) : decks.length === 0 ? (
           <section className="home-empty">
             <div className="empty-mark" aria-hidden="true">
@@ -333,7 +405,7 @@ export function Home({ onOpen, onOpenAssets }: HomeProps) {
                     onClick={() => open(summary)}
                     aria-label={summary.broken ? `${summary.title}，无法打开` : `打开 ${summary.title}`}
                   >
-                    <DeckThumb summary={summary} />
+                    <DeckThumb summary={summary} cover={covers[summary.id]} />
                     <div className="deck-info">
                       <div className="deck-title-row">
                         <h3>{summary.title}</h3>

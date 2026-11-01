@@ -25,13 +25,22 @@ interface SlideDB extends DBSchema {
     key: string;
     value: AssetFolder;
   };
+  covers: {
+    key: string;
+    value: DeckCover;
+  };
 }
 
 let dbPromise: Promise<IDBPDatabase<SlideDB>> | null = null;
 
 function db(): Promise<IDBPDatabase<SlideDB>> {
   if (!dbPromise) {
-    dbPromise = openDB<SlideDB>('3d-slide', 2, {
+    let rejectBlocked: ((reason: Error) => void) | null = null;
+    // 旧版本标签页仍占用数据库时，升级会一直挂起；这里让它快速失败并给出可读提示
+    const blocked = new Promise<never>((_, reject) => {
+      rejectBlocked = reject;
+    });
+    const opened = openDB<SlideDB>('3d-slide', 3, {
       upgrade(database) {
         if (!database.objectStoreNames.contains('decks')) {
           database.createObjectStore('decks', { keyPath: 'id' });
@@ -45,7 +54,32 @@ function db(): Promise<IDBPDatabase<SlideDB>> {
         if (!database.objectStoreNames.contains('folders')) {
           database.createObjectStore('folders', { keyPath: 'id' });
         }
+        if (!database.objectStoreNames.contains('covers')) {
+          database.createObjectStore('covers', { keyPath: 'id' });
+        }
       },
+      blocking() {
+        // 其他标签页请求升级：主动关闭当前连接，避免阻塞对方
+        const pending = dbPromise;
+        dbPromise = null;
+        void pending?.then((database) => database.close()).catch(() => {});
+      },
+      blocked() {
+        dbPromise = null;
+        rejectBlocked?.(new Error('数据库正在被其他旧版页面占用，请关闭其他标签页后刷新'));
+        rejectBlocked = null;
+      },
+    });
+    dbPromise = Promise.race([
+      opened,
+      blocked,
+      new Promise<never>((_, reject) => {
+        window.setTimeout(() => reject(new Error('数据库打开超时，请关闭其他旧版页面后刷新重试')), 6000);
+      }),
+    ]);
+    dbPromise = dbPromise.catch((error: unknown) => {
+      dbPromise = null;
+      throw error;
     });
   }
   return dbPromise;
@@ -60,6 +94,14 @@ export interface DeckSummary {
   background: string;
   broken?: string;
   objects: import('../types').SlideObject[];
+}
+
+/** 首页封面：离屏渲染的 16:9 截图，按作品 updatedAt 失效 */
+export interface DeckCover {
+  id: string;
+  dataUrl: string;
+  deckUpdatedAt: number;
+  at: number;
 }
 
 export async function listDecks(): Promise<DeckSummary[]> {
@@ -111,7 +153,32 @@ export async function putDeck(deck: Deck): Promise<void> {
 
 export async function deleteDeck(id: string): Promise<void> {
   const database = await db();
-  await database.delete('decks', id);
+  const tx = database.transaction(['decks', 'covers'], 'readwrite');
+  await tx.objectStore('decks').delete(id);
+  await tx.objectStore('covers').delete(id);
+  await tx.done;
+}
+
+/* ------------------------------ 首页封面 ------------------------------ */
+
+export async function listDeckCovers(): Promise<DeckCover[]> {
+  const database = await db();
+  return database.getAll('covers');
+}
+
+export async function getDeckCover(id: string): Promise<DeckCover | null> {
+  const database = await db();
+  return (await database.get('covers', id)) ?? null;
+}
+
+export async function putDeckCover(cover: DeckCover): Promise<void> {
+  const database = await db();
+  await database.put('covers', cover);
+}
+
+export async function deleteDeckCover(id: string): Promise<void> {
+  const database = await db();
+  await database.delete('covers', id);
 }
 
 /* ----------------------------- 资源库存储 ----------------------------- */

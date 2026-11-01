@@ -169,13 +169,17 @@ export class SceneManager {
     initialView: ViewState,
     mode: StageMode,
     callbacks: SceneCallbacks,
-    options: { autoStart?: boolean } = {},
+    options: { autoStart?: boolean; preserveDrawingBuffer?: boolean } = {},
   ) {
     this.mode = mode;
     this.callbacks = callbacks;
     this.view = { ...initialView, target: { ...initialView.target } };
 
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    this.renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      alpha: false,
+      preserveDrawingBuffer: options.preserveDrawingBuffer === true,
+    });
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     this.renderer.domElement.style.display = 'block';
@@ -397,18 +401,39 @@ export class SceneManager {
     if (this.lensMaterial) this.updateLensTarget();
   }
 
-  /** 等待图片与模型资源就绪，用于离屏导出前预热 */
+  /** 等待图片、模型、Lottie 与视频首帧就绪，用于离屏导出前预热 */
   async waitForAssets(timeout = 4000): Promise<void> {
     const started = performance.now();
     while (!this.disposed && performance.now() - started < timeout) {
-      let loadingModels = 0;
+      let loading = 0;
       for (const node of this.nodes.values()) {
-        if (node.model?.status === 'loading') loadingModels += 1;
-        if (node.lottie?.status === 'loading') loadingModels += 1;
+        if (node.model?.status === 'loading') loading += 1;
+        if (node.lottie?.status === 'loading') loading += 1;
+        if (
+          node.media?.kind === 'video' &&
+          !node.media.ready &&
+          !node.media.error
+        ) {
+          loading += 1;
+        }
       }
-      if (this.imagePending.size === 0 && loadingModels === 0) return;
+      if (this.imagePending.size === 0 && loading === 0) return;
       this.renderOnce();
       await new Promise<void>((resolve) => window.setTimeout(resolve, 100));
+    }
+  }
+
+  /** 离屏截图：按 16:9 输出 JPEG dataURL，供首页封面使用 */
+  async captureImage(width: number, height: number, timeout = 6000): Promise<string> {
+    if (this.disposed) throw new Error('渲染器已销毁');
+    this.setPixelRatio(1);
+    this.resize(width, height);
+    await this.waitForAssets(timeout);
+    this.renderOnce();
+    try {
+      return this.renderer.domElement.toDataURL('image/jpeg', 0.86);
+    } catch {
+      throw new Error('封面生成失败');
     }
   }
 

@@ -1,249 +1,420 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import type { Deck } from '../types';
 import {
   AI_SYSTEM_PROMPT,
   buildDeckContext,
-  chatCompletion,
-  clearAiConfig,
-  DEFAULT_AI_CONFIG,
+  chatCompletionWithTools,
   loadAiConfig,
-  saveAiConfig,
+  type AiChatMessage,
   type AiConfig,
-  type AiMessage,
+  type AiToolCall,
 } from '../lib/ai';
-import { buildWorkspaceSnapshot } from '../lib/snapshot';
-import { getDeck, listAssetMetas, listDecks, listFolders } from '../lib/storage';
-import { downloadBlob, filenameFor } from '../lib/exportVideo';
+import { AI_TOOLS, applyDeckPlan, executeAiTool } from '../lib/aiTools';
+import { useDeckStore } from '../store/deckStore';
 import { toast } from '../store/uiStore';
-import { FieldBlock, Modal } from './ui';
 import { Icon } from './Icon';
-
-const MCP_CONFIG = `{
-  "mcpServers": {
-    "3d-slide": {
-      "command": "node",
-      "args": ["mcp/server.mjs"],
-      "env": { "SLIDE_SNAPSHOT": "workspace-snapshot.json" }
-    }
-  }
-}`;
+import { AiSettings } from './AiSettings';
 
 interface AiPanelProps {
   deck: Deck;
   onClose: () => void;
 }
 
+interface ChatEntry {
+  id: string;
+  role: 'user' | 'assistant' | 'tool' | 'error';
+  text: string;
+}
+
+interface PendingState {
+  calls: AiToolCall[];
+  messages: AiChatMessage[];
+}
+
+const SUGGESTIONS = [
+  '做一页深色科技封面：标题居中、副标题在下方，再放一张资源库里的图片',
+  '把当前画布整理成 3 个运镜视点，从全景推进到主体特写',
+  '用 3D 文字做标题，并加一些简单的几何装饰',
+];
+
+const MAX_ROUNDS = 6;
+
+function uid(): string {
+  return typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : `ai-${Math.random().toString(36).slice(2)}`;
+}
+
+function isAbortError(error: unknown): boolean {
+  return (
+    (error instanceof DOMException && error.name === 'AbortError') ||
+    (typeof error === 'object' &&
+      error !== null &&
+      (error as { name?: unknown }).name === 'AbortError')
+  );
+}
+
+function summarizeCall(call: AiToolCall): string {
+  try {
+    const args = JSON.parse(call.arguments) as Record<string, unknown>;
+    const detail =
+      args.text ?? args.shape ?? args.asset ?? args.name ?? args.title ?? '';
+    return detail ? `${call.name} · ${String(detail).slice(0, 24)}` : call.name;
+  } catch {
+    return call.name;
+  }
+}
+
 export function AiPanel({ deck, onClose }: AiPanelProps) {
   const [config, setConfig] = useState<AiConfig>(() => loadAiConfig());
-  const [includeText, setIncludeText] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [entries, setEntries] = useState<ChatEntry[]>([]);
   const [prompt, setPrompt] = useState('');
-  const [history, setHistory] = useState<AiMessage[]>([]);
-  const [reply, setReply] = useState('');
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
+  const [pending, setPending] = useState<PendingState | null>(null);
+  const [roundStartPast, setRoundStartPast] = useState<number | null>(null);
+  const messagesRef = useRef<AiChatMessage[]>([]);
   const abortRef = useRef<AbortController | null>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const pastLength = useDeckStore((state) => state.past.length);
 
-  const context = useMemo(() => buildDeckContext(deck, includeText), [deck, includeText]);
+  useEffect(() => {
+    const handler = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape' && !settingsOpen) onClose();
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [onClose, settingsOpen]);
 
-  const persist = () => {
-    if (!config.baseUrl.trim() || !config.model.trim()) {
-      toast('请填写接口地址与模型名称', 'error');
-      return;
+  useEffect(() => {
+    const body = bodyRef.current;
+    if (body) body.scrollTop = body.scrollHeight;
+  }, [entries, busy, pending]);
+
+  const pushEntry = (role: ChatEntry['role'], text: string) => {
+    setEntries((prev) => [...prev, { id: uid(), role, text }]);
+  };
+
+  const systemMessage = (): AiChatMessage => ({
+    role: 'system',
+    content: `${AI_SYSTEM_PROMPT}\n\n${buildDeckContext(deck, config.includeText)}`,
+  });
+
+  const executeCalls = async (calls: AiToolCall[]): Promise<AiChatMessage[]> => {
+    const results: AiChatMessage[] = [];
+    for (const call of calls) {
+      if (abortRef.current?.signal.aborted) break;
+      let args: unknown = {};
+      try {
+        args = call.arguments ? JSON.parse(call.arguments) : {};
+      } catch {
+        const message = '工具参数不是有效 JSON';
+        pushEntry('error', `${call.name} · ${message}`);
+        results.push({
+          role: 'tool',
+          tool_call_id: call.id,
+          content: JSON.stringify({ ok: false, message }),
+        });
+        continue;
+      }
+      const outcome = await executeAiTool(call.name, args);
+      pushEntry(outcome.ok ? 'tool' : 'error', `${call.name} · ${outcome.message}`);
+      const payload = JSON.stringify({
+        ok: outcome.ok,
+        message: outcome.message,
+        data: outcome.data ?? null,
+      });
+      results.push({
+        role: 'tool',
+        tool_call_id: call.id,
+        content: payload.length > 12000 ? `${payload.slice(0, 12000)}…` : payload,
+      });
     }
-    saveAiConfig(config);
-    toast('AI 配置已保存在本机浏览器', 'success');
+    return results;
+  };
+
+  /** 跑一轮模型对话；返回可继续使用的消息历史 */
+  const runAssistant = async (
+    baseMessages: AiChatMessage[],
+    auto: boolean,
+  ): Promise<AiChatMessage[]> => {
+    const controller = new AbortController();
+    abortRef.current = controller;
+    let messages = baseMessages;
+    try {
+      for (let round = 0; round < MAX_ROUNDS; round += 1) {
+        const result = await chatCompletionWithTools(
+          config,
+          [systemMessage(), ...messages],
+          AI_TOOLS,
+          controller.signal,
+        );
+        if (result.content) pushEntry('assistant', result.content);
+        if (result.toolCalls.length === 0) return messages;
+        const assistant: AiChatMessage = {
+          role: 'assistant',
+          content: result.content,
+          tool_calls: result.toolCalls,
+        };
+        messages = [...messages, assistant];
+        if (!auto) {
+          setPending({ calls: result.toolCalls, messages });
+          pushEntry('tool', `已生成 ${result.toolCalls.length} 个待执行操作`);
+          return messages;
+        }
+        const toolMessages = await executeCalls(result.toolCalls);
+        messages = [...messages, ...toolMessages];
+        if (controller.signal.aborted) break;
+      }
+      return messages;
+    } finally {
+      if (abortRef.current === controller) abortRef.current = null;
+    }
   };
 
   const send = async () => {
     const text = prompt.trim();
     if (!text || busy) return;
     if (!config.model.trim()) {
-      toast('请先填写模型配置', 'error');
+      toast('请先在设置中配置模型', 'error');
+      setSettingsOpen(true);
       return;
     }
+    setPrompt('');
     setBusy(true);
-    setError('');
-    setReply('');
-    const controller = new AbortController();
-    abortRef.current = controller;
-    const userMessage: AiMessage = { role: 'user', content: text };
-    const messages: AiMessage[] = [
-      { role: 'system', content: `${AI_SYSTEM_PROMPT}\n\n${context}` },
-      ...history,
-      userMessage,
-    ];
+    setPending(null);
+    setRoundStartPast(useDeckStore.getState().past.length);
+    pushEntry('user', text);
+    const base: AiChatMessage[] = [...messagesRef.current, { role: 'user', content: text }];
+    let nextMessages = base;
     try {
-      const answer = await chatCompletion(config, messages, controller.signal);
-      setReply(answer);
-      setHistory((items) => [...items, userMessage, { role: 'assistant', content: answer }]);
-      setPrompt('');
-    } catch (err) {
-      if (!controller.signal.aborted) {
-        setError(err instanceof Error ? err.message : '模型请求失败');
+      nextMessages = await runAssistant(base, config.autoApply);
+    } catch (error) {
+      if (!isAbortError(error)) {
+        const message = error instanceof Error ? error.message : '模型请求失败';
+        pushEntry('error', message);
       }
     } finally {
-      abortRef.current = null;
+      messagesRef.current = nextMessages;
       setBusy(false);
     }
   };
 
-  const exportSnapshot = async () => {
+  const applyPending = async () => {
+    if (!pending || busy) return;
+    const state = pending;
+    setPending(null);
+    setBusy(true);
+    let nextMessages = state.messages;
     try {
-      const summaries = await listDecks();
-      const decks = (await Promise.all(summaries.map((item) => getDeck(item.id)))).filter(
-        (item): item is Deck => Boolean(item),
-      );
-      const [assets, folders] = await Promise.all([listAssetMetas(), listFolders()]);
-      const snapshot = buildWorkspaceSnapshot(decks, assets, folders, { includeText });
-      const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: 'application/json' });
-      const filename = filenameFor('workspace', 'json');
-      downloadBlob(blob, filename);
-      toast(`已导出脱敏快照 · ${filename}`, 'success');
-    } catch (err) {
-      toast(err instanceof Error ? err.message : '快照导出失败', 'error');
-    }
-  };
-
-  const copyMcp = async () => {
-    try {
-      await navigator.clipboard.writeText(MCP_CONFIG);
-      toast('MCP 配置已复制', 'success');
-    } catch {
-      toast('无法写入剪贴板，请手动复制', 'error');
-    }
-  };
-
-  return (
-    <Modal
-      title="AI 助手与集成"
-      eyebrow="AI · MCP"
-      width={660}
-      onClose={onClose}
-      footer={
-        <>
-          <button className="btn btn-ghost" onClick={onClose}>
-            关闭
-          </button>
-          <button className="btn btn-primary" disabled={busy} onClick={() => void send()}>
-            <Icon name="spark" size={15} />
-            {busy ? '思考中…' : '发送'}
-          </button>
-        </>
+      const toolMessages = await executeCalls(state.calls);
+      nextMessages = [...state.messages, ...toolMessages];
+      nextMessages = await runAssistant(nextMessages, true);
+    } catch (error) {
+      if (!isAbortError(error)) {
+        pushEntry('error', error instanceof Error ? error.message : '操作执行失败');
       }
-    >
-      <section className="ai-section">
-        <h4>大模型接口（OpenAI 兼容）</h4>
-        <div className="ai-config-grid">
-          <label className="ai-field">
-            <span className="field-label">接口地址</span>
-            <input
-              className="ai-input"
-              value={config.baseUrl}
-              spellCheck={false}
-              placeholder="https://api.openai.com/v1"
-              onChange={(event) => setConfig({ ...config, baseUrl: event.target.value })}
-            />
-          </label>
-          <label className="ai-field">
-            <span className="field-label">模型</span>
-            <input
-              className="ai-input"
-              value={config.model}
-              spellCheck={false}
-              placeholder="gpt-4o-mini"
-              onChange={(event) => setConfig({ ...config, model: event.target.value })}
-            />
-          </label>
-          <label className="ai-field ai-field-wide">
-            <span className="field-label">API Key</span>
-            <input
-              className="ai-input"
-              type="password"
-              value={config.apiKey}
-              spellCheck={false}
-              autoComplete="off"
-              placeholder="sk-…（仅保存在本机浏览器）"
-              onChange={(event) => setConfig({ ...config, apiKey: event.target.value })}
-            />
-          </label>
-        </div>
-        <div className="ai-inline">
-          <button className="btn btn-ghost btn-sm" onClick={persist}>
-            保存配置
-          </button>
-          <button
-            className="btn btn-ghost btn-sm"
-            onClick={() => {
-              clearAiConfig();
-              setConfig({ ...DEFAULT_AI_CONFIG });
-              toast('已清除本机 AI 配置', 'info');
-            }}
-          >
-            清除
-          </button>
-          <span className="ai-note">密钥不会写入工程、快照或 MCP 数据</span>
-        </div>
-      </section>
+    } finally {
+      messagesRef.current = nextMessages;
+      setBusy(false);
+    }
+  };
 
-      <section className="ai-section">
-        <div className="ai-chat-head">
-          <h4>对话</h4>
-          <label className="ai-toggle">
-            <input
-              type="checkbox"
-              checked={includeText}
-              onChange={(event) => setIncludeText(event.target.checked)}
-            />
-            随请求发送画板文字
-          </label>
-        </div>
-        {history.length > 0 && (
-          <div className="ai-history">
-            {history.map((message, index) => (
-              <div key={`${message.role}-${index}`} className={`ai-bubble is-${message.role}`}>
-                {message.content}
-              </div>
-            ))}
+  const undoRound = () => {
+    if (roundStartPast === null) {
+      toast('还没有可撤销的 AI 操作', 'info');
+      return;
+    }
+    let guard = 0;
+    while (useDeckStore.getState().past.length > roundStartPast && guard < 60) {
+      useDeckStore.getState().undo();
+      guard += 1;
+    }
+    setRoundStartPast(useDeckStore.getState().past.length);
+    toast(guard > 0 ? `已撤销本轮 ${guard} 步改动` : '本轮没有可撤销的改动', guard > 0 ? 'success' : 'info');
+  };
+
+  const importPlan = async (file: File) => {
+    if (file.size > 2 * 1024 * 1024) {
+      toast('方案文件超过 2 MB', 'error');
+      return;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await file.text());
+    } catch {
+      toast('方案文件不是有效的 JSON', 'error');
+      return;
+    }
+    setRoundStartPast(useDeckStore.getState().past.length);
+    try {
+      const result = await applyDeckPlan(parsed);
+      pushEntry(
+        result.failed.length > 0 ? 'error' : 'tool',
+        `导入方案 · 已执行 ${result.applied} 步${result.failed.length > 0 ? `，${result.failed.length} 步失败：${result.failed[0]}` : ''}`,
+      );
+      toast(`方案已导入 · ${result.applied} 步`, result.failed.length > 0 ? 'info' : 'success');
+    } catch (error) {
+      toast(error instanceof Error ? error.message : '方案导入失败', 'error');
+    }
+  };
+
+  const canUndo = roundStartPast !== null && pastLength > roundStartPast;
+
+  return createPortal(
+    <div className="ai-drawer-layer" role="presentation">
+      <div className="ai-drawer-scrim" onMouseDown={onClose} />
+      <aside
+        className="ai-drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-label="AI 创作助手"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="ai-drawer-head">
+          <div>
+            <div className="ai-drawer-eyebrow">AI · CREATIVE</div>
+            <h3>创作助手</h3>
           </div>
-        )}
-        <FieldBlock
-          label="告诉 AI 你想做什么"
-          hint="请求会附带当前作品的结构快照；默认隐藏画板文字内容。"
-        >
+          <div className="ai-drawer-head-actions">
+            <button
+              className="icon-btn"
+              title="AI 与 MCP 设置"
+              aria-label="AI 与 MCP 设置"
+              onClick={() => setSettingsOpen(true)}
+            >
+              <Icon name="gear" size={17} />
+            </button>
+            <button className="icon-btn" title="关闭" aria-label="关闭" onClick={onClose}>
+              <Icon name="close" size={17} />
+            </button>
+          </div>
+        </header>
+
+        <div className="ai-drawer-status">
+          <span className={`ai-drawer-chip ${config.model ? '' : 'is-warn'}`}>
+            {config.model || '未配置模型'}
+          </span>
+          <span className="ai-drawer-chip">{config.autoApply ? '自动执行' : '确认后执行'}</span>
+          <span className="ai-drawer-spacer" />
+          <button className="btn btn-ghost btn-sm" disabled={!canUndo} onClick={undoRound}>
+            <Icon name="undo" size={13} />
+            撤销本轮
+          </button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".json,application/json"
+            hidden
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              event.target.value = '';
+              if (file) void importPlan(file);
+            }}
+          />
+          <button className="btn btn-ghost btn-sm" onClick={() => fileRef.current?.click()}>
+            <Icon name="upload" size={13} />
+            导入方案
+          </button>
+        </div>
+
+        <div className="ai-drawer-body" ref={bodyRef}>
+          {entries.length === 0 && (
+            <div className="ai-drawer-empty">
+              <div className="ai-drawer-empty-title">把想法直接说给画布</div>
+              <p>
+                助手会读取当前作品结构，并调用工具添加文字、素材、视点，或调整已有对象。
+                改动会立即出现在画布上，可用「撤销本轮」回退。
+              </p>
+              <div className="ai-drawer-suggest">
+                {SUGGESTIONS.map((item) => (
+                  <button key={item} onClick={() => setPrompt(item)}>
+                    {item}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {entries.map((entry) => (
+            <div key={entry.id} className={`ai-entry is-${entry.role}`}>
+              {entry.role === 'tool' && <Icon name="check" size={12} />}
+              {entry.role === 'error' && <Icon name="alert" size={12} />}
+              <span>{entry.text}</span>
+            </div>
+          ))}
+          {busy && (
+            <div className="ai-entry is-tool">
+              <Icon name="spark" size={12} />
+              <span>正在理解并执行…</span>
+            </div>
+          )}
+          {pending && (
+            <div className="ai-pending">
+              <div className="ai-pending-head">待执行操作 · {pending.calls.length} 步</div>
+              <ul>
+                {pending.calls.map((call) => (
+                  <li key={call.id}>{summarizeCall(call)}</li>
+                ))}
+              </ul>
+              <div className="ai-inline">
+                <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void applyPending()}>
+                  应用到画布
+                </button>
+                <button className="btn btn-ghost btn-sm" onClick={() => setPending(null)}>
+                  放弃
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <footer className="ai-drawer-foot">
           <textarea
             className="ai-textarea"
             value={prompt}
             rows={3}
             maxLength={4000}
-            placeholder="例如：帮我设计一条从俯视全景进入标题、再环绕到模型特写的视点路径。"
+            placeholder="描述你想要的画面或改动，例如：做一页深色科技封面，标题居中，右下方放资源库里的 3D 模型，并创建 3 个运镜视点。"
             onChange={(event) => setPrompt(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+                event.preventDefault();
+                void send();
+              }
+            }}
           />
-        </FieldBlock>
-        {error && <p className="ai-error">{error}</p>}
-        {reply && !error && <div className="ai-reply">{reply}</div>}
-      </section>
+          <div className="ai-drawer-foot-actions">
+            <span className="ai-note">Enter 发送 · Shift+Enter 换行 · 密钥仅存本机</span>
+            {busy ? (
+              <button
+                className="btn btn-ghost btn-sm"
+                onClick={() => {
+                  abortRef.current?.abort();
+                  setBusy(false);
+                }}
+              >
+                停止
+              </button>
+            ) : (
+              <button className="btn btn-primary btn-sm" disabled={!prompt.trim()} onClick={() => void send()}>
+                <Icon name="spark" size={14} />
+                发送
+              </button>
+            )}
+          </div>
+        </footer>
+      </aside>
 
-      <section className="ai-section">
-        <h4>把工作区暴露给 MCP</h4>
-        <p className="ai-note">
-          快照只包含作品结构、资源元数据与脱敏后的字段，不包含资源文件内容、缩略图或任何密钥。
-          MCP 服务以只读方式提供 list_decks、get_deck、list_assets、search_objects 等工具。
-        </p>
-        <div className="ai-inline">
-          <button className="btn btn-light btn-sm" onClick={() => void exportSnapshot()}>
-            <Icon name="download" size={14} />
-            导出脱敏快照
-          </button>
-          <button className="btn btn-light btn-sm" onClick={() => void copyMcp()}>
-            <Icon name="check" size={14} />
-            复制 MCP 配置
-          </button>
-        </div>
-        <pre className="ai-code">{MCP_CONFIG}</pre>
-        <p className="ai-note">
-          将快照保存到项目内后运行 <code>npm run mcp</code>，再把上面的配置加入 MCP 客户端即可。
-        </p>
-      </section>
-    </Modal>
+      {settingsOpen && (
+        <AiSettings
+          config={config}
+          onSave={(next) => setConfig(next)}
+          onClose={() => setSettingsOpen(false)}
+        />
+      )}
+    </div>,
+    document.body,
   );
 }
