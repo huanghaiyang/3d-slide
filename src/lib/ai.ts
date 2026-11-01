@@ -120,6 +120,7 @@ async function postChat(
   messages: AiChatMessage[],
   tools: AiToolDef[] | null,
   signal?: AbortSignal,
+  toolChoice?: unknown,
 ): Promise<AiChatResult> {
   if (!config.model.trim()) throw new Error('请填写模型名称');
   const response = await fetch(endpointOf(config.baseUrl), {
@@ -133,7 +134,7 @@ async function postChat(
       messages,
       temperature: 0.3,
       stream: false,
-      ...(tools && tools.length > 0 ? { tools, tool_choice: 'auto' } : {}),
+      ...(tools && tools.length > 0 ? { tools, tool_choice: toolChoice ?? 'auto' } : {}),
     }),
     signal,
   });
@@ -191,6 +192,31 @@ export async function chatCompletionWithTools(
       return { content: fallback.content, toolCalls: [] };
     }
     throw error;
+  }
+}
+
+/** 检测服务是否支持 function/tool calling：自动化创作的地基 */
+export async function probeToolSupport(
+  config: AiConfig,
+  tools: AiToolDef[],
+  signal?: AbortSignal,
+): Promise<{ ok: boolean; message: string }> {
+  const target = tools.find((tool) => tool.function.name === 'get_deck_state') ?? tools[0];
+  if (!target) return { ok: false, message: '没有可用的工具定义' };
+  try {
+    const result = await postChat(
+      config,
+      [{ role: 'user', content: '请调用 get_deck_state 工具读取当前作品结构，不要输出其他内容。' }],
+      tools,
+      signal,
+      { type: 'function', function: { name: target.function.name } },
+    );
+    if (result.toolCalls.length > 0) {
+      return { ok: true, message: `工具调用可用（${result.toolCalls.map((call) => call.name).join('、')}）` };
+    }
+    return { ok: false, message: '模型没有返回工具调用，可能不支持 function calling，将退化为文字建议' };
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : '工具能力检测失败' };
   }
 }
 

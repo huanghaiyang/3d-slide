@@ -3953,6 +3953,36 @@ button:disabled {
   color: var(--ink-3);
 }
 
+.ai-probe {
+  margin: 8px 0 0;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--muted);
+  background: var(--card-soft);
+  word-break: break-word;
+}
+
+.ai-probe.is-ok {
+  color: var(--teal);
+  border-color: rgba(15, 118, 110, 0.28);
+  background: var(--teal-soft);
+}
+
+.ai-probe.is-warn {
+  color: var(--amber);
+  border-color: rgba(180, 83, 9, 0.28);
+  background: var(--amber-soft);
+}
+
+.ai-probe.is-error {
+  color: var(--danger);
+  border-color: rgba(180, 35, 24, 0.24);
+  background: var(--danger-soft);
+}
+
 .ai-chat-head {
   display: flex;
   align-items: center;
@@ -4176,6 +4206,23 @@ button:disabled {
   background: var(--amber-soft);
 }
 
+.ai-drawer-chip.is-button {
+  cursor: pointer;
+  line-height: 1.5;
+  transition: border-color 0.16s ease, color 0.16s ease, background 0.16s ease;
+}
+
+.ai-drawer-chip.is-button:hover {
+  border-color: rgba(15, 118, 110, 0.45);
+  color: var(--teal);
+  background: var(--teal-soft);
+}
+
+.ai-drawer-chip.is-button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
 .ai-drawer-spacer {
   flex: 1;
 }
@@ -4281,6 +4328,26 @@ button:disabled {
 .ai-entry svg {
   flex: 0 0 auto;
   margin-top: 3px;
+}
+
+.ai-entry-link {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 1px 6px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.6;
+  opacity: 0.78;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ai-entry-link:hover {
+  opacity: 1;
 }
 
 .ai-pending {

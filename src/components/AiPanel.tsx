@@ -6,6 +6,7 @@ import {
   buildDeckContext,
   chatCompletionWithTools,
   loadAiConfig,
+  saveAiConfig,
   type AiChatMessage,
   type AiConfig,
   type AiToolCall,
@@ -15,6 +16,7 @@ import { useDeckStore } from '../store/deckStore';
 import { toast } from '../store/uiStore';
 import { Icon } from './Icon';
 import { AiSettings } from './AiSettings';
+import { ConfirmDialog } from './ui';
 
 interface AiPanelProps {
   deck: Deck;
@@ -32,6 +34,11 @@ interface PendingState {
   messages: AiChatMessage[];
 }
 
+interface ChatSession {
+  entries: ChatEntry[];
+  messages: AiChatMessage[];
+}
+
 const SUGGESTIONS = [
   '做一页深色科技封面：标题居中、副标题在下方，再放一张资源库里的图片',
   '把当前画布整理成 3 个运镜视点，从全景推进到主体特写',
@@ -39,6 +46,9 @@ const SUGGESTIONS = [
 ];
 
 const MAX_ROUNDS = 6;
+const MAX_ENTRIES = 80;
+const MAX_MESSAGES = 24;
+const SESSION_PREFIX = '3d-slide:ai-chat:';
 
 function uid(): string {
   return typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -66,35 +76,107 @@ function summarizeCall(call: AiToolCall): string {
   }
 }
 
+/** 去掉末尾没有工具响应的 assistant(tool_calls)，并从最近的 user 消息处截断历史 */
+function trimMessages(messages: AiChatMessage[]): AiChatMessage[] {
+  let list = messages;
+  const last = list[list.length - 1];
+  if (last && last.role === 'assistant' && last.tool_calls && last.tool_calls.length > 0) {
+    list = list.slice(0, -1);
+  }
+  if (list.length <= MAX_MESSAGES) return list;
+  let start = list.length - MAX_MESSAGES;
+  while (start < list.length && list[start].role !== 'user') start += 1;
+  return start < list.length ? list.slice(start) : list.slice(list.length - MAX_MESSAGES);
+}
+
+function loadSession(deckId: string): ChatSession {
+  const empty: ChatSession = { entries: [], messages: [] };
+  try {
+    const raw = sessionStorage.getItem(`${SESSION_PREFIX}${deckId}`);
+    if (!raw) return empty;
+    const parsed = JSON.parse(raw) as Partial<ChatSession>;
+    const entries = Array.isArray(parsed.entries)
+      ? parsed.entries.filter(
+          (entry): entry is ChatEntry =>
+            Boolean(entry) &&
+            typeof entry === 'object' &&
+            typeof (entry as ChatEntry).id === 'string' &&
+            ['user', 'assistant', 'tool', 'error'].includes((entry as ChatEntry).role) &&
+            typeof (entry as ChatEntry).text === 'string',
+        )
+      : [];
+    const messages = Array.isArray(parsed.messages)
+      ? trimMessages(parsed.messages as AiChatMessage[])
+      : [];
+    return { entries: entries.slice(-MAX_ENTRIES), messages };
+  } catch {
+    return empty;
+  }
+}
+
+function saveSession(deckId: string, session: ChatSession) {
+  try {
+    const key = `${SESSION_PREFIX}${deckId}`;
+    if (session.entries.length === 0 && session.messages.length === 0) {
+      sessionStorage.removeItem(key);
+      return;
+    }
+    sessionStorage.setItem(key, JSON.stringify(session));
+  } catch {
+    // 会话恢复只是辅助能力，写入失败时继续当前对话
+  }
+}
+
 export function AiPanel({ deck, onClose }: AiPanelProps) {
   const [config, setConfig] = useState<AiConfig>(() => loadAiConfig());
+  const [initialSession] = useState<ChatSession>(() => loadSession(deck.id));
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [entries, setEntries] = useState<ChatEntry[]>([]);
+  const [resetOpen, setResetOpen] = useState(false);
+  const [entries, setEntries] = useState<ChatEntry[]>(initialSession.entries);
   const [prompt, setPrompt] = useState('');
   const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingState | null>(null);
   const [roundStartPast, setRoundStartPast] = useState<number | null>(null);
-  const messagesRef = useRef<AiChatMessage[]>([]);
+  const [messagesVersion, setMessagesVersion] = useState(0);
+  const messagesRef = useRef<AiChatMessage[]>(initialSession.messages);
   const abortRef = useRef<AbortController | null>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pastLength = useDeckStore((state) => state.past.length);
 
   useEffect(() => {
     const handler = (event: globalThis.KeyboardEvent) => {
-      if (event.key === 'Escape' && !settingsOpen) onClose();
+      if (event.key === 'Escape' && !settingsOpen && !resetOpen) onClose();
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [onClose, settingsOpen]);
+  }, [onClose, settingsOpen, resetOpen]);
 
   useEffect(() => {
     const body = bodyRef.current;
     if (body) body.scrollTop = body.scrollHeight;
-  }, [entries, busy, pending]);
+  }, [entries, busy, pending, progress]);
+
+  useEffect(() => {
+    saveSession(deck.id, { entries, messages: messagesRef.current });
+  }, [deck.id, entries, messagesVersion]);
+
+  useEffect(() => {
+    if (!settingsOpen && !resetOpen) textareaRef.current?.focus();
+  }, [settingsOpen, resetOpen]);
+
+  const commitMessages = (next: AiChatMessage[]) => {
+    messagesRef.current = trimMessages(next);
+    setMessagesVersion((value) => value + 1);
+  };
 
   const pushEntry = (role: ChatEntry['role'], text: string) => {
-    setEntries((prev) => [...prev, { id: uid(), role, text }]);
+    setEntries((prev) => {
+      const next = [...prev, { id: uid(), role, text }];
+      return next.length > MAX_ENTRIES ? next.slice(next.length - MAX_ENTRIES) : next;
+    });
   };
 
   const systemMessage = (): AiChatMessage => ({
@@ -104,33 +186,39 @@ export function AiPanel({ deck, onClose }: AiPanelProps) {
 
   const executeCalls = async (calls: AiToolCall[]): Promise<AiChatMessage[]> => {
     const results: AiChatMessage[] = [];
-    for (const call of calls) {
-      if (abortRef.current?.signal.aborted) break;
-      let args: unknown = {};
-      try {
-        args = call.arguments ? JSON.parse(call.arguments) : {};
-      } catch {
-        const message = '工具参数不是有效 JSON';
-        pushEntry('error', `${call.name} · ${message}`);
+    try {
+      for (let index = 0; index < calls.length; index += 1) {
+        const call = calls[index];
+        if (abortRef.current?.signal.aborted) break;
+        setProgress(`执行 ${index + 1}/${calls.length} · ${summarizeCall(call)}`);
+        let args: unknown = {};
+        try {
+          args = call.arguments ? JSON.parse(call.arguments) : {};
+        } catch {
+          const message = '工具参数不是有效 JSON';
+          pushEntry('error', `${call.name} · ${message}`);
+          results.push({
+            role: 'tool',
+            tool_call_id: call.id,
+            content: JSON.stringify({ ok: false, message }),
+          });
+          continue;
+        }
+        const outcome = await executeAiTool(call.name, args);
+        pushEntry(outcome.ok ? 'tool' : 'error', `${call.name} · ${outcome.message}`);
+        const payload = JSON.stringify({
+          ok: outcome.ok,
+          message: outcome.message,
+          data: outcome.data ?? null,
+        });
         results.push({
           role: 'tool',
           tool_call_id: call.id,
-          content: JSON.stringify({ ok: false, message }),
+          content: payload.length > 12000 ? `${payload.slice(0, 12000)}…` : payload,
         });
-        continue;
       }
-      const outcome = await executeAiTool(call.name, args);
-      pushEntry(outcome.ok ? 'tool' : 'error', `${call.name} · ${outcome.message}`);
-      const payload = JSON.stringify({
-        ok: outcome.ok,
-        message: outcome.message,
-        data: outcome.data ?? null,
-      });
-      results.push({
-        role: 'tool',
-        tool_call_id: call.id,
-        content: payload.length > 12000 ? `${payload.slice(0, 12000)}…` : payload,
-      });
+    } finally {
+      setProgress(null);
     }
     return results;
   };
@@ -152,7 +240,12 @@ export function AiPanel({ deck, onClose }: AiPanelProps) {
           controller.signal,
         );
         if (result.content) pushEntry('assistant', result.content);
-        if (result.toolCalls.length === 0) return messages;
+        if (result.toolCalls.length === 0) {
+          // 纯文字回复也要进入历史，否则下一轮对话会丢失助手说过的内容
+          return result.content
+            ? [...messages, { role: 'assistant' as const, content: result.content }]
+            : messages;
+        }
         const assistant: AiChatMessage = {
           role: 'assistant',
           content: result.content,
@@ -177,6 +270,10 @@ export function AiPanel({ deck, onClose }: AiPanelProps) {
   const send = async () => {
     const text = prompt.trim();
     if (!text || busy) return;
+    if (pending) {
+      toast('请先应用或放弃待执行操作', 'info');
+      return;
+    }
     if (!config.model.trim()) {
       toast('请先在设置中配置模型', 'error');
       setSettingsOpen(true);
@@ -184,7 +281,6 @@ export function AiPanel({ deck, onClose }: AiPanelProps) {
     }
     setPrompt('');
     setBusy(true);
-    setPending(null);
     setRoundStartPast(useDeckStore.getState().past.length);
     pushEntry('user', text);
     const base: AiChatMessage[] = [...messagesRef.current, { role: 'user', content: text }];
@@ -197,7 +293,7 @@ export function AiPanel({ deck, onClose }: AiPanelProps) {
         pushEntry('error', message);
       }
     } finally {
-      messagesRef.current = nextMessages;
+      commitMessages(nextMessages);
       setBusy(false);
     }
   };
@@ -217,9 +313,37 @@ export function AiPanel({ deck, onClose }: AiPanelProps) {
         pushEntry('error', error instanceof Error ? error.message : '操作执行失败');
       }
     } finally {
-      messagesRef.current = nextMessages;
+      commitMessages(nextMessages);
       setBusy(false);
     }
+  };
+
+  const discardPending = () => {
+    if (!pending) return;
+    setPending(null);
+    // 历史里已由 commitMessages 去掉孤立的 assistant(tool_calls)，不会污染下一轮请求
+    pushEntry('tool', '已放弃待执行操作');
+    textareaRef.current?.focus();
+  };
+
+  const resetConversation = () => {
+    setEntries([]);
+    messagesRef.current = [];
+    setMessagesVersion((value) => value + 1);
+    setPending(null);
+    setProgress(null);
+    setRoundStartPast(null);
+    saveSession(deck.id, { entries: [], messages: [] });
+    setResetOpen(false);
+    toast('已开始新对话', 'success');
+    textareaRef.current?.focus();
+  };
+
+  const toggleAutoApply = () => {
+    const next = { ...config, autoApply: !config.autoApply };
+    setConfig(next);
+    saveAiConfig(next);
+    toast(next.autoApply ? '已开启自动执行，助手会直接改动画布' : '已切换为确认后执行', 'info');
   };
 
   const undoRound = () => {
@@ -281,6 +405,15 @@ export function AiPanel({ deck, onClose }: AiPanelProps) {
           <div className="ai-drawer-head-actions">
             <button
               className="icon-btn"
+              title="新对话"
+              aria-label="新对话"
+              disabled={entries.length === 0 && !pending}
+              onClick={() => setResetOpen(true)}
+            >
+              <Icon name="reset" size={17} />
+            </button>
+            <button
+              className="icon-btn"
               title="AI 与 MCP 设置"
               aria-label="AI 与 MCP 设置"
               onClick={() => setSettingsOpen(true)}
@@ -294,10 +427,22 @@ export function AiPanel({ deck, onClose }: AiPanelProps) {
         </header>
 
         <div className="ai-drawer-status">
-          <span className={`ai-drawer-chip ${config.model ? '' : 'is-warn'}`}>
+          <button
+            type="button"
+            className={`ai-drawer-chip is-button ${config.model ? '' : 'is-warn'}`}
+            title="打开 AI 设置"
+            onClick={() => setSettingsOpen(true)}
+          >
             {config.model || '未配置模型'}
-          </span>
-          <span className="ai-drawer-chip">{config.autoApply ? '自动执行' : '确认后执行'}</span>
+          </button>
+          <button
+            type="button"
+            className="ai-drawer-chip is-button"
+            title="点击切换执行方式"
+            onClick={toggleAutoApply}
+          >
+            {config.autoApply ? '自动执行' : '确认后执行'}
+          </button>
           <span className="ai-drawer-spacer" />
           <button className="btn btn-ghost btn-sm" disabled={!canUndo} onClick={undoRound}>
             <Icon name="undo" size={13} />
@@ -342,12 +487,21 @@ export function AiPanel({ deck, onClose }: AiPanelProps) {
               {entry.role === 'tool' && <Icon name="check" size={12} />}
               {entry.role === 'error' && <Icon name="alert" size={12} />}
               <span>{entry.text}</span>
+              {entry.role === 'error' && (
+                <button
+                  type="button"
+                  className="ai-entry-link"
+                  onClick={() => setSettingsOpen(true)}
+                >
+                  检查设置
+                </button>
+              )}
             </div>
           ))}
           {busy && (
             <div className="ai-entry is-tool">
               <Icon name="spark" size={12} />
-              <span>正在理解并执行…</span>
+              <span>{progress ?? '正在理解并执行…'}</span>
             </div>
           )}
           {pending && (
@@ -362,7 +516,7 @@ export function AiPanel({ deck, onClose }: AiPanelProps) {
                 <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => void applyPending()}>
                   应用到画布
                 </button>
-                <button className="btn btn-ghost btn-sm" onClick={() => setPending(null)}>
+                <button className="btn btn-ghost btn-sm" onClick={discardPending}>
                   放弃
                 </button>
               </div>
@@ -372,6 +526,7 @@ export function AiPanel({ deck, onClose }: AiPanelProps) {
 
         <footer className="ai-drawer-foot">
           <textarea
+            ref={textareaRef}
             className="ai-textarea"
             value={prompt}
             rows={3}
@@ -386,7 +541,11 @@ export function AiPanel({ deck, onClose }: AiPanelProps) {
             }}
           />
           <div className="ai-drawer-foot-actions">
-            <span className="ai-note">Enter 发送 · Shift+Enter 换行 · 密钥仅存本机</span>
+            <span className="ai-note">
+              {pending
+                ? '先应用或放弃待执行操作，再继续对话'
+                : 'Enter 发送 · Shift+Enter 换行 · 密钥仅存本机'}
+            </span>
             {busy ? (
               <button
                 className="btn btn-ghost btn-sm"
@@ -398,7 +557,11 @@ export function AiPanel({ deck, onClose }: AiPanelProps) {
                 停止
               </button>
             ) : (
-              <button className="btn btn-primary btn-sm" disabled={!prompt.trim()} onClick={() => void send()}>
+              <button
+                className="btn btn-primary btn-sm"
+                disabled={!prompt.trim() || Boolean(pending)}
+                onClick={() => void send()}
+              >
                 <Icon name="spark" size={14} />
                 发送
               </button>
@@ -412,6 +575,16 @@ export function AiPanel({ deck, onClose }: AiPanelProps) {
           config={config}
           onSave={(next) => setConfig(next)}
           onClose={() => setSettingsOpen(false)}
+        />
+      )}
+
+      {resetOpen && (
+        <ConfirmDialog
+          title="开始新对话"
+          message="将清空当前对话记录，画布上已有的改动不会回退。"
+          confirmLabel="清空对话"
+          onConfirm={resetConversation}
+          onCancel={() => setResetOpen(false)}
         />
       )}
     </div>,

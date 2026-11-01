@@ -4,9 +4,11 @@ import {
   chatCompletion,
   clearAiConfig,
   DEFAULT_AI_CONFIG,
+  probeToolSupport,
   saveAiConfig,
   type AiConfig,
 } from '../lib/ai';
+import { AI_TOOLS } from '../lib/aiTools';
 import { buildWorkspaceSnapshot } from '../lib/snapshot';
 import { getDeck, listAssetMetas, listDecks, listFolders } from '../lib/storage';
 import { downloadBlob, filenameFor } from '../lib/exportVideo';
@@ -33,6 +35,12 @@ interface AiSettingsProps {
 export function AiSettings({ config, onSave, onClose }: AiSettingsProps) {
   const [draft, setDraft] = useState<AiConfig>(config);
   const [testing, setTesting] = useState(false);
+  const [probe, setProbe] = useState<{ tone: 'ok' | 'warn' | 'error'; text: string } | null>(null);
+
+  const updateDraft = (patch: Partial<AiConfig>) => {
+    setDraft((prev) => ({ ...prev, ...patch }));
+    setProbe(null);
+  };
 
   const save = () => {
     if (!draft.baseUrl.trim() || !draft.model.trim()) {
@@ -58,13 +66,24 @@ export function AiSettings({ config, onSave, onClose }: AiSettingsProps) {
       return;
     }
     setTesting(true);
+    setProbe(null);
     try {
       const answer = await chatCompletion(draft, [
         { role: 'user', content: '只回复四个字：连接成功' },
       ]);
-      toast(`模型可用 · ${answer.slice(0, 40)}`, 'success');
+      const support = await probeToolSupport(draft, AI_TOOLS);
+      setProbe({
+        tone: support.ok ? 'ok' : 'warn',
+        text: `对话连接成功（${answer.slice(0, 24)}）· ${support.message}`,
+      });
+      toast(
+        support.ok ? '连接成功 · 工具调用可用' : '连接成功 · 工具调用不可用',
+        support.ok ? 'success' : 'info',
+      );
     } catch (error) {
-      toast(error instanceof Error ? error.message : '连接失败', 'error');
+      const message = error instanceof Error ? error.message : '连接失败';
+      setProbe({ tone: 'error', text: message });
+      toast(message, 'error');
     } finally {
       setTesting(false);
     }
@@ -125,7 +144,7 @@ export function AiSettings({ config, onSave, onClose }: AiSettingsProps) {
               value={draft.baseUrl}
               spellCheck={false}
               placeholder="https://api.openai.com/v1"
-              onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value })}
+              onChange={(event) => updateDraft({ baseUrl: event.target.value })}
             />
           </label>
           <label className="ai-field">
@@ -135,7 +154,7 @@ export function AiSettings({ config, onSave, onClose }: AiSettingsProps) {
               value={draft.model}
               spellCheck={false}
               placeholder="gpt-4o-mini"
-              onChange={(event) => setDraft({ ...draft, model: event.target.value })}
+              onChange={(event) => updateDraft({ model: event.target.value })}
             />
           </label>
           <label className="ai-field ai-field-wide">
@@ -147,14 +166,14 @@ export function AiSettings({ config, onSave, onClose }: AiSettingsProps) {
               spellCheck={false}
               autoComplete="off"
               placeholder="sk-…（仅保存在本机浏览器）"
-              onChange={(event) => setDraft({ ...draft, apiKey: event.target.value })}
+              onChange={(event) => updateDraft({ apiKey: event.target.value })}
             />
           </label>
         </div>
         <div className="ai-inline">
           <button className="btn btn-light btn-sm" disabled={testing} onClick={() => void test()}>
             <Icon name="plug" size={14} />
-            {testing ? '测试中…' : '测试连接'}
+            {testing ? '检测中…' : '测试连接与工具'}
           </button>
           <button
             className="btn btn-ghost btn-sm"
@@ -162,6 +181,7 @@ export function AiSettings({ config, onSave, onClose }: AiSettingsProps) {
               clearAiConfig();
               const reset = { ...DEFAULT_AI_CONFIG };
               setDraft(reset);
+              setProbe(null);
               onSave(reset);
               toast('已清除本机 AI 配置', 'info');
             }}
@@ -170,6 +190,7 @@ export function AiSettings({ config, onSave, onClose }: AiSettingsProps) {
           </button>
           <span className="ai-note">密钥不会写入工程、快照或 MCP 数据</span>
         </div>
+        {probe && <p className={`ai-probe is-${probe.tone}`}>{probe.text}</p>}
       </section>
 
       <section className="ai-section">
@@ -178,7 +199,7 @@ export function AiSettings({ config, onSave, onClose }: AiSettingsProps) {
           <input
             type="checkbox"
             checked={draft.autoApply}
-            onChange={(event) => setDraft({ ...draft, autoApply: event.target.checked })}
+            onChange={(event) => updateDraft({ autoApply: event.target.checked })}
           />
           自动执行模型给出的操作
         </label>
@@ -190,7 +211,7 @@ export function AiSettings({ config, onSave, onClose }: AiSettingsProps) {
           <input
             type="checkbox"
             checked={draft.includeText}
-            onChange={(event) => setDraft({ ...draft, includeText: event.target.checked })}
+            onChange={(event) => updateDraft({ includeText: event.target.checked })}
           />
           随请求发送画板文字内容
         </label>
