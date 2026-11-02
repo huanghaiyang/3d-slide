@@ -59,6 +59,8 @@ interface ObjectListProps {
   onAddLottie: () => void;
   /** 新增形状（默认矩形）。 */
   onAddShape: () => void;
+  /** 新增 G6 图表（默认力导关系网络）。 */
+  onAddChart: () => void;
 }
 
 // 每种对象类型对应的图标名称；Lottie 没有专用图标，复用 spark 星芒
@@ -71,6 +73,7 @@ const typeIcon: Record<ObjectType, IconName> = {
   model: 'model',
   svg: 'svg',
   lottie: 'spark',
+  chart: 'chart',
 };
 
 /**
@@ -96,6 +99,7 @@ export function ObjectList({
   onAddModel,
   onAddLottie,
   onAddShape,
+  onAddChart,
 }: ObjectListProps) {
   // dragId 正在拖拽的对象；overId 当前悬停的目标对象（用于显示插入线）
   const [dragId, setDragId] = useState<string | null>(null);
@@ -306,6 +310,14 @@ export function ObjectList({
             title={atLimit ? '已达到单作品对象上限' : '添加形状'}
           >
             <Icon name="shape" size={14} /> 形状
+          </button>
+          <button
+            className="btn btn-light btn-sm"
+            onClick={onAddChart}
+            disabled={atLimit}
+            title={atLimit ? '已达到单作品对象上限' : '添加 G6 图表'}
+          >
+            <Icon name="chart" size={14} /> 图表
           </button>
         </div>
       )}

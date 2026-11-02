@@ -33,6 +33,7 @@
 import * as THREE from 'three';
 import type {
   AudioObject,
+  ChartObject,
   Deck,
   ImageObject,
   LottieObject,
@@ -48,6 +49,8 @@ import type {
   ViewState,
 } from '../types';
 import { ACCENT, ASPECT, FOV } from '../lib/constants';
+import { chartSpecKey } from '../lib/chart';
+import { getChartRenderer, type ChartHandle } from '../lib/chartRenderer';
 import { cameraPosition, clampPitch, lerpView } from '../lib/camera';
 import { disposeObject3D, loadModelGroup } from '../lib/model3d';
 import { parseLottieSource } from '../lib/lottie';
@@ -55,6 +58,14 @@ import type { AnimationConfigWithData, AnimationItem } from 'lottie-web';
 import { sampleBezierPath } from '../lib/curve';
 import { buildTextExtrudeGeometry } from './text3d';
 import { fontCss, layoutText } from '../lib/text';
+
+/**
+ * 图表离屏渲染分辨率。
+ * 固定为 16:9 并与默认图表对象尺寸一致：缩放对象只改 mesh.scale，
+ * 不必重建 G6 实例；非 16:9 的对象会出现轻微拉伸，属于可接受的表现。
+ */
+const CHART_RENDER_WIDTH = 1280;
+const CHART_RENDER_HEIGHT = 720;
 
 /** 舞台模式：edit 可编辑 / view 只读浏览 / present 演示播放 */
 export type StageMode = 'edit' | 'view' | 'present';
@@ -165,6 +176,30 @@ interface LottieRuntime {
   error?: string;
 }
 
+/**
+ * 图表运行时。
+ * 图表数据由插件渲染器实时绘制到离屏画布，再作为 CanvasTexture 贴到 3D 平面上；
+ * 每产出一帧只把 runtime.dirty 置位，由 tick 合并为一次纹理上传。
+ */
+interface ChartRuntime {
+  /** 脏检查键：图表数据 + 动画开关；变化时才重建 G6 实例 */
+  key: string;
+  /** loading 渲染中 / ready 已有画面 / error 渲染失败 */
+  status: 'loading' | 'ready' | 'error';
+  /** 渲染器绘制使用的离屏画布，也是 CanvasTexture 的来源 */
+  canvas: HTMLCanvasElement | null;
+  /** 由画布生成的纹理；布局变化不会重建，只标记 needsUpdate */
+  texture: THREE.CanvasTexture | null;
+  /** 插件渲染器返回的句柄，销毁时用于停止绘制并释放 G6 实例 */
+  handle: ChartHandle | null;
+  /** 当前承载纹理的网格；内容重建后需要重新挂载 */
+  mesh: THREE.Mesh | null;
+  /** 是否有尚未上传的新帧（合帧标记，避免一帧多次上传） */
+  dirty: boolean;
+  /** 失败原因，供属性面板提示 */
+  error?: string;
+}
+
 /** 媒体播放状态快照，供播放器 UI 轮询展示（时间单位与原生元素一致，为秒） */
 export interface MediaPlaybackState {
   /** 媒体类型 */
@@ -220,6 +255,8 @@ interface ObjectNode {
   model: ModelRuntime | null;
   /** Lottie 动画运行时 */
   lottie: LottieRuntime | null;
+  /** 图表运行时 */
+  chart: ChartRuntime | null;
   /** 最近一次同步过来的对象数据快照（store 数据的只读投影） */
   data: SlideObject;
   /** 对象 id，与 nodes 的键保持一致 */
@@ -665,6 +702,8 @@ export class SceneManager {
       for (const node of this.nodes.values()) {
         if (node.model?.status === 'loading') loading += 1;
         if (node.lottie?.status === 'loading') loading += 1;
+        // 图表首帧到达前也计入等待，避免导出的封面 / 截图是空白图表
+        if (node.chart?.status === 'loading') loading += 1;
         if (
           node.media?.kind === 'video' &&
           !node.media.ready &&
@@ -1096,6 +1135,10 @@ export class SceneManager {
         node.visualKey = key;
         this.rebuildContent(node);
       }
+      // 图表的 visualKey 不含尺寸，缩放时需要单独同步平面大小
+      if (object.type === 'chart' && node.chart?.mesh) {
+        node.chart.mesh.scale.set(object.width, object.height, 1);
+      }
       if (node.media) this.applyMediaSettings(node.media, object);
       this.applyOutline(node, object.visible);
       this.applyNodeAppearance(node);
@@ -1139,6 +1182,11 @@ export class SceneManager {
     if (object.type === 'lottie') {
       const lottie = object as LottieObject;
       return ['lottie', lottie.src, lottie.width, lottie.height, lottie.loop, lottie.speed].join('|');
+    }
+    if (object.type === 'chart') {
+      const chart = object as ChartObject;
+      // 尺寸不参与：图表平面用单位几何 + mesh.scale 适配宽高，改尺寸无需重建 G6
+      return ['chart', chartSpecKey(chart.spec), chart.animate ? 1 : 0].join('|');
     }
     const shape = object as ShapeObject;
     return [
@@ -1190,6 +1238,7 @@ export class SceneManager {
       media: null,
       model: null,
       lottie: null,
+      chart: null,
       data: object,
       objectId: object.id,
       pickRoot: null,
@@ -1270,6 +1319,7 @@ export class SceneManager {
       object.type === 'video' ||
       object.type === 'audio' ||
       object.type === 'lottie' ||
+      object.type === 'chart' ||
       hiddenInEdit;
     for (const material of node.materials) {
       // 半透明对象关闭深度写入，避免透明面片互相遮挡出现硬边；
@@ -1306,6 +1356,8 @@ export class SceneManager {
     for (const texture of node.ownedTextures) texture.dispose();
     node.ownedTextures = [];
     node.materials = [];
+    // 图表网格随内容组一起释放，但 G6 实例与纹理要保留，等下次 buildChart 重新挂载
+    if (node.chart) node.chart.mesh = null;
     node.pickRoot = null;
   }
 
@@ -1369,6 +1421,10 @@ export class SceneManager {
     }
     if (object.type === 'lottie') {
       this.buildLottie(group, object as LottieObject, node);
+      return;
+    }
+    if (object.type === 'chart') {
+      this.buildChart(group, object as ChartObject, node);
       return;
     }
     this.buildShape(group, object as ShapeObject, node);
@@ -1541,6 +1597,8 @@ export class SceneManager {
     if (!node) return;
     if (node.media) this.disposeMedia(node);
     if (node.model) this.disposeModel(node);
+    // 图表没有远程素材，重试意味着重新挂载渲染器（例如插件延迟注册后恢复）
+    if (node.chart) this.disposeChart(node);
     const src = node.imageState?.src;
     if (src) {
       // 只有失败与加载中状态需要清除；已成功的纹理可能被其他对象共享，保留缓存
@@ -2324,6 +2382,140 @@ export class SceneManager {
     runtime.canvas = null;
   }
 
+  /**
+   * 构建图表内容：创建 / 复用一个离屏画布，用单位平面贴图并按对象宽高缩放。
+   * 画布内容由插件渲染器持续更新，因此这里不需要等待渲染完成，
+   * 先挂上「正在渲染」占位画面，首帧到达后由 tick 上传纹理自动替换。
+   */
+  private buildChart(group: THREE.Group, object: ChartObject, node: ObjectNode) {
+    this.ensureChart(node, object);
+    const runtime = node.chart;
+    if (!runtime?.texture) return;
+    const material = new THREE.MeshBasicMaterial({
+      map: runtime.texture,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    // 单位平面 + mesh.scale：拖拽缩放时只改 scale，不会重建 G6 实例
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
+    mesh.scale.set(object.width, object.height, 1);
+    group.add(mesh);
+    node.materials.push(material);
+    runtime.mesh = mesh;
+  }
+
+  /**
+   * 确保图表运行时存在且与当前数据匹配。
+   * 与 Lottie 等素材不同，图表不加载远程资源，而是交给已注册的插件渲染器绘制；
+   * 数据或动画开关变化时销毁旧实例并重新挂载，其余情况直接复用（保留布局状态）。
+   */
+  private ensureChart(node: ObjectNode, object: ChartObject) {
+    const key = `${chartSpecKey(object.spec)}|${object.animate ? 1 : 0}`;
+    const existing = node.chart;
+    if (existing && existing.key === key) return;
+    this.disposeChart(node);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = CHART_RENDER_WIDTH;
+    canvas.height = CHART_RENDER_HEIGHT;
+    this.paintChartMessage(canvas, '正在渲染图表…');
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.minFilter = THREE.LinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.generateMipmaps = false;
+    texture.anisotropy = this.maxAnisotropy;
+
+    const runtime: ChartRuntime = {
+      key,
+      status: 'loading',
+      canvas,
+      texture,
+      handle: null,
+      mesh: null,
+      dirty: true,
+    };
+    node.chart = runtime;
+
+    const renderer = getChartRenderer();
+    if (!renderer) {
+      runtime.status = 'error';
+      runtime.error = '未安装图表渲染器';
+      this.paintChartMessage(canvas, '未安装图表渲染器');
+      return;
+    }
+
+    void renderer(canvas, {
+      spec: object.spec,
+      animate: object.animate,
+      width: canvas.width,
+      height: canvas.height,
+      // 渲染器每画出一帧就标脏，tick 中合并为一次纹理上传
+      onFrame: () => {
+        if (node.chart !== runtime) return;
+        if (runtime.status === 'loading') runtime.status = 'ready';
+        runtime.dirty = true;
+      },
+      onError: (message) => {
+        if (node.chart !== runtime) return;
+        runtime.status = 'error';
+        runtime.error = message;
+        this.paintChartMessage(canvas, message);
+        runtime.dirty = true;
+        this.callbacks.onImageError(node.objectId, `图表渲染失败：${message}`);
+      },
+    })
+      .then((handle) => {
+        // 异步守卫：挂载完成前节点可能已删除、换数据或场景已销毁
+        if (node.chart !== runtime || this.disposed) {
+          handle.destroy();
+          return;
+        }
+        runtime.handle = handle;
+      })
+      .catch((error: unknown) => {
+        if (node.chart !== runtime) return;
+        runtime.status = 'error';
+        runtime.error = error instanceof Error ? error.message : '图表渲染失败';
+        this.paintChartMessage(canvas, runtime.error);
+        runtime.dirty = true;
+        this.callbacks.onImageError(node.objectId, `图表渲染失败：${runtime.error}`);
+      });
+  }
+
+  /** 在图表画布上绘制居中的提示文案（加载中 / 失败），背景保持透明以便透出作品底色。 */
+  private paintChartMessage(canvas: HTMLCanvasElement, message: string) {
+    const context = canvas.getContext('2d');
+    if (!context) return;
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.fillStyle = 'rgba(159,178,194,0.92)';
+    context.font = '22px "PingFang SC", "Microsoft YaHei", sans-serif';
+    context.textAlign = 'center';
+    context.textBaseline = 'middle';
+    // 文案过长时截断，避免超出画布边界
+    const text = message.length > 36 ? `${message.slice(0, 36)}…` : message;
+    context.fillText(text, canvas.width / 2, canvas.height / 2);
+  }
+
+  /** 释放图表运行时：停止插件渲染器、释放纹理并断开画布引用。 */
+  private disposeChart(node: ObjectNode) {
+    const runtime = node.chart;
+    if (!runtime) return;
+    node.chart = null;
+    if (runtime.handle) {
+      runtime.handle.destroy();
+      runtime.handle = null;
+    }
+    if (runtime.texture) {
+      runtime.texture.dispose();
+      runtime.texture = null;
+    }
+    runtime.canvas = null;
+    runtime.mesh = null;
+  }
+
   /** 构建 3D 模型内容：就绪后按对象较短边缩放模型，否则显示加载 / 错误占位图 */
   private buildModel(group: THREE.Group, object: ModelObject, node: ObjectNode) {
     this.ensureModel(node, object);
@@ -2772,6 +2964,7 @@ export class SceneManager {
     this.disposeMedia(node);
     this.disposeModel(node);
     this.disposeLottie(node);
+    this.disposeChart(node);
     if (node.svgTexture) {
       node.svgTexture.dispose();
       node.svgTexture = null;
@@ -2904,6 +3097,12 @@ export class SceneManager {
           lottie.lastFrame = frame;
           lottie.texture.needsUpdate = true;
         }
+      }
+      const chart = node.chart;
+      if (chart?.dirty && chart.texture && node.group.visible) {
+        // 合并同一渲染循环内的多帧，每帧最多上传一次整幅画布
+        chart.dirty = false;
+        chart.texture.needsUpdate = true;
       }
       const runtime = node.model;
       const object = node.data;

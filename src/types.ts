@@ -46,7 +46,16 @@ export interface ViewState {
 }
 
 /** 画布内容对象的类型标识，对应 SlideObject 联合成员的 `type` 字段。 */
-export type ObjectType = 'text' | 'image' | 'shape' | 'video' | 'audio' | 'model' | 'svg' | 'lottie';
+export type ObjectType =
+  | 'text'
+  | 'image'
+  | 'shape'
+  | 'video'
+  | 'audio'
+  | 'model'
+  | 'svg'
+  | 'lottie'
+  | 'chart';
 /** 形状种类：基础几何图形与自由路径（path 的点坐标见 ShapeObject.points）。 */
 export type ShapeKind =
   | 'rect'
@@ -220,6 +229,61 @@ export interface AudioObject extends ObjectBase {
 /** 媒体对象联合：视频或音频，便于批量处理播放控制。 */
 export type MediaObject = VideoObject | AudioObject;
 
+/** 图表节点的视觉层级：core 重点节点 / node 中间节点 / leaf 叶子节点。 */
+export type ChartNodeKind = 'core' | 'node' | 'leaf';
+
+/** 图表节点数据；id 同时被边引用。 */
+export interface ChartNode {
+  /** 节点唯一 id。 */
+  id: string;
+  /** 节点显示文案。 */
+  label: string;
+  /** 视觉层级，决定尺寸、配色与字号，默认 node。 */
+  kind?: ChartNodeKind;
+}
+
+/** 图表边数据，用节点 id 描述连接关系。 */
+export interface ChartEdge {
+  /** 起点节点 id。 */
+  source: string;
+  /** 终点节点 id。 */
+  target: string;
+}
+
+/** 支持的图表布局，封装成业务语义，避免 UI 直接依赖 G6 布局名。 */
+export type ChartLayout = 'force' | 'dagre-lr' | 'dagre-tb' | 'radial' | 'circular';
+
+/**
+ * 一份声明式图表描述。
+ *
+ * 图表对象保存的是数据而不是渲染结果，因此可以在编辑器里改数据、换布局，
+ * 由插件提供的渲染器实时重绘。
+ */
+export interface ChartSpec {
+  /** 布局类型。 */
+  layout: ChartLayout;
+  /** 节点列表。 */
+  nodes: ChartNode[];
+  /** 边列表。 */
+  edges: ChartEdge[];
+  /** 主强调色，用于重点节点、连线与描边。 */
+  accent: string;
+  /** radial 布局的焦点节点 id；缺省时使用第一个节点。 */
+  focusNode?: string;
+}
+
+/**
+ * 图表对象：数据内联在作品中，由插件渲染器实时绘制到 3D 平面上。
+ * animate 决定插入 / 数据变化时是否播放布局动画。
+ */
+export interface ChartObject extends ObjectBase {
+  type: 'chart';
+  /** 图表数据与样式。 */
+  spec: ChartSpec;
+  /** 是否播放布局动画。 */
+  animate: boolean;
+}
+
 /**
  * 3D 模型对象：模型文件以 dataURL 保存，渲染时交给对应格式的加载器解析；
  * x / y / z 决定模型在空间中的摆放位置。
@@ -248,7 +312,8 @@ export type SlideObject =
   | AudioObject
   | ModelObject
   | SvgObject
-  | LottieObject;
+  | LottieObject
+  | ChartObject;
 
 /**
  * 视点（帧）：演示时相机按 frames 顺序依次飞行到的取景位置。
@@ -349,6 +414,7 @@ export const OBJECT_LABELS: Record<ObjectType, string> = {
   model: '3D 模型',
   svg: 'SVG 图形',
   lottie: 'Lottie 动画',
+  chart: '图表',
 };
 
 /** 3D 模型格式 -> 中文 / 官方显示名。 */

@@ -13,6 +13,8 @@
 
 import { createRoot } from 'react-dom/client';
 import App from './App';
+// 插件在启动阶段完成注册（图表渲染器、模板贡献等），供编辑器与首页使用
+import './plugins';
 import './styles.css';
 
 const root = document.getElementById('root');

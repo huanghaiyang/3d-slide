@@ -37,6 +37,7 @@ import {
   LIMITS,
 } from './constants';
 import { layoutText } from './text';
+import { normalizeChartSpec } from './chart';
 
 /** .slide 工程文件格式版本号；导入时高于此版本的文件会被拒绝。 */
 export const PROJECT_VERSION = 1;
@@ -263,6 +264,16 @@ function normalizeObject(raw: unknown, warnings: string[]): SlideObject {
         : 'glb') as ModelFormat,
       autoRotate: bool(r.autoRotate, false),
       rotateSpeed: clamp(num(r.rotateSpeed, 45), 0, 360),
+    };
+  }
+  if (type === 'chart') {
+    const base = normalizeBase(r);
+    // 图表数据来自存档，可能被手工修改过；统一走规范化，保证节点 / 边自洽
+    return {
+      ...base,
+      type: 'chart',
+      spec: normalizeChartSpec(r.spec),
+      animate: bool(r.animate, true),
     };
   }
   if (type === 'shape') {

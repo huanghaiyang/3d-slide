@@ -21,6 +21,8 @@ import { create } from 'zustand';
 // TypeScript 编译后会被擦除，不会产生任何运行时依赖。
 import type {
   CameraRequest,
+  ChartObject,
+  ChartSpec,
   Deck,
   Frame,
   ImageObject,
@@ -40,6 +42,7 @@ import {
   autoTextHeight,
   clampNumber,
   createAudioObject,
+  createChartObject,
   createImageObject,
   createLottieObject,
   createModelObject,
@@ -55,6 +58,8 @@ import {
 import { acquireDeckLock, getDeck, putDeck, releaseDeckLock } from '../lib/storage';
 // 各形状类型对应的中文显示名，用于生成「矩形 1」这类自动名称。
 import { SHAPE_LABELS } from '../types';
+// 图表默认数据与规范化：插入图表与编辑数据时复用同一套规则。
+import { defaultChartSpec, normalizeChartSpec } from '../lib/chart';
 
 /** 对象局部更新补丁：只携带需要修改的字段，未出现的字段保持原值。 */
 type ObjectPatch = Partial<SlideObject>;
@@ -168,6 +173,8 @@ interface DeckStore {
   ) => string | null;
   /** 新增 3D 模型对象（glb / gltf 等格式）。 */
   addModel: (src: string, format: ModelFormat, point?: { x: number; y: number }) => string | null;
+  /** 新增图表对象；不传 spec 时使用内置关系网络示例。 */
+  addChart: (spec?: ChartSpec, point?: { x: number; y: number }) => string | null;
 
   // —— 对象编辑 ——
   /** 局部更新对象；会先做边界裁剪与文本/图片的自动尺寸修正。 */
@@ -412,6 +419,10 @@ function normalizeEditedObject(object: SlideObject, patch: ObjectPatch): SlideOb
     text.lineHeight = clampNumber(text.lineHeight, LIMITS.minLineHeight, LIMITS.maxLineHeight, 1.4);
     text.depth3d = clampNumber(text.depth3d ?? 0, 0, LIMITS.maxTextDepth, 0);
     text.height = autoTextHeight(text);
+  } else if (next.type === 'chart') {
+    // 图表：数据必须重新规范化，防止手工编辑产生的孤立边 / 重复节点进入场景
+    const chart = next as ChartObject;
+    chart.spec = normalizeChartSpec(chart.spec);
   } else if (next.type === 'image') {
     // 图片：锁定宽高比时，只改宽/高中的一边，另一边按原始比例联动
     const image = next as ImageObject;
@@ -952,6 +963,30 @@ export const useDeckStore = create<DeckStore>((set, get) => {
         ...deck,
         objects: [...deck.objects, object],
         counters: { ...deck.counters, model: (deck.counters.model ?? 0) + 1 },
+      }));
+      if (!applied) return null;
+      set({ selectedObjectId: id, selectedIds: [id], selectedFrameId: null });
+      return id;
+    },
+
+    // 新增图表对象；spec 缺省时使用内置关系网络示例，数据会先经过规范化
+    addChart: (spec, point) => {
+      const state = get();
+      if (!state.deck) return null;
+      if (state.deck.objects.length >= LIMITS.objects) return null;
+      const deckAtStart = state.deck;
+      const z = nextDepth(deckAtStart.objects);
+      const name = nameForObject(deckAtStart, 'chart', '图表');
+      const id = crypto.randomUUID();
+      const object = createChartObject(id, name, spec ?? defaultChartSpec(), state.view, z);
+      if (point) {
+        object.x = clampNumber(point.x, -LIMITS.coord, LIMITS.coord, object.x);
+        object.y = clampNumber(point.y, -LIMITS.coord, LIMITS.coord, object.y);
+      }
+      const applied = applyDeck((deck) => ({
+        ...deck,
+        objects: [...deck.objects, object],
+        counters: { ...deck.counters, chart: (deck.counters.chart ?? 0) + 1 },
       }));
       if (!applied) return null;
       set({ selectedObjectId: id, selectedIds: [id], selectedFrameId: null });

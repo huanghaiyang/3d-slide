@@ -707,6 +707,7 @@ export function Editor({ deckId, onBack }: EditorProps) {
           onAddModel={() => pickModel()}
           onAddLottie={() => pickLottie()}
           onAddShape={() => useDeckStore.getState().addShape('rect')}
+          onAddChart={() => useDeckStore.getState().addChart()}
         />
 
         <main className="stage-column">

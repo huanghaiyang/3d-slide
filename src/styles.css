@@ -1965,6 +1965,58 @@ button:disabled {
   color: var(--dim);
 }
 
+/* -------------------------------- Chart -------------------------------- */
+
+/* 图表节点 / 连线编辑器：每行一个节点或一条连线，末列是删除按钮 */
+.chart-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.chart-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 92px 26px;
+  align-items: center;
+  gap: 5px;
+}
+
+.chart-row .text-input,
+.chart-row .select {
+  min-width: 0;
+  height: 28px;
+}
+
+/* 连线行没有层级选择，改为起点 / 终点两个下拉框 */
+.chart-edge-row {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 26px;
+}
+
+.chart-edge-row .select {
+  min-width: 0;
+}
+
+.chart-row-del {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dim);
+  cursor: pointer;
+  transition: color 0.16s ease, background 0.16s ease, border-color 0.16s ease;
+}
+
+.chart-row-del:hover {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: rgba(180, 35, 24, 0.24);
+}
+
 .slider-row {
   display: grid;
   grid-template-columns: 48px minmax(0, 1fr) 72px;

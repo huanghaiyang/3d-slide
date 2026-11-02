@@ -36,6 +36,7 @@ export type IconName =
   | 'text'
   | 'image'
   | 'shape'
+  | 'chart'
   | 'reset'
   | 'focus'
   | 'grid'
@@ -110,6 +111,12 @@ const paths: Record<IconName, ReactNode> = {
     <>
       <rect x="3.5" y="8.5" width="10" height="10" rx="1.5" />
       <circle cx="16.5" cy="9" r="5" />
+    </>
+  ),
+  chart: (
+    <>
+      <path d="M3 21h18" />
+      <path d="M5.5 20V11M10.5 20V5M15.5 20v-6M20.5 20V8" />
     </>
   ),
   reset: (

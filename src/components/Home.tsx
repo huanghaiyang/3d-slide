@@ -127,7 +127,13 @@ function DeckThumb({ summary, cover }: { summary: DeckSummary; cover?: DeckCover
             </div>
           );
         }
-        if (object.type === 'video' || object.type === 'audio' || object.type === 'model' || object.type === 'lottie') {
+        if (
+          object.type === 'video' ||
+          object.type === 'audio' ||
+          object.type === 'model' ||
+          object.type === 'lottie' ||
+          object.type === 'chart'
+        ) {
           return (
             <div
               className={`thumb-object thumb-media is-${object.type}`}
@@ -142,7 +148,9 @@ function DeckThumb({ summary, cover }: { summary: DeckSummary; cover?: DeckCover
                       ? 'audio'
                       : object.type === 'model'
                         ? 'model'
-                        : 'spark'
+                        : object.type === 'chart'
+                          ? 'chart'
+                          : 'spark'
                 }
                 size={11}
               />

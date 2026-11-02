@@ -18,6 +18,8 @@
 
 import type {
   AudioObject,
+  ChartObject,
+  ChartSpec,
   Deck,
   ImageObject,
   LottieObject,
@@ -41,6 +43,7 @@ import {
 } from './constants';
 import { viewCenterAtZ } from './camera';
 import { layoutText } from './text';
+import { normalizeChartSpec } from './chart';
 import { defaultImageObject } from './validate';
 
 /**
@@ -389,6 +392,39 @@ export function createLottieObject(
     loop: true,
     speed: 1,
     poster: poster || undefined,
+  };
+}
+
+/**
+ * 创建图表对象。
+ *
+ * @param spec 图表数据；构造时会经过 normalizeChartSpec 规范化，非法节点 / 边会被剔除
+ * @returns 1280x720、默认播放布局动画的图表对象
+ *
+ * 图表不携带渲染结果，只保存声明式数据；真正绘制由插件渲染器在 3D 场景中实时完成。
+ */
+export function createChartObject(
+  id: string,
+  name: string,
+  spec: ChartSpec,
+  view: ViewState,
+  z: number,
+): ChartObject {
+  const center = viewCenterAtZ(view, z);
+  return {
+    id,
+    type: 'chart',
+    name,
+    x: center.x,
+    y: center.y,
+    z,
+    width: 1280,
+    height: 720,
+    rotation: 0,
+    opacity: 100,
+    visible: true,
+    spec: normalizeChartSpec(spec),
+    animate: true,
   };
 }
 
