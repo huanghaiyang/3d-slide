@@ -229,48 +229,13 @@ export interface AudioObject extends ObjectBase {
 /** 媒体对象联合：视频或音频，便于批量处理播放控制。 */
 export type MediaObject = VideoObject | AudioObject;
 
-/** 图表节点的视觉层级：core 重点节点 / node 中间节点 / leaf 叶子节点。 */
-export type ChartNodeKind = 'core' | 'node' | 'leaf';
-
-/** 图表节点数据；id 同时被边引用。 */
-export interface ChartNode {
-  /** 节点唯一 id。 */
-  id: string;
-  /** 节点显示文案。 */
-  label: string;
-  /** 视觉层级，决定尺寸、配色与字号，默认 node。 */
-  kind?: ChartNodeKind;
-}
-
-/** 图表边数据，用节点 id 描述连接关系。 */
-export interface ChartEdge {
-  /** 起点节点 id。 */
-  source: string;
-  /** 终点节点 id。 */
-  target: string;
-}
-
-/** 支持的图表布局，封装成业务语义，避免 UI 直接依赖 G6 布局名。 */
-export type ChartLayout = 'force' | 'dagre-lr' | 'dagre-tb' | 'radial' | 'circular';
-
 /**
- * 一份声明式图表描述。
+ * 图表插件自定义的声明式数据。
  *
- * 图表对象保存的是数据而不是渲染结果，因此可以在编辑器里改数据、换布局，
- * 由插件提供的渲染器实时重绘。
+ * 核心不关心图表内容（节点、边、布局等全部由插件定义），只把它当作
+ * 可序列化 JSON 透传：随作品保存、参与导入导出与场景脏检查。
  */
-export interface ChartSpec {
-  /** 布局类型。 */
-  layout: ChartLayout;
-  /** 节点列表。 */
-  nodes: ChartNode[];
-  /** 边列表。 */
-  edges: ChartEdge[];
-  /** 主强调色，用于重点节点、连线与描边。 */
-  accent: string;
-  /** radial 布局的焦点节点 id；缺省时使用第一个节点。 */
-  focusNode?: string;
-}
+export type ChartSpec = Record<string, unknown>;
 
 /**
  * 图表对象：数据内联在作品中，由插件渲染器实时绘制到 3D 平面上。
@@ -278,7 +243,9 @@ export interface ChartSpec {
  */
 export interface ChartObject extends ObjectBase {
   type: 'chart';
-  /** 图表数据与样式。 */
+  /** 负责渲染与编辑该图表的插件 id；由插件注册中心解析。 */
+  plugin: string;
+  /** 插件自定义的图表数据。 */
   spec: ChartSpec;
   /** 是否播放布局动画。 */
   animate: boolean;

@@ -117,8 +117,6 @@ export const DEFAULT_TEXT_COLOR = '#F3EEE4';
 export const DEFAULT_SHAPE_COLOR = '#2DD4BF';
 /** 品牌强调色，用于高亮按钮与选中态。 */
 export const ACCENT = '#14B8A6';
-/** 图表的默认强调色（节点描边、连线与重点节点底色）。 */
-export const CHART_DEFAULT_ACCENT = '#5B8FF9';
 /**
  * 字体预设 -> CSS font-family 字体栈。
  * 每项都给出多级回退：优先系统中文字体，再退回通用族，保证跨平台可读。

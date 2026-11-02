@@ -3,16 +3,27 @@
  *
  * 职责：
  * - 维护插件 id -> 插件的映射，拒绝重复注册，避免模板 id 冲突；
+ * - 维护图表插件 id -> 图表能力的映射，供核心按对象上的 plugin 字段解析；
  * - 把插件贡献的模板摊平成 PluginTemplateEntry 列表，供首页直接渲染；
  * - 提供按需初始化（ensurePluginSetup）给需要异步预热资源的插件使用。
  *
  * 本模块不依赖 React / store，保持纯数据层，便于测试和第三方插件接入。
  */
 
-import type { PluginTemplateEntry, SlidePlugin } from './types';
+import type { ChartPlugin, PluginTemplateEntry, SlidePlugin } from './types';
 
 /** 已注册插件的内部映射；Map 保持注册顺序，首页展示顺序与之保持一致。 */
 const pluginMap = new Map<string, SlidePlugin>();
+
+/**
+ * 已注册的图表能力映射：图表 id -> ChartPlugin。
+ * 核心（Store / 校验 / 场景）通过 chart 对象上的 plugin 字段查到这里，
+ * 从而不需要知道 G6 等具体图表库的存在。
+ */
+const chartPluginMap = new Map<string, ChartPlugin>();
+
+/** 记录每个图表能力来自哪个插件，便于报错时给出可读信息。 */
+const chartOwnerMap = new Map<string, string>();
 
 /** 已完成 setup 的插件 id，避免重复初始化。 */
 const readyPlugins = new Set<string>();
@@ -36,7 +47,54 @@ export function registerPlugin(plugin: SlidePlugin): void {
     }
     seen.add(template.id);
   }
+  // 图表能力在注册阶段就完成唯一性校验：图表 id 会写入作品文件，
+  // 一旦冲突会导致旧作品打开时解析到错误的渲染器 / 属性面板。
+  for (const chart of plugin.charts ?? []) {
+    if (chartPluginMap.has(chart.id)) {
+      const owner = chartOwnerMap.get(chart.id);
+      throw new Error(`图表类型已注册：${chart.id}（已由插件「${owner}」提供）`);
+    }
+  }
   pluginMap.set(plugin.id, plugin);
+  for (const chart of plugin.charts ?? []) {
+    chartPluginMap.set(chart.id, chart);
+    chartOwnerMap.set(chart.id, plugin.name);
+  }
+}
+
+/** 返回全部已注册的图表能力（按注册顺序），供对象列表等 UI 渲染新增入口。 */
+export function listChartPlugins(): ChartPlugin[] {
+  return [...chartPluginMap.values()];
+}
+
+/** 按图表 id 查找图表能力；未注册时返回 undefined。 */
+export function getChartPlugin(id: string): ChartPlugin | undefined {
+  return chartPluginMap.get(id);
+}
+
+/**
+ * 默认图表能力：第一个注册的图表插件。
+ * 用于兼容早期存档——这些文件的 chart 对象还没有 plugin 字段。
+ */
+export function getDefaultChartPlugin(): ChartPlugin | undefined {
+  return chartPluginMap.values().next().value;
+}
+
+/**
+ * 解析图表对象应使用的插件。
+ *
+ * @param id 对象上的 plugin 字段；可能缺失（旧存档）或指向尚未安装的插件
+ * @returns 命中的图表能力；id 无效时回退到默认图表能力，完全没有插件时为 undefined
+ *
+ * 回退策略保证作品不会因为插件缺失而完全打不开：图表数据仍会保存，
+ * 等对应插件安装后再由调用方按需升级 plugin 字段。
+ */
+export function resolveChartPlugin(id?: string): ChartPlugin | undefined {
+  if (id) {
+    const found = chartPluginMap.get(id);
+    if (found) return found;
+  }
+  return getDefaultChartPlugin();
 }
 
 /** 返回全部已注册插件（按注册顺序）。 */

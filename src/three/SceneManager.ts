@@ -49,8 +49,8 @@ import type {
   ViewState,
 } from '../types';
 import { ACCENT, ASPECT, FOV } from '../lib/constants';
-import { chartSpecKey } from '../lib/chart';
-import { getChartRenderer, type ChartHandle } from '../lib/chartRenderer';
+import { resolveChartPlugin } from '../plugins/registry';
+import type { ChartHandle } from '../lib/chartRenderer';
 import { cameraPosition, clampPitch, lerpView } from '../lib/camera';
 import { disposeObject3D, loadModelGroup } from '../lib/model3d';
 import { parseLottieSource } from '../lib/lottie';
@@ -62,7 +62,7 @@ import { fontCss, layoutText } from '../lib/text';
 /**
  * 图表离屏渲染分辨率。
  * 固定为 16:9 并与默认图表对象尺寸一致：缩放对象只改 mesh.scale，
- * 不必重建 G6 实例；非 16:9 的对象会出现轻微拉伸，属于可接受的表现。
+ * 不必重建插件渲染实例；非 16:9 的对象会出现轻微拉伸，属于可接受的表现。
  */
 const CHART_RENDER_WIDTH = 1280;
 const CHART_RENDER_HEIGHT = 720;
@@ -182,7 +182,7 @@ interface LottieRuntime {
  * 每产出一帧只把 runtime.dirty 置位，由 tick 合并为一次纹理上传。
  */
 interface ChartRuntime {
-  /** 脏检查键：图表数据 + 动画开关；变化时才重建 G6 实例 */
+  /** 脏检查键：插件 id + 数据指纹 + 动画开关；变化时才重建渲染实例 */
   key: string;
   /** loading 渲染中 / ready 已有画面 / error 渲染失败 */
   status: 'loading' | 'ready' | 'error';
@@ -190,7 +190,7 @@ interface ChartRuntime {
   canvas: HTMLCanvasElement | null;
   /** 由画布生成的纹理；布局变化不会重建，只标记 needsUpdate */
   texture: THREE.CanvasTexture | null;
-  /** 插件渲染器返回的句柄，销毁时用于停止绘制并释放 G6 实例 */
+  /** 插件渲染器返回的句柄，销毁时用于停止绘制并释放渲染实例 */
   handle: ChartHandle | null;
   /** 当前承载纹理的网格；内容重建后需要重新挂载 */
   mesh: THREE.Mesh | null;
@@ -1185,8 +1185,15 @@ export class SceneManager {
     }
     if (object.type === 'chart') {
       const chart = object as ChartObject;
-      // 尺寸不参与：图表平面用单位几何 + mesh.scale 适配宽高，改尺寸无需重建 G6
-      return ['chart', chartSpecKey(chart.spec), chart.animate ? 1 : 0].join('|');
+      // 尺寸不参与：图表平面用单位几何 + mesh.scale 适配宽高，改尺寸无需重建图表
+      // 脏检查键由插件提供：核心不知道图表数据的具体结构
+      const plugin = resolveChartPlugin(chart.plugin);
+      return [
+        'chart',
+        plugin?.id ?? chart.plugin,
+        plugin ? plugin.specKey(chart.spec) : '',
+        chart.animate ? 1 : 0,
+      ].join('|');
     }
     const shape = object as ShapeObject;
     return [
@@ -1356,7 +1363,7 @@ export class SceneManager {
     for (const texture of node.ownedTextures) texture.dispose();
     node.ownedTextures = [];
     node.materials = [];
-    // 图表网格随内容组一起释放，但 G6 实例与纹理要保留，等下次 buildChart 重新挂载
+    // 图表网格随内容组一起释放，但插件渲染实例与纹理要保留，等下次 ensureChart 重新挂载
     if (node.chart) node.chart.mesh = null;
     node.pickRoot = null;
   }
@@ -2397,7 +2404,7 @@ export class SceneManager {
       depthWrite: false,
       side: THREE.DoubleSide,
     });
-    // 单位平面 + mesh.scale：拖拽缩放时只改 scale，不会重建 G6 实例
+    // 单位平面 + mesh.scale：拖拽缩放时只改 scale，不会重建插件渲染实例
     const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material);
     mesh.scale.set(object.width, object.height, 1);
     group.add(mesh);
@@ -2411,7 +2418,13 @@ export class SceneManager {
    * 数据或动画开关变化时销毁旧实例并重新挂载，其余情况直接复用（保留布局状态）。
    */
   private ensureChart(node: ObjectNode, object: ChartObject) {
-    const key = `${chartSpecKey(object.spec)}|${object.animate ? 1 : 0}`;
+    // 图表能力由插件贡献：这里只按 id 解析，核心不感知具体图表库
+    const plugin = resolveChartPlugin(object.plugin);
+    const key = [
+      plugin?.id ?? object.plugin,
+      plugin ? plugin.specKey(object.spec) : '',
+      object.animate ? 1 : 0,
+    ].join('|');
     const existing = node.chart;
     if (existing && existing.key === key) return;
     this.disposeChart(node);
@@ -2439,11 +2452,11 @@ export class SceneManager {
     };
     node.chart = runtime;
 
-    const renderer = getChartRenderer();
+    const renderer = plugin?.render;
     if (!renderer) {
       runtime.status = 'error';
-      runtime.error = '未安装图表渲染器';
-      this.paintChartMessage(canvas, '未安装图表渲染器');
+      runtime.error = '未安装图表插件';
+      this.paintChartMessage(canvas, '未安装图表插件');
       return;
     }
 

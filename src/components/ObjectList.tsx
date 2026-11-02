@@ -22,6 +22,8 @@ import { useRef, useState } from 'react';
 import type { ObjectType, SlideObject } from '../types';
 import { LIMITS } from '../lib/constants';
 import { OBJECT_LABELS } from '../types';
+import { resolveChartPlugin } from '../plugins/registry';
+import type { ChartPlugin } from '../plugins/types';
 import { Icon, type IconName } from './Icon';
 
 interface ObjectListProps {
@@ -59,8 +61,10 @@ interface ObjectListProps {
   onAddLottie: () => void;
   /** 新增形状（默认矩形）。 */
   onAddShape: () => void;
-  /** 新增 G6 图表（默认力导关系网络）。 */
-  onAddChart: () => void;
+  /** 已注册的图表插件：按钮由插件贡献，核心不写死任何图表类型。 */
+  chartPlugins: ChartPlugin[];
+  /** 新增图表，参数为插件 id。 */
+  onAddChart: (pluginId: string) => void;
 }
 
 // 每种对象类型对应的图标名称；Lottie 没有专用图标，复用 spark 星芒
@@ -99,6 +103,7 @@ export function ObjectList({
   onAddModel,
   onAddLottie,
   onAddShape,
+  chartPlugins,
   onAddChart,
 }: ObjectListProps) {
   // dragId 正在拖拽的对象；overId 当前悬停的目标对象（用于显示插入线）
@@ -212,7 +217,15 @@ export function ObjectList({
                   {/* 显示对象的层级序号：最上层（列表中第一个）编号最大 */}
                   <span className="obj-index">{sorted.length - index}</span>
                   <span className="obj-type">
-                    <Icon name={typeIcon[object.type]} size={15} />
+                    {/* 图表图标由插件提供；解析不到插件时回退到通用图表图标 */}
+                    <Icon
+                      name={
+                        object.type === 'chart'
+                          ? resolveChartPlugin(object.plugin)?.icon ?? typeIcon.chart
+                          : typeIcon[object.type]
+                      }
+                      size={15}
+                    />
                   </span>
                   <span className="obj-text">
                     <b>{object.name}</b>
@@ -311,14 +324,18 @@ export function ObjectList({
           >
             <Icon name="shape" size={14} /> 形状
           </button>
-          <button
-            className="btn btn-light btn-sm"
-            onClick={onAddChart}
-            disabled={atLimit}
-            title={atLimit ? '已达到单作品对象上限' : '添加 G6 图表'}
-          >
-            <Icon name="chart" size={14} /> 图表
-          </button>
+          {/* 图表入口按插件动态生成：安装新图表插件后无需改动这里 */}
+          {chartPlugins.map((plugin) => (
+            <button
+              key={plugin.id}
+              className="btn btn-light btn-sm"
+              onClick={() => onAddChart(plugin.id)}
+              disabled={atLimit}
+              title={atLimit ? '已达到单作品对象上限' : `添加${plugin.name}`}
+            >
+              <Icon name={plugin.icon} size={14} /> {plugin.label}
+            </button>
+          ))}
         </div>
       )}
       {atLimit && <p className="leftbar-note">已达到单作品对象上限（{LIMITS.objects}）。删除对象后可继续添加。</p>}

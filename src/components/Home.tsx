@@ -41,6 +41,7 @@ import {
   ensurePluginSetup,
   getPlugin,
   listPluginTemplates,
+  resolveChartPlugin,
   type PluginTemplateEntry,
 } from '../plugins';
 import { toast } from '../store/uiStore';
@@ -149,8 +150,8 @@ function DeckThumb({ summary, cover }: { summary: DeckSummary; cover?: DeckCover
                       : object.type === 'model'
                         ? 'model'
                         : object.type === 'chart'
-                          ? 'chart'
-                          : 'spark'
+                        ? resolveChartPlugin(object.plugin)?.icon ?? 'chart'
+                        : 'spark'
                 }
                 size={11}
               />

@@ -22,7 +22,6 @@ import { create } from 'zustand';
 import type {
   CameraRequest,
   ChartObject,
-  ChartSpec,
   Deck,
   Frame,
   ImageObject,
@@ -58,8 +57,8 @@ import {
 import { acquireDeckLock, getDeck, putDeck, releaseDeckLock } from '../lib/storage';
 // 各形状类型对应的中文显示名，用于生成「矩形 1」这类自动名称。
 import { SHAPE_LABELS } from '../types';
-// 图表默认数据与规范化：插入图表与编辑数据时复用同一套规则。
-import { defaultChartSpec, normalizeChartSpec } from '../lib/chart';
+// 图表插件注册中心：插入图表与编辑数据时按对象上的 plugin 字段解析能力。
+import { resolveChartPlugin } from '../plugins/registry';
 
 /** 对象局部更新补丁：只携带需要修改的字段，未出现的字段保持原值。 */
 type ObjectPatch = Partial<SlideObject>;
@@ -173,8 +172,8 @@ interface DeckStore {
   ) => string | null;
   /** 新增 3D 模型对象（glb / gltf 等格式）。 */
   addModel: (src: string, format: ModelFormat, point?: { x: number; y: number }) => string | null;
-  /** 新增图表对象；不传 spec 时使用内置关系网络示例。 */
-  addChart: (spec?: ChartSpec, point?: { x: number; y: number }) => string | null;
+  /** 新增图表对象；pluginId 缺省时使用默认图表插件，数据由该插件生成。 */
+  addChart: (pluginId?: string, point?: { x: number; y: number }) => string | null;
 
   // —— 对象编辑 ——
   /** 局部更新对象；会先做边界裁剪与文本/图片的自动尺寸修正。 */
@@ -420,9 +419,14 @@ function normalizeEditedObject(object: SlideObject, patch: ObjectPatch): SlideOb
     text.depth3d = clampNumber(text.depth3d ?? 0, 0, LIMITS.maxTextDepth, 0);
     text.height = autoTextHeight(text);
   } else if (next.type === 'chart') {
-    // 图表：数据必须重新规范化，防止手工编辑产生的孤立边 / 重复节点进入场景
+    // 图表：数据必须交给对应插件重新规范化，防止孤立边 / 重复节点进入场景
     const chart = next as ChartObject;
-    chart.spec = normalizeChartSpec(chart.spec);
+    const plugin = resolveChartPlugin(chart.plugin);
+    if (plugin) {
+      // 旧存档没有 plugin 字段：回填解析到的插件 id，之后即可正常渲染与编辑
+      if (!chart.plugin) chart.plugin = plugin.id;
+      chart.spec = plugin.normalizeSpec(chart.spec);
+    }
   } else if (next.type === 'image') {
     // 图片：锁定宽高比时，只改宽/高中的一边，另一边按原始比例联动
     const image = next as ImageObject;
@@ -969,16 +973,20 @@ export const useDeckStore = create<DeckStore>((set, get) => {
       return id;
     },
 
-    // 新增图表对象；spec 缺省时使用内置关系网络示例，数据会先经过规范化
-    addChart: (spec, point) => {
+    // 新增图表对象：解析插件后由插件生成默认数据；未安装图表插件时直接返回 null
+    addChart: (pluginId, point) => {
       const state = get();
       if (!state.deck) return null;
+      // 图表能力由插件贡献：没有插件就没有可用的数据规范与渲染器
+      const plugin = resolveChartPlugin(pluginId);
+      if (!plugin) return null;
       if (state.deck.objects.length >= LIMITS.objects) return null;
       const deckAtStart = state.deck;
       const z = nextDepth(deckAtStart.objects);
-      const name = nameForObject(deckAtStart, 'chart', '图表');
+      // 自动命名使用插件短名称（如「图表」），不同插件不会互相串名
+      const name = nameForObject(deckAtStart, 'chart', plugin.label);
       const id = crypto.randomUUID();
-      const object = createChartObject(id, name, spec ?? defaultChartSpec(), state.view, z);
+      const object = createChartObject(id, name, plugin.id, plugin.createSpec(), state.view, z);
       if (point) {
         object.x = clampNumber(point.x, -LIMITS.coord, LIMITS.coord, object.x);
         object.y = clampNumber(point.y, -LIMITS.coord, LIMITS.coord, object.y);

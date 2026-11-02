@@ -14,8 +14,9 @@
  */
 
 import type { GraphData, GraphOptions, LayoutOptions, NodeData } from '@antv/g6';
-import type { ChartSpec } from '../../types';
 import type { ChartHandle, ChartMountOptions, ChartRenderer } from '../../lib/chartRenderer';
+import { normalizeG6Spec } from './chart';
+import type { G6ChartSpec } from './types';
 
 /** 中英文都能正常显示的系统字体栈，与旧静态渲染器保持一致。 */
 const FONT_FAMILY = '"PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif';
@@ -24,7 +25,7 @@ const FONT_FAMILY = '"PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, 
 const SETTLE_COPY_MS = 900;
 
 /** 是否使用矩形节点（层次布局用矩形 + 箭头，其余布局用圆形 + 细连线）。 */
-function usesRectNodes(layout: ChartSpec['layout']): boolean {
+function usesRectNodes(layout: G6ChartSpec['layout']): boolean {
   return layout === 'dagre-lr' || layout === 'dagre-tb';
 }
 
@@ -34,7 +35,7 @@ function usesRectNodes(layout: ChartSpec['layout']): boolean {
  * 只有力导布局支持迭代式动画，因此 animate 只传给 force；
  * 其余布局的位置变化由 Graph 级别的 animation 选项负责过渡。
  */
-function layoutOptions(spec: ChartSpec, animate: boolean): LayoutOptions {
+function layoutOptions(spec: G6ChartSpec, animate: boolean): LayoutOptions {
   const focus = spec.focusNode ?? spec.nodes[0]?.id ?? null;
   if (spec.layout === 'dagre-lr') {
     return { type: 'dagre', rankdir: 'LR', nodesep: 34, ranksep: 92 };
@@ -74,7 +75,7 @@ function layoutOptions(spec: ChartSpec, animate: boolean): LayoutOptions {
  * 配色约定：重点节点使用实心强调色，常规节点低透明度填充 + 强调色描边，
  * 叶子节点更暗、字号更小，保证层级一眼可辨。
  */
-function nodeStyle(datum: NodeData, spec: ChartSpec): Record<string, unknown> {
+function nodeStyle(datum: NodeData, spec: G6ChartSpec): Record<string, unknown> {
   const kind = (datum.data?.kind as 'core' | 'node' | 'leaf' | undefined) ?? 'node';
   const label = String(datum.data?.label ?? datum.id);
   const rect = usesRectNodes(spec.layout);
@@ -122,7 +123,9 @@ export const mountG6Chart: ChartRenderer = async (
   canvas: HTMLCanvasElement,
   options: ChartMountOptions,
 ): Promise<ChartHandle> => {
-  const { spec, animate, width, height } = options;
+  const { animate, width, height } = options;
+  // 核心只透传不透明 JSON，进入渲染前必须先由本插件规范化成 G6 自己的结构
+  const spec = normalizeG6Spec(options.spec);
   const rect = usesRectNodes(spec.layout);
 
   // 屏幕外容器：参与布局与绘制，但不可见、不可交互

@@ -36,6 +36,7 @@ import { mediaKindOf, readMediaFile } from '../lib/media';
 import { isModelFile, modelFormatOf, MODEL_ACCEPT } from '../lib/model3d';
 import { isSvgFile, readSvgFile } from '../lib/svg';
 import { flushDeckSave, useDeckStore } from '../store/deckStore';
+import { listChartPlugins } from '../plugins';
 import { toast } from '../store/uiStore';
 import { AssetPicker } from './AssetPicker';
 import { AiPanel } from './AiPanel';
@@ -53,6 +54,12 @@ interface EditorProps {
   deckId: string;
   onBack: () => void;
 }
+
+/**
+ * 可插入的图表插件列表。
+ * 放在组件外避免每次渲染重复遍历；模块导入 ../plugins 时内置插件已完成注册。
+ */
+const CHART_PLUGINS = listChartPlugins();
 
 /**
  * 演示会话的入口参数。
@@ -707,7 +714,8 @@ export function Editor({ deckId, onBack }: EditorProps) {
           onAddModel={() => pickModel()}
           onAddLottie={() => pickLottie()}
           onAddShape={() => useDeckStore.getState().addShape('rect')}
-          onAddChart={() => useDeckStore.getState().addChart()}
+          chartPlugins={CHART_PLUGINS}
+          onAddChart={(pluginId) => useDeckStore.getState().addChart(pluginId)}
         />
 
         <main className="stage-column">

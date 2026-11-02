@@ -22,5 +22,9 @@ export {
   getPlugin,
   listPluginTemplates,
   ensurePluginSetup,
+  listChartPlugins,
+  getChartPlugin,
+  getDefaultChartPlugin,
+  resolveChartPlugin,
 } from './registry';
-export type { PluginTemplate, PluginTemplateEntry, SlidePlugin } from './types';
+export type { PluginTemplate, PluginTemplateEntry, SlidePlugin, ChartPlugin, ChartInspectorProps } from './types';

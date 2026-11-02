@@ -37,7 +37,7 @@ import {
   LIMITS,
 } from './constants';
 import { layoutText } from './text';
-import { normalizeChartSpec } from './chart';
+import { getChartPlugin, getDefaultChartPlugin } from '../plugins/registry';
 
 /** .slide 工程文件格式版本号；导入时高于此版本的文件会被拒绝。 */
 export const PROJECT_VERSION = 1;
@@ -268,11 +268,22 @@ function normalizeObject(raw: unknown, warnings: string[]): SlideObject {
   }
   if (type === 'chart') {
     const base = normalizeBase(r);
-    // 图表数据来自存档，可能被手工修改过；统一走规范化，保证节点 / 边自洽
+    // 图表数据来自存档，可能被手工修改过；交给提供该图表的插件规范化，
+    // 保证节点 / 边（或其他插件自定义结构）始终自洽。
+    const requested = str(r.plugin, '');
+    // 旧存档没有 plugin 字段，或插件被卸载时，回退到默认图表插件：
+    // 数据仍然保留，等对应插件可用后即可继续渲染与编辑。
+    const plugin = (requested ? getChartPlugin(requested) : undefined) ?? getDefaultChartPlugin();
+    if (!plugin) warnings.push(`图表「${base.name}」缺少可用插件，已保留原始数据但无法渲染`);
     return {
       ...base,
       type: 'chart',
-      spec: normalizeChartSpec(r.spec),
+      plugin: plugin?.id ?? requested,
+      spec: plugin
+        ? plugin.normalizeSpec(r.spec)
+        : r.spec && typeof r.spec === 'object'
+          ? (r.spec as Record<string, unknown>)
+          : {},
       animate: bool(r.animate, true),
     };
   }

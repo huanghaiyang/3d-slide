@@ -20,12 +20,9 @@
  * - lib/media.ts 的 formatDuration，types.ts 的中文标签映射，以及 ./ui 中的表单原子组件。
  */
 
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useState } from 'react';
 import type {
   AudioObject,
-  ChartLayout,
-  ChartObject,
-  ChartSpec,
   Deck,
   ImageObject,
   LottieObject,
@@ -37,19 +34,13 @@ import type {
   VideoObject,
 } from '../types';
 import { LIMITS, DEFAULT_HOLD } from '../lib/constants';
-import {
-  CHART_KIND_LABELS,
-  CHART_LAYOUT_LABELS,
-  CHART_PRESETS,
-  MAX_CHART_EDGES,
-  MAX_CHART_NODES,
-  cloneChartSpec,
-  normalizeChartSpec,
-} from '../lib/chart';
 import { formatDuration } from '../lib/media';
 import { useDeckStore } from '../store/deckStore';
 import { FONT_LABELS, MODEL_FORMAT_LABELS, OBJECT_LABELS, SHAPE_LABELS } from '../types';
+// 图表属性面板由插件提供，核心只负责按对象上的 plugin 字段解析
+import { resolveChartPlugin } from '../plugins/registry';
 import { Icon } from './Icon';
+import { Section, TextValueField } from './inspectorKit';
 import { ColorField, NumberField, Segmented, Switch } from './ui';
 
 interface InspectorProps {
@@ -65,92 +56,6 @@ interface InspectorProps {
   onReplaceLottie: (id: string) => void;
   /** 请求用当前相机视图更新指定视点的取景。 */
   onUpdateFrameView: (id: string) => void;
-}
-
-/**
- * 属性面板中的通用分组容器：统一的标题栏 + 内容区。
- * extra 用于在标题右侧放置额外操作（多数面板未使用）。
- */
-function Section({ title, extra, children }: { title: string; extra?: ReactNode; children: ReactNode }) {
-  return (
-    <section className="prop-section">
-      <div className="prop-section-head">
-        <span>{title}</span>
-        {extra}
-      </div>
-      {children}
-    </section>
-  );
-}
-
-/**
- * 单行文本输入：内部维护 draft 草稿，只在失焦或回车时才提交。
- *
- * 状态含义：
- * - draft：输入过程中的本地值，输入法组合期间也以它为准。
- * - focused ref：记录是否正在编辑，避免外部 value 变化（例如撤销）覆盖用户未提交的输入。
- *
- * 副作用：提交时对内容 trim，空值回退为原值（不允许把名称清空），并按 maxLength 截断。
- */
-function TextValueField({
-  value,
-  maxLength,
-  ariaLabel,
-  placeholder,
-  disabled,
-  onCommit,
-}: {
-  value: string;
-  maxLength: number;
-  ariaLabel: string;
-  placeholder?: string;
-  disabled?: boolean;
-  onCommit: (value: string) => void;
-}) {
-  const [draft, setDraft] = useState(value);
-  const focused = useRef(false);
-
-  // 仅当用户不在输入状态时，才把外部值同步回草稿；否则会打断正在输入的内容。
-  useEffect(() => {
-    if (!focused.current) setDraft(value);
-  }, [value]);
-
-  const commit = () => {
-    const trimmed = draft.trim();
-    // 空内容视为取消编辑，恢复原值，避免对象 / 视点丢失名称。
-    if (!trimmed) {
-      setDraft(value);
-      return;
-    }
-    if (trimmed !== value) onCommit(trimmed.slice(0, maxLength));
-  };
-
-  return (
-    <input
-      className="text-input"
-      value={draft}
-      maxLength={maxLength}
-      placeholder={placeholder}
-      aria-label={ariaLabel}
-      disabled={disabled}
-      onFocus={(event) => {
-        focused.current = true;
-        event.currentTarget.select();
-      }}
-      onChange={(event) => setDraft(event.target.value)}
-      onBlur={() => {
-        focused.current = false;
-        commit();
-      }}
-      onKeyDown={(event) => {
-        if (event.key === 'Enter') event.currentTarget.blur();
-        if (event.key === 'Escape') {
-          setDraft(value);
-          event.currentTarget.blur();
-        }
-      }}
-    />
-  );
 }
 
 /**
@@ -934,288 +839,6 @@ function LottieFields({
 }
 
 /**
- * 图表属性与数据编辑。
- *
- * 图表保存的是声明式数据（布局 / 节点 / 边 / 配色），而不是渲染结果：
- * 每次修改都先深拷贝、再走 normalizeChartSpec 规范化后写回 store，
- * SceneManager 依据数据指纹判断是否重建 G6 实例，因此编辑会实时反映到 3D 画面。
- * 删除节点时会同步移除引用它的连线，避免产生孤立边。
- */
-function ChartFields({ object }: { object: ChartObject }) {
-  const updateObject = useDeckStore((state) => state.updateObject);
-  const retryImage = useDeckStore((state) => state.retryImage);
-  const error = useDeckStore((state) => state.imageErrors[object.id]);
-
-  /** 深拷贝后修改并规范化提交；相同 field 的连续操作合并为一步撤销。 */
-  const patchSpec = (mutate: (draft: ChartSpec) => void, field: string) => {
-    const draft = cloneChartSpec(object.spec);
-    mutate(draft);
-    updateObject(object.id, { spec: normalizeChartSpec(draft) }, `${object.id}:${field}`);
-  };
-
-  /** 生成不与现有节点冲突的新节点 id。 */
-  const nextNodeId = () => {
-    let index = object.spec.nodes.length + 1;
-    while (object.spec.nodes.some((node) => node.id === `n${index}`)) index += 1;
-    return `n${index}`;
-  };
-
-  const nodes = object.spec.nodes;
-  const edges = object.spec.edges;
-
-  return (
-    <>
-      <Section title="图表">
-        <div className="prop-row">
-          <span className="field-label">布局</span>
-          <select
-            className="select"
-            value={object.spec.layout}
-            aria-label="图表布局"
-            onChange={(event) =>
-              patchSpec((draft) => {
-                draft.layout = event.target.value as ChartLayout;
-              }, 'layout')
-            }
-          >
-            {(Object.keys(CHART_LAYOUT_LABELS) as ChartLayout[]).map((layout) => (
-              <option key={layout} value={layout}>
-                {CHART_LAYOUT_LABELS[layout]}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        {/* 辐射布局需要一个中心节点，其余布局忽略该字段 */}
-        {object.spec.layout === 'radial' && (
-          <div className="prop-row">
-            <span className="field-label">中心节点</span>
-            <select
-              className="select"
-              value={object.spec.focusNode ?? nodes[0]?.id ?? ''}
-              aria-label="辐射中心节点"
-              onChange={(event) =>
-                patchSpec((draft) => {
-                  draft.focusNode = event.target.value;
-                }, 'focus')
-              }
-            >
-              {nodes.map((node) => (
-                <option key={node.id} value={node.id}>
-                  {node.label || node.id}
-                </option>
-              ))}
-            </select>
-          </div>
-        )}
-
-        <ColorField
-          label="强调色"
-          value={object.spec.accent}
-          ariaLabel="图表强调色"
-          onChange={(accent) =>
-            patchSpec((draft) => {
-              draft.accent = accent;
-            }, 'accent')
-          }
-        />
-
-        <div className="prop-row">
-          <span className="field-label">布局动画</span>
-          <Switch
-            checked={object.animate}
-            label="图表布局动画"
-            onChange={(animate) => updateObject(object.id, { animate })}
-          />
-        </div>
-
-        <div className="prop-row">
-          <span className="field-label">载入示例</span>
-          <select
-            className="select"
-            value=""
-            aria-label="载入图表示例"
-            onChange={(event) => {
-              const preset = CHART_PRESETS.find((item) => item.id === event.target.value);
-              if (!preset) return;
-              patchSpec((draft) => {
-                const source = cloneChartSpec(preset.spec);
-                draft.layout = source.layout;
-                draft.nodes = source.nodes;
-                draft.edges = source.edges;
-                draft.accent = source.accent;
-                draft.focusNode = source.focusNode;
-              }, 'preset');
-            }}
-          >
-            <option value="">选择示例…</option>
-            {CHART_PRESETS.map((preset) => (
-              <option key={preset.id} value={preset.id}>
-                {preset.name}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <span className="field-hint">
-          {nodes.length} 个节点 · {edges.length} 条连线 · 数据随作品保存，修改后实时重排。
-        </span>
-      </Section>
-
-      <Section title="节点">
-        <div className="chart-rows">
-          {nodes.map((node) => (
-            <div key={node.id} className="chart-row">
-              <TextValueField
-                value={node.label}
-                maxLength={28}
-                ariaLabel={`节点 ${node.id} 文案`}
-                onCommit={(label) =>
-                  patchSpec((draft) => {
-                    const target = draft.nodes.find((item) => item.id === node.id);
-                    if (target) target.label = label;
-                  }, `node-label:${node.id}`)
-                }
-              />
-              <select
-                className="select"
-                value={node.kind ?? 'node'}
-                aria-label={`节点 ${node.id} 层级`}
-                onChange={(event) =>
-                  patchSpec((draft) => {
-                    const target = draft.nodes.find((item) => item.id === node.id);
-                    if (target) target.kind = event.target.value as 'core' | 'node' | 'leaf';
-                  }, `node-kind:${node.id}`)
-                }
-              >
-                {(Object.keys(CHART_KIND_LABELS) as ('core' | 'node' | 'leaf')[]).map((kind) => (
-                  <option key={kind} value={kind}>
-                    {CHART_KIND_LABELS[kind]}
-                  </option>
-                ))}
-              </select>
-              <button
-                type="button"
-                className="chart-row-del"
-                aria-label={`删除节点 ${node.label || node.id}`}
-                onClick={() =>
-                  patchSpec((draft) => {
-                    draft.nodes = draft.nodes.filter((item) => item.id !== node.id);
-                    // 节点删除后，引用它的边也必须一起删除，否则会变成孤立边
-                    draft.edges = draft.edges.filter(
-                      (edge) => edge.source !== node.id && edge.target !== node.id,
-                    );
-                    if (draft.focusNode === node.id) draft.focusNode = undefined;
-                  }, `node-del:${node.id}`)
-                }
-              >
-                <Icon name="trash" size={13} />
-              </button>
-            </div>
-          ))}
-        </div>
-        <button
-          type="button"
-          className="btn btn-ghost btn-sm"
-          disabled={nodes.length >= MAX_CHART_NODES}
-          onClick={() =>
-            patchSpec((draft) => {
-              draft.nodes.push({ id: nextNodeId(), label: '新节点', kind: 'node' });
-            }, 'node-add')
-          }
-        >
-          <Icon name="plus" size={14} /> 添加节点
-        </button>
-      </Section>
-
-      <Section title="连线">
-        <div className="chart-rows">
-          {edges.map((edge, index) => (
-            <div key={`${edge.source}>${edge.target}>${index}`} className="chart-row chart-edge-row">
-              <select
-                className="select"
-                value={edge.source}
-                aria-label={`连线 ${index + 1} 起点`}
-                onChange={(event) =>
-                  patchSpec((draft) => {
-                    const target = draft.edges[index];
-                    if (target) target.source = event.target.value;
-                  }, `edge-source:${index}`)
-                }
-              >
-                {nodes.map((node) => (
-                  <option key={node.id} value={node.id}>
-                    {node.label || node.id}
-                  </option>
-                ))}
-              </select>
-              <select
-                className="select"
-                value={edge.target}
-                aria-label={`连线 ${index + 1} 终点`}
-                onChange={(event) =>
-                  patchSpec((draft) => {
-                    const target = draft.edges[index];
-                    if (target) target.target = event.target.value;
-                  }, `edge-target:${index}`)
-                }
-              >
-                {nodes.map((node) => (
-                  <option key={node.id} value={node.id}>
-                    {node.label || node.id}
-                  </option>
-                ))}
-              </select>
-              <button
-                type="button"
-                className="chart-row-del"
-                aria-label={`删除连线 ${index + 1}`}
-                onClick={() =>
-                  patchSpec((draft) => {
-                    draft.edges = draft.edges.filter((_, itemIndex) => itemIndex !== index);
-                  }, `edge-del:${index}`)
-                }
-              >
-                <Icon name="trash" size={13} />
-              </button>
-            </div>
-          ))}
-        </div>
-        <button
-          type="button"
-          className="btn btn-ghost btn-sm"
-          disabled={nodes.length < 2 || edges.length >= MAX_CHART_EDGES}
-          onClick={() =>
-            patchSpec((draft) => {
-              // 默认连接前两个节点；重复连线会在规范化时被剔除
-              draft.edges.push({ source: draft.nodes[0].id, target: draft.nodes[1].id });
-            }, 'edge-add')
-          }
-        >
-          <Icon name="plus" size={14} /> 添加连线
-        </button>
-        <span className="field-hint">自环与重复连线会被自动忽略；节点最多 {MAX_CHART_NODES} 个。</span>
-      </Section>
-
-      {error && (
-        <div className="image-error-box">
-          <Icon name="alert" size={15} />
-          <div>
-            <b>图表无法渲染</b>
-            <p>{error}</p>
-            <div className="button-row">
-              <button className="btn btn-light btn-sm" onClick={() => retryImage(object.id)}>
-                重试
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-    </>
-  );
-}
-
-/**
  * 单个对象的属性面板入口：名称 + 按类型分发到具体字段组 + 通用变换 / 图层 / 删除。
  *
  * 图层顺序说明：sorted 按 z 降序，索引 0 为最靠前的对象；因此
@@ -1238,6 +861,8 @@ function ObjectPanel({
   onReplaceModel: (id: string) => void;
   onReplaceLottie: (id: string) => void;
 }) {
+  // 图表插件只在 chart 对象上解析：副标题与属性面板都由它提供
+  const chartPlugin = object.type === 'chart' ? resolveChartPlugin(object.plugin) : undefined;
   const subtitle =
     object.type === 'text'
       ? '文本对象'
@@ -1254,9 +879,12 @@ function ObjectPanel({
               : object.type === 'lottie'
                 ? 'Lottie 动画'
                 : object.type === 'chart'
-                  ? 'G6 图表'
+                  ? chartPlugin?.name ?? '图表'
                   : `${MODEL_FORMAT_LABELS[object.format]} 模型`;
   const updateObject = useDeckStore((state) => state.updateObject);
+  // 图表渲染错误与重试动作由核心统一管理，插件面板只负责展示
+  const imageErrors = useDeckStore((state) => state.imageErrors);
+  const retryImage = useDeckStore((state) => state.retryImage);
   const removeObject = useDeckStore((state) => state.removeObject);
   const moveObjectLayer = useDeckStore((state) => state.moveObjectLayer);
   const requestFocus = useDeckStore((state) => state.requestFocus);
@@ -1293,7 +921,21 @@ function ObjectPanel({
         )}
         {object.type === 'model' && <ModelFields object={object} onReplaceModel={onReplaceModel} />}
         {object.type === 'lottie' && <LottieFields object={object} onReplaceLottie={onReplaceLottie} />}
-        {object.type === 'chart' && <ChartFields object={object} />}
+        {object.type === 'chart' &&
+          (chartPlugin ? (
+            <chartPlugin.Inspector
+              object={object}
+              onChange={(patch, historyKey) => updateObject(object.id, patch, historyKey)}
+              error={imageErrors[object.id]}
+              onRetry={() => retryImage(object.id)}
+            />
+          ) : (
+            <Section title="图表插件">
+              <span className="field-hint">
+                当前图表依赖插件「{object.plugin || '未知'}」，请安装对应插件后再编辑。
+              </span>
+            </Section>
+          ))}
         {object.type === 'shape' && <ShapeFields object={object} />}
 
         <Section title="变换">

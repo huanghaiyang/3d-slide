@@ -7,13 +7,14 @@
  * 直接写进作品。3D 场景由 SceneManager 调用插件注册的渲染器实时绘制，
  * 因此编辑器里可以继续修改图表数据，图表也会随数据重新布局并播放动画。
  *
- * 图表数据来自 lib/chart 的 CHART_PRESETS，与属性面板「载入示例」共用同一份数据集。
+ * 图表数据来自本插件的 G6_PRESETS，与属性面板「载入示例」共用同一份数据集。
  */
 
-import type { ChartObject, ChartSpec, Deck, Frame, TextObject, ViewState } from '../../types';
+import type { ChartObject, Deck, Frame, TextObject, ViewState } from '../../types';
 import { DEFAULT_DISTANCE, DEFAULT_HOLD, DEFAULT_VIEW } from '../../lib/constants';
 import { autoTextHeight, createChartObject, createDeck } from '../../lib/deck';
-import { chartPresetSpec } from '../../lib/chart';
+import { g6PresetSpec } from './chart';
+import { G6_CHART_PLUGIN_ID, type G6ChartSpec } from './types';
 import type { PluginTemplate } from '../types';
 
 /** 便捷构造相机视角，参数含义与 lib/templates 中的同名函数一致。 */
@@ -87,8 +88,8 @@ function text(name: string, content: string, options: TextOptions): TextObject {
  * 展示尺寸固定为 1280x720（16:9），保证文字标签清晰、又能与标题和说明文字留出间距；
  * 位置固定为画布中央偏下（y = 80），与旧版图表图片版式保持一致。
  */
-function chartObject(name: string, spec: ChartSpec): ChartObject {
-  const object = createChartObject(crypto.randomUUID(), name, spec, DEFAULT_VIEW, 0);
+function chartObject(name: string, spec: G6ChartSpec): ChartObject {
+  const object = createChartObject(crypto.randomUUID(), name, G6_CHART_PLUGIN_ID, spec, DEFAULT_VIEW, 0);
   return { ...object, x: 0, y: 80, width: 1280, height: 720 };
 }
 
@@ -100,7 +101,7 @@ interface ComposeInput {
   eyebrow: string;
   heading: string;
   caption: string;
-  spec: ChartSpec;
+  spec: G6ChartSpec;
   notes: [string, string, string];
 }
 
@@ -172,7 +173,7 @@ function composeDeck(input: ComposeInput): Deck {
 function buildNetwork(title: string): Deck {
   const background = '#08111B';
   const accent = '#5B8FF9';
-  const spec = chartPresetSpec('network');
+  const spec = g6PresetSpec('network');
   spec.accent = accent;
 
   return composeDeck({
@@ -195,7 +196,7 @@ function buildNetwork(title: string): Deck {
 function buildMindmap(title: string): Deck {
   const background = '#0B1412';
   const accent = '#61DDAA';
-  const spec = chartPresetSpec('mindmap');
+  const spec = g6PresetSpec('mindmap');
   spec.accent = accent;
 
   return composeDeck({
@@ -218,7 +219,7 @@ function buildMindmap(title: string): Deck {
 function buildFlow(title: string): Deck {
   const background = '#12100A';
   const accent = '#F6BD16';
-  const spec = chartPresetSpec('flow');
+  const spec = g6PresetSpec('flow');
   spec.accent = accent;
 
   return composeDeck({
@@ -241,7 +242,7 @@ function buildFlow(title: string): Deck {
 function buildRadial(title: string): Deck {
   const background = '#140D0B';
   const accent = '#E8684A';
-  const spec = chartPresetSpec('radial');
+  const spec = g6PresetSpec('radial');
   spec.accent = accent;
 
   return composeDeck({
@@ -264,7 +265,7 @@ function buildRadial(title: string): Deck {
 function buildCircular(title: string): Deck {
   const background = '#0A1118';
   const accent = '#7DD3C0';
-  const spec = chartPresetSpec('circular');
+  const spec = g6PresetSpec('circular');
   spec.accent = accent;
 
   return composeDeck({
