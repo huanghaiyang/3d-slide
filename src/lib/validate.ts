@@ -1,3 +1,22 @@
+/**
+ * validate.ts —— 作品数据的校验、裁剪与工程文件编解码
+ *
+ * 职责：
+ * - 把来自 IndexedDB 或 .slide 文件的「不可信数据」规范化成合法的 Deck；
+ * - 对每个字段做类型判断、默认值兜底与范围裁剪（坐标、尺寸、角度、时长、文本长度等）；
+ * - 生成 / 解析 .slide 工程文件（JSON 包装），导入时重新生成 id 避免主键冲突；
+ * - 提供文件名清洗、重名去重与默认图片对象的工具函数。
+ *
+ * 校验策略（宽松修复而非直接拒绝）：
+ * - 结构性缺失（不是对象、缺少标题、对象 / 视点缺少 id、未知对象类型）抛错；
+ * - 单个字段异常（类型错误、超出范围、非法颜色）则回退默认值或裁剪到合法区间；
+ * - 缺少素材 src 不算错误，记录到 warnings，由 UI 以占位图 / 占位卡形式提示。
+ *
+ * 数据流：
+ *   读取 IndexedDB -> normalizeDeck -> deckStore；
+ *   导入 .slide -> parseSlideFile -> normalizeDeckWithWarnings(regenerateIds) -> 新建作品。
+ */
+
 import type {
   Deck,
   Frame,
@@ -19,26 +38,44 @@ import {
 } from './constants';
 import { layoutText } from './text';
 
+/** .slide 工程文件格式版本号；导入时高于此版本的文件会被拒绝。 */
 export const PROJECT_VERSION = 1;
 
+/** .slide 文件的 app 标识，用于识别「这是本应用的工程文件」而非任意 JSON。 */
 export const PROJECT_APP_ID = '3d-slide';
 
+/** 读取数字：仅接受有限数字，其余（字符串、NaN、null 等）返回兜底值。 */
 function num(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
+/** 读取字符串：仅接受字符串，其余返回兜底值。 */
 function str(value: unknown, fallback: string): string {
   return typeof value === 'string' ? value : fallback;
 }
 
+/** 读取布尔值：仅接受布尔，其余返回兜底值。 */
 function bool(value: unknown, fallback: boolean): boolean {
   return typeof value === 'boolean' ? value : fallback;
 }
 
+/** 数值裁剪到 [min, max]（调用前已确保 value 是有限数字）。 */
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
+/**
+ * 规范化相机视角。
+ *
+ * @param raw      待校验的原始值（可能缺失 / 类型错误）
+ * @param fallback 缺省视角，默认 DEFAULT_VIEW
+ * @returns 新对象（target 为深拷贝，避免与 fallback 共享引用）
+ *
+ * 裁剪规则：
+ * - target 的 x / y 限制在 ±LIMITS.coord，z 限制在 ±LIMITS.depth；
+ * - distance 限制在 20–60000（下限避免相机穿模，上限避免视角过远看不到内容）；
+ * - pitch 限制在 ±1.45 弧度（约 ±83°），防止相机翻转到物体背后。
+ */
 function normalizeView(raw: unknown, fallback: ViewState = DEFAULT_VIEW): ViewState {
   if (!raw || typeof raw !== 'object') return { ...fallback, target: { ...fallback.target } };
   const v = raw as Record<string, unknown>;
@@ -56,6 +93,15 @@ function normalizeView(raw: unknown, fallback: ViewState = DEFAULT_VIEW): ViewSt
   };
 }
 
+/**
+ * 规范化所有对象共有的基础字段。
+ *
+ * @param raw 原始对象记录
+ * @returns 仅包含公共字段的对象（id / name / 坐标 / 尺寸 / 旋转 / 透明度 / 可见性）
+ * @throws 缺少 id 或空名称时抛错（属于结构性错误，无法安全修复）
+ *
+ * 尺寸缺失时默认 400x300（近似旧版文本框尺寸）；不透明度默认 100、可见默认 true。
+ */
 function normalizeBase(raw: Record<string, unknown>): {
   id: string;
   name: string;
@@ -88,6 +134,19 @@ function normalizeBase(raw: Record<string, unknown>): {
   };
 }
 
+/**
+ * 规范化单个内容对象，按 `type` 分派到对应分支。
+ *
+ * @param raw      原始对象记录
+ * @param warnings 收集「缺少素材」等非致命问题，供导入结果提示
+ * @returns 规范化后的 SlideObject
+ * @throws 对象不是对象类型 / 未知 type 时抛错
+ *
+ * 实现要点：
+ * - 枚举型字段（font / align / fit / shape / format）都用白名单校验，非法值回退默认；
+ * - 文本高度始终由 layoutText 重新测量，不信任存档中的旧高度；
+ * - 自由路径只保留有限数字并把点坐标裁剪到 0–1。
+ */
 function normalizeObject(raw: unknown, warnings: string[]): SlideObject {
   if (!raw || typeof raw !== 'object') throw new Error('存在无效的内容对象');
   const r = raw as Record<string, unknown>;
@@ -230,10 +289,22 @@ function normalizeObject(raw: unknown, warnings: string[]): SlideObject {
   throw new Error(`未知的对象类型：${String(type)}`);
 }
 
+/**
+ * 规范化单个视点。
+ *
+ * @param raw   原始视点记录
+ * @param index 视点在数组中的下标，用于生成缺省的「视点 N」名称
+ * @returns 规范化后的 Frame
+ * @throws 视点不是对象或缺少 id 时抛错
+ *
+ * 备注：空字符串或仅空白的备注会存为 undefined，避免导出 JSON 时出现空字段；
+ * duration / hold 均裁剪到 LIMITS 规定区间。
+ */
 function normalizeFrame(raw: unknown, index: number): Frame {
   if (!raw || typeof raw !== 'object') throw new Error('存在无效的视点');
   const r = raw as Record<string, unknown>;
   if (typeof r.id !== 'string' || !r.id) throw new Error('视点缺少 id');
+  // 先截断到字数上限，再判断是否为空，避免超长备注里的空白被误判
   const notes = typeof r.notes === 'string' ? r.notes.slice(0, LIMITS.frameNotesChars) : '';
   return {
     id: r.id,
@@ -245,11 +316,27 @@ function normalizeFrame(raw: unknown, index: number): Frame {
   };
 }
 
+/** normalizeDeck 的可选行为。 */
 export interface NormalizeOptions {
+  /** 强制使用新的作品 id（例如导入时覆盖原 id）。 */
   newId?: string;
+  /** 为重复的对象 / 视点 id 追加下标，保证同一作品内 id 唯一（导入时使用）。 */
   regenerateIds?: boolean;
 }
 
+/**
+ * 把任意来源的数据规范化为合法的 Deck。
+ *
+ * @param raw     待规范化的原始数据（IndexedDB 行记录 / 文件中的 deck 字段）
+ * @param options 附加行为（替换 id、修复重复 id）
+ * @returns 合法的 Deck（所有字段都已裁剪 / 兜底）
+ * @throws 结构性错误：非对象、缺标题、对象 / 视点列表缺失或超过上限
+ *
+ * 说明：
+ * - 标题超长会截断到 LIMITS.titleChars；背景色必须是标准的 #RRGGBB 格式；
+ * - counters 只保留值为数字的项，防止注入非数字类型；
+ * - createdAt / updatedAt 缺失时用当前时间兜底。
+ */
 export function normalizeDeck(raw: unknown, options: NormalizeOptions = {}): Deck {
   if (!raw || typeof raw !== 'object') throw new Error('作品数据不是有效对象');
   const r = raw as Record<string, unknown>;
@@ -263,6 +350,7 @@ export function normalizeDeck(raw: unknown, options: NormalizeOptions = {}): Dec
   let objects = r.objects.map((o) => normalizeObject(o, warnings));
   let frames = r.frames.map((f, i) => normalizeFrame(f, i));
 
+  // 导入时若文件内存在重复 id，追加下标保证唯一；未开启时保持原 id
   if (options.regenerateIds) {
     const seen = new Set<string>();
     objects = objects.map((o, i) => {
@@ -298,6 +386,18 @@ export function normalizeDeck(raw: unknown, options: NormalizeOptions = {}): Dec
   // warnings 由调用方通过 normalizeDeckWithWarnings 获取
 }
 
+/**
+ * 规范化作品并额外返回非致命警告列表。
+ *
+ * 与 normalizeDeck 的区别：normalizeDeck 内部会把「缺少素材」的警告丢弃，
+ * 这里在规范化完成后再扫一遍对象，把缺 src / 缺动画数据的提示汇总返回，
+ * 供导入界面展示「已以占位图显示」等提示。
+ *
+ * @param raw     原始作品数据
+ * @param options 同 normalizeDeck
+ * @returns deck 与 warnings
+ * @throws 同 normalizeDeck
+ */
 export function normalizeDeckWithWarnings(
   raw: unknown,
   options: NormalizeOptions = {},
@@ -318,14 +418,31 @@ export function normalizeDeckWithWarnings(
   return { deck, warnings };
 }
 
+/**
+ * .slide 工程文件的外层结构。
+ * 用 app + version 做格式识别与向前兼容；deck 内联完整作品数据。
+ */
 export interface SlideProjectFile {
+  /** 固定为 PROJECT_APP_ID，用于确认文件类型。 */
   app: typeof PROJECT_APP_ID;
+  /** 格式版本号，导入时会拒绝高于当前版本的文件。 */
   version: number;
+  /** 导出时间（ISO 8601 字符串），仅作信息展示。 */
   exportedAt: string;
+  /** 作品标题的冗余副本，便于不解包 deck 也能显示文件名。 */
   title: string;
+  /** 完整作品数据。 */
   deck: Deck;
 }
 
+/**
+ * 把作品包装成可下载的 .slide 工程文件对象（调用方再 JSON.stringify 落盘）。
+ *
+ * @param deck 要导出的作品
+ * @returns 带 app / version / exportedAt 的外层结构
+ *
+ * 副作用：读取当前时间。
+ */
 export function createSlideFile(deck: Deck): SlideProjectFile {
   return {
     app: PROJECT_APP_ID,
@@ -336,6 +453,16 @@ export function createSlideFile(deck: Deck): SlideProjectFile {
   };
 }
 
+/**
+ * 解析 .slide 工程文件文本。
+ *
+ * @param text 文件内容（JSON 字符串）
+ * @returns 规范化后的 deck 与 warnings；deck 的 id 会被换成新随机 id、
+ *          updatedAt 更新为当前时间，使导入相当于「另存为一份新作品」
+ * @throws JSON 解析失败、app 标识不符、版本过高、缺少 deck 字段或 normalize 的结构性错误
+ *
+ * 注意：重新生成 id 是导入安全性的关键——避免覆盖本地已有同名 id 的作品。
+ */
 export function parseSlideFile(text: string): { deck: Deck; warnings: string[] } {
   let raw: unknown;
   try {
@@ -353,10 +480,28 @@ export function parseSlideFile(text: string): { deck: Deck; warnings: string[] }
   return { deck: { ...deck, id: crypto.randomUUID(), updatedAt: Date.now() }, warnings };
 }
 
+/**
+ * 把作品标题转换成可安全用作文件名的字符串。
+ *
+ * Windows / macOS 常见非法字符（\ / : * ? " < > |）以及换行统一替换为下划线，
+ * 再截断到 80 个字符；结果为空时回退「未命名演示」。
+ *
+ * @param title 原始标题
+ * @returns 可直接拼进下载文件名的字符串
+ */
 export function sanitizeFileName(title: string): string {
   return title.replace(/[\\/:*?"<>|\r\n]/g, '_').slice(0, 80) || '未命名演示';
 }
 
+/**
+ * 在已有标题集合中生成不重复的标题：重名时依次追加「（2）」「（3）」……
+ *
+ * @param title    期望的标题
+ * @param existing 已存在的标题列表
+ * @returns 不冲突的新标题
+ *
+ * 注意：只做完全匹配判断；不考虑大小写或空白差异。
+ */
 export function uniqueTitle(title: string, existing: string[]): string {
   if (!existing.includes(title)) return title;
   let index = 2;
@@ -364,6 +509,17 @@ export function uniqueTitle(title: string, existing: string[]): string {
   return `${title}（${index}）`;
 }
 
+/**
+ * 构造默认图片对象。
+ *
+ * @param x 中心点 x
+ * @param y 中心点 y
+ * @param z 层级
+ * @returns 初始尺寸按原始宽高比缩放到最长边 900 的图片对象；
+ *          宽高比缺失（0 / NaN）时按 4:3 兜底
+ *
+ * 同时被 deck.createImageObject 与 createSvgObject 复用，保证两者尺寸策略一致。
+ */
 export function defaultImageObject(
   id: string,
   name: string,
@@ -374,6 +530,7 @@ export function defaultImageObject(
   y: number,
   z: number,
 ): ImageObject {
+  // 最长边固定 900（约半个画面），保证新图片不会一上来就撑满画布
   const maxDim = 900;
   const ratio = naturalWidth / naturalHeight || 4 / 3;
   let width = maxDim;

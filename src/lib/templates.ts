@@ -1,3 +1,20 @@
+/**
+ * templates.ts —— 内置演示模板
+ *
+ * 职责：以纯代码方式构造几套开箱即用的作品（封面 / 产品发布 / 数据看板 / 空间漫游），
+ * 包含对象摆放与视点编排，新建作品时可直接套用。
+ *
+ * 关键概念：
+ * - 模板全部在同一个 1920x1080 世界坐标系内布置对象：x 向右、y 向下、z 越大越靠前；
+ * 标题类文本通常放在 y 为负的上半区，卡片 / 柱状图放在 y 为正的下半区；
+ * - 每个视点由 (distance, x, y, yaw, pitch, z) 组合而成，通过推近 / 下移 / 拉远
+ *   形成叙事节奏；hold 控制自动播放时的停留时长，notes 为演讲者备注；
+ * - 模板中的颜色是写死的设计色板，与 constants 的通用默认色不同；
+ * - 所有构建函数都返回全新 Deck，对象 / 视点 id 由 crypto.randomUUID 生成。
+ *
+ * 数据流：buildTemplateDeck -> template.build(title) -> 完整的 Deck -> 由调用方落库。
+ */
+
 import type {
   Deck,
   FontPreset,
@@ -12,6 +29,15 @@ import { createDeck } from './deck';
 import { DEFAULT_DISTANCE, DEFAULT_HOLD } from './constants';
 import { layoutText } from './text';
 
+/**
+ * 模板内部使用的文本对象工厂。
+ *
+ * @param args 文本内容、位置、行宽与字号等；z 默认 0，字体默认 sans，
+ *             行高默认 1.3，对齐默认居中，颜色默认暖白，不透明度默认 100
+ * @returns 文本对象；高度由 layoutText 按内容测量
+ *
+ * 与 deck.createTextObject 的区别：不依赖当前视角，位置完全由模板写死。
+ */
 function textObject(args: {
   name: string;
   text: string;
@@ -54,6 +80,14 @@ function textObject(args: {
   };
 }
 
+/**
+ * 模板内部使用的形状对象工厂。
+ *
+ * @param args 形状种类、中心坐标、宽高、填充色；z 默认 0，不透明度默认 100
+ * @returns 无描边、无旋转的形状对象
+ *
+ * 光晕 / 背景卡等装饰性形状通常使用负的 z 值，确保位于文字下层。
+ */
 function shapeObject(args: {
   name: string;
   shape: ShapeKind;
@@ -84,10 +118,27 @@ function shapeObject(args: {
   };
 }
 
+/**
+ * 便捷构造相机视角。
+ *
+ * @param distance 相机到目标点的距离（默认取景距离的倍数常用来做推近 / 拉远）
+ * @param x / y / z 相机看向的目标点世界坐标
+ * @param yaw      水平环绕角（弧度），用于轻微侧转
+ * @param pitch    俯仰角（弧度），正值俯视
+ * @returns ViewState
+ */
 function view(distance: number, x = 0, y = 0, yaw = 0, pitch = 0, z = 0): ViewState {
   return { target: { x, y, z }, distance, yaw, pitch };
 }
 
+/**
+ * 构造视点。
+ *
+ * @param viewState 取景参数
+ * @param options   duration 过渡时长（默认 1.2 秒）、hold 停留时长（默认 DEFAULT_HOLD）、
+ *                  notes 演讲者备注
+ * @returns Frame；id 自动生成
+ */
 function frame(
   name: string,
   viewState: ViewState,
@@ -103,18 +154,38 @@ function frame(
   };
 }
 
+/** 内置模板 id 联合类型，与 DECK_TEMPLATES 中的 id 一一对应。 */
 export type TemplateId = 'cover' | 'launch' | 'dashboard' | 'roam';
 
+/**
+ * 模板描述：元数据（用于新建面板展示）+ 构建函数。
+ * 构建函数是纯工厂：每次调用都返回全新的对象与 id，可反复套用。
+ */
 export interface DeckTemplate {
+  /** 模板标识。 */
   id: TemplateId;
+  /** 展示名称。 */
   name: string;
+  /** 一句话说明，列出适用场景。 */
   description: string;
+  /** 该模板的主背景色，用于面板预览。 */
   background: string;
+  /** 该模板的强调色，用于面板预览的色块。 */
   accent: string;
+  /** 预置视点数量（仅用于展示，实际以 build 结果为准）。 */
   frameCount: number;
+  /** 以给定标题构造完整作品。 */
   build: (title: string) => Deck;
 }
 
+/**
+ * 构建「深色科技封面」模板：大标题 + 光晕装饰 + 三段推镜。
+ *
+ * @param title 作品标题
+ * @returns 3 个视点的封面作品
+ *
+ * 视点节奏：全景 -> 推近主标题 -> 轻微后撤收尾，适合提案开场。
+ */
 function buildCover(title: string): Deck {
   const deck = createDeck(title);
   return {
@@ -198,6 +269,14 @@ function buildCover(title: string): Deck {
   };
 }
 
+/**
+ * 构建「产品发布」模板：标题、一句话介绍与三列参数卡。
+ *
+ * @param title 作品标题
+ * @returns 4 个视点的发布页作品
+ *
+ * 参数卡使用圆角矩形作为底、三个文本块左右排列，视点先全景再聚焦标题、下移讲卖点。
+ */
 function buildLaunch(title: string): Deck {
   const deck = createDeck(title);
   return {
@@ -348,8 +427,18 @@ function buildLaunch(title: string): Deck {
   };
 }
 
+/**
+ * 构建「数据看板」模板：三组指标 + 柱状图。
+ *
+ * @param title 作品标题
+ * @returns 3 个视点的数据页作品
+ *
+ * bars 数组同时描述柱高与配色，后续按索引等间距（210）横向排布，
+ * 柱子的 y 以坐标轴为基线向上生长，因此取 `336 - height / 2` 作为中心点。
+ */
 function buildDashboard(title: string): Deck {
   const deck = createDeck(title);
+  // 每根柱子的高度与填充色；颜色从品牌青绿过渡到琥珀与天蓝，用于区分指标
   const bars = [
     { height: 150, fill: '#2DD4BF' },
     { height: 260, fill: '#14B8A6' },
@@ -490,6 +579,15 @@ function buildDashboard(title: string): Deck {
   };
 }
 
+/**
+ * 构建「空间漫游」模板：内容分布在多个深度层，镜头沿路径穿行。
+ *
+ * @param title 作品标题
+ * @returns 5 个视点的空间漫游作品
+ *
+ * 这是最能体现「一个空间、多条路径」的模板：三处光斑放在 z=-600 / -1200 / -1800
+ * 的不同深度，视点依次转向左侧、向前、深入右下角，最后拉远回望。
+ */
 function buildRoam(title: string): Deck {
   const deck = createDeck(title);
   return {
@@ -636,6 +734,10 @@ function buildRoam(title: string): Deck {
   };
 }
 
+/**
+ * 全部内置模板列表，顺序即新建面板中的展示顺序。
+ * 新增模板时需同步扩展 TemplateId，并保证 frameCount 与实际视点数量一致。
+ */
 export const DECK_TEMPLATES: DeckTemplate[] = [
   {
     id: 'cover',
@@ -675,6 +777,16 @@ export const DECK_TEMPLATES: DeckTemplate[] = [
   },
 ];
 
+/**
+ * 按模板 id 构建作品。
+ *
+ * @param id    模板标识
+ * @param title 作品标题
+ * @returns 全新 Deck
+ * @throws id 不在 DECK_TEMPLATES 中时抛出「模板不存在」
+ *
+ * 不访问存储；调用方负责把结果写入 IndexedDB 并设置当前作品。
+ */
 export function buildTemplateDeck(id: TemplateId, title: string): Deck {
   const template = DECK_TEMPLATES.find((item) => item.id === id);
   if (!template) throw new Error('模板不存在');

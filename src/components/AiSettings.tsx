@@ -1,3 +1,24 @@
+/**
+ * AiSettings.tsx —— AI 与 MCP 设置弹窗
+ *
+ * 组件职责：
+ * - 配置 OpenAI 兼容的大模型接口：接口地址、模型名称与 API Key（仅保存在本机浏览器）；
+ * - 测试对话连通性，并额外探测当前模型 / 接口是否支持工具调用；
+ * - 配置创作行为：是否自动执行模型给出的操作、是否随请求发送画板文字正文；
+ * - 导出工作区脱敏快照（供 MCP 读取），以及复制 MCP 客户端配置片段。
+ *
+ * 主要交互 / 副作用：
+ * - 保存前会校验接口地址与模型名称非空，并去除首尾空白；
+ * - 「测试连接」会真实发起一次对话请求，再探测工具调用能力；
+ * - 「清除」会删除本机配置并立即回填默认值；
+ * - 所有密钥只写 localStorage，不会进入工程、快照或 MCP 数据。
+ *
+ * 与其他模块的关系：
+ * - 请求与配置读写来自 lib/ai；工具定义来自 lib/aiTools；
+ * - 快照构造来自 lib/snapshot，存储枚举与下载工具来自 lib/storage / lib/exportVideo；
+ * - 弹窗外壳复用 ui 中的 Modal，配置结果通过 onSave 回传给 AiPanel。
+ */
+
 import { useState } from 'react';
 import type { Deck } from '../types';
 import {
@@ -16,6 +37,8 @@ import { toast } from '../store/uiStore';
 import { Modal } from './ui';
 import { Icon } from './Icon';
 
+// 展示给用户的 MCP 客户端配置示例：本地 Node 脚本 + 工作区快照文件路径。
+// 这里只是静态文本，复制后由用户粘贴到自己的 MCP 客户端配置中。
 const MCP_CONFIG = `{
   "mcpServers": {
     "3d-slide": {
@@ -27,21 +50,34 @@ const MCP_CONFIG = `{
 }`;
 
 interface AiSettingsProps {
+  /** 打开弹窗时的当前配置。 */
   config: AiConfig;
+  /** 保存成功后回传新配置，供 AiPanel 立即生效。 */
   onSave: (config: AiConfig) => void;
+  /** 关闭弹窗。 */
   onClose: () => void;
 }
 
+/**
+ * AI 设置弹窗主组件。
+ *
+ * 内部使用 draft 作为可编辑副本，所有输入先改 draft，点击「保存设置」才提交；
+ * 清除配置会立即写入默认值并关闭，不经过草稿。
+ *
+ * @param props 见 AiSettingsProps
+ */
 export function AiSettings({ config, onSave, onClose }: AiSettingsProps) {
   const [draft, setDraft] = useState<AiConfig>(config);
   const [testing, setTesting] = useState(false);
   const [probe, setProbe] = useState<{ tone: 'ok' | 'warn' | 'error'; text: string } | null>(null);
 
+  /** 局部更新草稿；任何修改都会清空上一次的连接探测结果，避免展示过期状态。 */
   const updateDraft = (patch: Partial<AiConfig>) => {
     setDraft((prev) => ({ ...prev, ...patch }));
     setProbe(null);
   };
 
+  /** 保存配置：校验必填项、去除首尾空白，写入本机并通知父组件。 */
   const save = () => {
     if (!draft.baseUrl.trim() || !draft.model.trim()) {
       toast('请填写接口地址与模型名称', 'error');
@@ -59,6 +95,14 @@ export function AiSettings({ config, onSave, onClose }: AiSettingsProps) {
     onClose();
   };
 
+  /**
+   * 测试连接与工具调用能力。
+   *
+   * 分两步：
+   * 1. chatCompletion 发起一次极短对话，验证地址、密钥与模型是否可用；
+   * 2. probeToolSupport 在对话中附带工具定义，验证接口是否真的支持 function call。
+   * 两步结果合并成一条提示：工具不可用时视为「警告」而非失败。
+   */
   const test = async () => {
     if (testing) return;
     if (!draft.model.trim()) {
@@ -89,6 +133,13 @@ export function AiSettings({ config, onSave, onClose }: AiSettingsProps) {
     }
   };
 
+  /**
+   * 导出工作区脱敏快照。
+   *
+   * 汇总所有作品、资源元数据与文件夹结构，交给 buildWorkspaceSnapshot
+   * 生成不含资源文件内容、缩略图与密钥的结构化 JSON，并以文件形式下载。
+   * includeText 决定是否包含画板文字正文。
+   */
   const exportSnapshot = async () => {
     try {
       const summaries = await listDecks();
@@ -108,6 +159,7 @@ export function AiSettings({ config, onSave, onClose }: AiSettingsProps) {
     }
   };
 
+  /** 把 MCP 配置示例写入剪贴板；浏览器拒绝剪贴板权限时提示手动复制。 */
   const copyMcp = async () => {
     try {
       await navigator.clipboard.writeText(MCP_CONFIG);

@@ -1,3 +1,23 @@
+/**
+ * ExportDialog.tsx —— 视频 / PNG 序列离线导出对话框
+ *
+ * 组件职责：
+ * - 让用户选择导出方式（浏览器实时编码的视频文件，或 PNG 帧 + ZIP 序列）；
+ * - 选择取景来源（当前视角固定时长，或按视点路径生成运镜时间线）、分辨率、帧率与格式；
+ * - 在对话框内创建一个离屏 SceneManager，把 3D 场景渲染到画布并逐帧提供给编码器 / 截图器；
+ * - 展示实时进度与状态，支持中途取消，并在关闭时释放渲染资源。
+ *
+ * 关键实现：
+ * - 导出使用独立场景，不干扰编辑器中的交互场景；像素比固定为 1，直接按目标分辨率渲染；
+ * - 生成的视频只有视频轨，所有媒体对象都会被静音，音频不会写入文件；
+ * - 时间线由 pathTimeline 生成：每个视点前 45% 的时长用于缓动飞行，其余时间停留。
+ *
+ * 与其他模块的关系：
+ * - 相机插值与缓动来自 lib/camera；
+ * - 录制、截图与下载封装在 lib/exportVideo；
+ * - 场景创建复用 three/SceneManager，以 present 模式渲染。
+ */
+
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Deck, Frame, ViewState } from '../types';
 import { easeInOut, lerpView } from '../lib/camera';
@@ -15,6 +35,7 @@ import { toast } from '../store/uiStore';
 import { FieldBlock, Modal, Segmented } from './ui';
 import { Icon } from './Icon';
 
+// 可选导出分辨率；id 同时作为界面状态值与下拉框 value
 const RESOLUTIONS = [
   { id: '720', label: '1280 × 720 · HD', width: 1280, height: 720 },
   { id: '1080', label: '1920 × 1080 · Full HD', width: 1920, height: 1080 },
@@ -22,25 +43,43 @@ const RESOLUTIONS = [
   { id: '2160', label: '3840 × 2160 · 4K', width: 3840, height: 2160 },
 ];
 
+// 可选帧率；以字符串保存，直接传给 Segmented 与 Number() 转换
 const FPS_OPTIONS = [
   { value: '24', label: '24' },
   { value: '30', label: '30' },
   { value: '60', label: '60' },
 ];
 
+/** 取景来源：path 按视点路径运镜，current 固定当前视角。 */
 type Source = 'path' | 'current';
+/** 导出产物类型：video 视频文件，png PNG 帧序列（ZIP 打包）。 */
 type Kind = 'video' | 'png';
 
+/**
+ * 导出时间线：总时长 + 按时间取对应相机视角的函数。
+ * 导出器每帧只需调用 at(elapsed) 即可得到该时刻的取景。
+ */
 interface Timeline {
   total: number;
   at: (time: number) => ViewState;
 }
 
+/** 深拷贝视角，避免导出过程中修改到原对象（尤其 target 是嵌套对象）。 */
 function copyView(view: ViewState): ViewState {
   return { ...view, target: { ...view.target } };
 }
 
-/** 按帧顺序生成相机时间线：进入新视点用段前 45% 的时间做缓动飞行，其余时间停留 */
+/**
+ * 按帧顺序生成相机时间线。
+ *
+ * 每个视点的时长至少 1.5 秒；进入第 n 个视点时，用该段前 45% 的时间
+ * 从上一个视点缓动插值到目标视点，剩余 55% 保持不动（给观众阅读内容）。
+ * 第一个视点没有前驱，整段都停留在它自身的取景。
+ * 没有视点时返回 null，由调用方回退到固定视角时间线。
+ *
+ * @param frames 视点列表（已按演示顺序排列）
+ * @returns 时间线对象；无帧时为 null
+ */
 function pathTimeline(frames: Frame[]): Timeline | null {
   if (frames.length === 0) return null;
   const durations = frames.map((frame) => Math.max(1.5, Number.isFinite(frame.duration) ? frame.duration : 1));
@@ -50,6 +89,11 @@ function pathTimeline(frames: Frame[]): Timeline | null {
     starts.push(total);
     total += duration;
   }
+  /**
+   * 取指定时刻的视角。
+   * 先把时间夹在 [0, total]；再定位所在视点段；段内前 45% 做 from->to 的缓动插值，
+   * 之后的 55% 直接返回目标视点视角。
+   */
   const at = (time: number): ViewState => {
     const t = Math.max(0, Math.min(total, time));
     let index = durations.length - 1;
@@ -69,11 +113,25 @@ function pathTimeline(frames: Frame[]): Timeline | null {
 }
 
 interface ExportDialogProps {
+  /** 要导出的作品（对象、背景与视点路径）。 */
   deck: Deck;
+  /** 打开对话框时的当前取景；选择「当前视角」时使用。 */
   view: ViewState;
+  /** 关闭对话框。 */
   onClose: () => void;
 }
 
+/**
+ * 导出对话框主组件。
+ *
+ * @param deck 要导出的作品
+ * @param view 当前编辑器取景（固定视角导出的来源）
+ * @param onClose 关闭对话框
+ *
+ * 导出参数状态：
+ * - source 取景来源；resolutionId 目标分辨率；fps 帧率；
+ * - kind 导出方式；formatId 视频封装格式；holdSeconds 固定视角的时长（秒）。
+ */
 export function ExportDialog({ deck, view, onClose }: ExportDialogProps) {
   const formats = useMemo<VideoFormat[]>(() => availableVideoFormats(), []);
   const [source, setSource] = useState<Source>(deck.frames.length > 0 ? 'path' : 'current');
@@ -86,13 +144,16 @@ export function ExportDialog({ deck, view, onClose }: ExportDialogProps) {
   const [progress, setProgress] = useState(0);
   const [status, setStatus] = useState('');
 
+  // 离屏场景挂载容器；managerRef 保存场景实例；abortRef 用于取消录制 / 渲染
   const hostRef = useRef<HTMLDivElement>(null);
   const managerRef = useRef<SceneManager | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
+  // 当前选中的分辨率与视频格式；找不到时回退到默认项，保证导出始终有有效参数
   const resolution = RESOLUTIONS.find((item) => item.id === resolutionId) ?? RESOLUTIONS[1];
   const format = formats.find((item) => item.id === formatId) ?? formats[0] ?? null;
 
+  // 根据取景来源实时生成导出时间线：路径模式优先，路径不可用时回退到固定视角
   const timeline = useMemo<Timeline>(() => {
     if (source === 'path') {
       const path = pathTimeline(deck.frames);
@@ -101,6 +162,7 @@ export function ExportDialog({ deck, view, onClose }: ExportDialogProps) {
     return { total: holdSeconds, at: () => copyView(view) };
   }, [source, deck.frames, holdSeconds, view]);
 
+  // 卸载时兜底释放：取消进行中的导出并销毁离屏场景，避免 WebGL 上下文泄漏
   useEffect(() => {
     return () => {
       abortRef.current?.abort();
@@ -109,6 +171,10 @@ export function ExportDialog({ deck, view, onClose }: ExportDialogProps) {
     };
   }, []);
 
+  /**
+   * 关闭按钮：导出进行中时先发出取消信号并提示「正在取消」，
+   * 等导出流程自身清理完成后再真正关闭，避免直接关掉仍在写画布的渲染器。
+   */
   const handleClose = () => {
     if (busy) {
       abortRef.current?.abort();
@@ -118,6 +184,20 @@ export function ExportDialog({ deck, view, onClose }: ExportDialogProps) {
     onClose();
   };
 
+  /**
+   * 开始导出。
+   *
+   * 流程：
+   * 1. 创建离屏 SceneManager（autoStart=false，避免额外渲染循环），按目标分辨率 resize；
+   * 2. 同步作品数据、静音所有媒体、渲染首帧并等待素材就绪（最多 3.5 秒）；
+   * 3. 视频模式：recordCanvas 实时录制，每帧用 timeline 更新相机并重渲染；
+   *    PNG 模式：renderPngSequence 逐帧离线渲染并打包 ZIP；
+   * 4. 校验取消信号后下载文件并提示大小 / 帧数；
+   * 5. finally 中统一销毁场景、清空容器并解除忙碌态。
+   *
+   * 参数取值：分辨率决定输出宽高；fps 决定录制 / 采样帧率；
+   * format 决定编码器与文件扩展名；totalDuration 为时间线总时长（最少 0.5 秒）。
+   */
   const start = async () => {
     const host = hostRef.current;
     if (!host || busy) return;
@@ -219,6 +299,7 @@ export function ExportDialog({ deck, view, onClose }: ExportDialogProps) {
     }
   };
 
+  // 底部提示：预计时长与视点数；PNG 序列超过 1800 帧时提示会被截断
   const estimateLabel =
     source === 'path' && deck.frames.length > 0
       ? `约 ${timeline.total.toFixed(1)} 秒 · ${deck.frames.length} 个视点`

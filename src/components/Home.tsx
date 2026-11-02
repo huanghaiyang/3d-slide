@@ -1,3 +1,24 @@
+/**
+ * Home.tsx —— 首页（作品管理界面）
+ *
+ * 组件职责：
+ * - 列出浏览器本地存储中的所有作品，并展示标题、修改时间、对象数与视点数；
+ * - 提供新建空白作品、从内置模板创建、导入 .slide 工程文件三种入口；
+ * - 支持作品的重命名与删除（删除前二次确认），以及打开资源库与产品说明；
+ * - 为每个作品生成缩略图：优先使用已缓存的封面图，缺失时按对象布局即时拼装
+ *   一个轻量 DOM 缩略图，并串行补齐缺失封面以便下次直接复用。
+ *
+ * 主要交互 / 副作用：
+ * - 首次挂载与每次增删改后重新读取作品列表；
+ * - 新建 / 导入 / 模板创建都会先写入存储，再通过 onOpen 跳转到编辑器；
+ * - 封面生成任务用 coverJobs 去重，避免同一作品被重复计算。
+ *
+ * 与其他模块的关系：
+ * - 列表、封面与持久化操作来自 lib/storage；
+ * - 模板来自 lib/templates，导入校验与重名处理来自 lib/validate；
+ * - 缩略图中的对象渲染仅为 CSS 近似，不启动 3D 渲染器，保证首页加载性能。
+ */
+
 import { useEffect, useRef, useState } from 'react';
 import type { SlideObject } from '../types';
 import { LIMITS } from '../lib/constants';
@@ -25,6 +46,17 @@ interface HomeProps {
   onOpenAssets: () => void;
 }
 
+/**
+ * 作品缩略图。
+ *
+ * 两种渲染方式：
+ * 1. 有缓存封面（cover.dataUrl）时直接展示图片，性能最好；
+ * 2. 没有封面时，按可见对象的世界坐标计算包围盒，等比缩放后投影成 CSS 绝对定位元素，
+ *    做一张「结构示意」缩略图。图片 / SVG 用 img，媒体与模型用图标，形状与文本按样式近似。
+ *
+ * @param summary 作品摘要（背景色、对象列表、是否损坏等）
+ * @param cover 可选的封面缓存
+ */
 function DeckThumb({ summary, cover }: { summary: DeckSummary; cover?: DeckCover }) {
   if (cover?.dataUrl) {
     return (
@@ -34,7 +66,9 @@ function DeckThumb({ summary, cover }: { summary: DeckSummary; cover?: DeckCover
       </div>
     );
   }
+  // 只统计可见对象，隐藏对象不参与缩略图构图
   const objects = summary.objects.filter((object) => object.visible);
+  // 用对象中心 + 宽高计算整体包围盒；初始值取正负无穷，空集合时后续会回退到 0
   const bounds = objects.reduce(
     (acc, object) => ({
       minX: Math.min(acc.minX, object.x - object.width / 2),
@@ -44,12 +78,19 @@ function DeckThumb({ summary, cover }: { summary: DeckSummary; cover?: DeckCover
     }),
     { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity },
   );
+  // 横向视野至少 1600，避免只有少量小对象时被放得过大；额外 12% 留白防止贴边
   const spanX = Math.max(bounds.maxX - bounds.minX, 1600) * 1.12;
   const centerX = Number.isFinite(bounds.minX) ? (bounds.minX + bounds.maxX) / 2 : 0;
   const centerY = Number.isFinite(bounds.minY) ? (bounds.minY + bounds.maxY) / 2 : 0;
+  // 缩略图按 16:9 取景，与编辑器的安全框比例保持一致
   const spanY = spanX * 0.5625;
+  // 按 z 值从低到高绘制，保证缩略图中的前后遮挡关系与 3D 场景一致
   const ordered = [...objects].sort((a, b) => a.z - b.z);
 
+  /**
+   * 把对象的世界坐标换算成缩略图内的百分比定位。
+   * 尺寸同样按视野比例缩放，并限制最小 2.5% / 最大 82%，避免过小不可见或撑出容器。
+   */
   const place = (object: SlideObject) => {
     const width = Math.max(2.5, (object.width / spanX) * 82);
     const height = Math.max(2.5, (object.height / spanY) * 82);
@@ -128,6 +169,12 @@ function DeckThumb({ summary, cover }: { summary: DeckSummary; cover?: DeckCover
   );
 }
 
+/**
+ * 首页主组件。
+ *
+ * @param onOpen 打开指定作品（跳转到编辑器）
+ * @param onOpenAssets 打开资源库页面
+ */
 export function Home({ onOpen, onOpenAssets }: HomeProps) {
   const [decks, setDecks] = useState<DeckSummary[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -139,6 +186,14 @@ export function Home({ onOpen, onOpenAssets }: HomeProps) {
   const importRef = useRef<HTMLInputElement>(null);
   const coverJobs = useRef(new Set<string>());
 
+  /**
+   * 合并已缓存封面，并为缺失的作品生成新封面。
+   *
+   * 缓存命中条件：封面存在、有 dataUrl，且封面记录的 deckUpdatedAt 与作品 updatedAt 一致
+   * （作品被修改后旧封面自动失效）。损坏作品与空作品不生成封面。
+   * 生成任务逐张串行执行，避免同时创建大量离屏渲染任务拖慢首页；
+   * coverJobs 记录「id:updatedAt」，防止并发刷新时同一作品重复渲染。
+   */
   const generateCovers = (summaries: DeckSummary[], cached: DeckCover[]) => {
     const map: Record<string, DeckCover> = {};
     const missing: DeckSummary[] = [];
@@ -167,6 +222,11 @@ export function Home({ onOpen, onOpenAssets }: HomeProps) {
     })();
   };
 
+  /**
+   * 读取作品列表与封面缓存。
+   * 封面缓存读取失败时降级为空数组，不影响作品列表展示；
+   * 列表读取失败则置空列表并记录错误、弹出提示。
+   */
   const load = async () => {
     try {
       const [summaries, cached] = await Promise.all([
@@ -188,8 +248,10 @@ export function Home({ onOpen, onOpenAssets }: HomeProps) {
     void load();
   }, []);
 
+  /** 当前已有作品标题集合，用于新建 / 导入时自动去重命名。 */
   const titles = () => (decks ?? []).map((item) => item.title);
 
+  /** 新建空白作品：自动生成不重名的标题，写入存储后直接打开编辑器。 */
   const create = async () => {
     if (busy) return;
     setBusy(true);
@@ -204,6 +266,7 @@ export function Home({ onOpen, onOpenAssets }: HomeProps) {
     }
   };
 
+  /** 从内置模板生成作品：模板 id 决定初始对象与视点，标题自动去重。 */
   const createFromTemplate = async (template: DeckTemplate) => {
     if (busy) return;
     setBusy(true);
@@ -219,6 +282,11 @@ export function Home({ onOpen, onOpenAssets }: HomeProps) {
     }
   };
 
+  /**
+   * 导入 .slide 工程文件。
+   * 先做扩展名与体积校验，再由 parseSlideFile 做结构校验与字段修正；
+   * 导入时标题会自动去重，若存在被修正的字段则提示修正项数量。
+   */
   const importFile = async (file: File) => {
     if (!file.name.toLowerCase().endsWith('.slide')) {
       toast('请选择 .slide 工程文件', 'error');
@@ -251,6 +319,7 @@ export function Home({ onOpen, onOpenAssets }: HomeProps) {
     }
   };
 
+  /** 确认重命名：重新读取完整作品再写回，避免用摘要覆盖掉对象与视点数据。 */
   const confirmRename = async () => {
     if (!renameTarget) return;
     const title = renameDraft.trim();
@@ -270,6 +339,7 @@ export function Home({ onOpen, onOpenAssets }: HomeProps) {
     }
   };
 
+  /** 确认删除：从本地存储移除作品后重新拉取列表，一并清理其封面缓存展示。 */
   const confirmDelete = async () => {
     if (!deleteTarget) return;
     try {
@@ -282,6 +352,7 @@ export function Home({ onOpen, onOpenAssets }: HomeProps) {
     }
   };
 
+  /** 打开作品；数据损坏（broken 有值）时提示原因而不是进入编辑器。 */
   const open = (summary: DeckSummary) => {
     if (summary.broken) {
       toast(`无法打开：${summary.broken}`, 'error');

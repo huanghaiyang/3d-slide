@@ -1,3 +1,21 @@
+/**
+ * AssetsPage.tsx —— 素材库页面与资源浏览器
+ *
+ * 职责：
+ * - 提供素材的浏览、搜索、类型筛选、文件夹归类、回收站、上传、预览、重命名与移动等管理能力。
+ * - 同一套 AssetBrowser 支持两种模式：manage（资源库页面）与 pick（编辑器内选择素材插入画板）。
+ *
+ * 数据流：
+ * - 元数据（AssetMeta）与文件内容分开存储：元数据存于 IndexedDB，内容通过 src（dataURL）保存；
+ *   listAssetMetas / listFolders 读取列表，getAssetSource 按需读取大文件内容，避免一次性加载全部素材。
+ * - 上传使用 readAssetFile 解析类型、尺寸、时长并生成缩略图；解析失败的文件会单独报错，不阻断其他文件。
+ * - Lottie 使用 lottie-web 动态加载渲染预览，并为旧版无缩略图的资源补渲染首帧。
+ *
+ * 依赖：
+ * - lib/assets.ts：类型判断、标签、文件夹面包屑 / 后代查询、体积格式化与文件解析。
+ * - lib/storage.ts：素材与文件夹的读写、回收站 / 彻底删除 / 还原。
+ * - store/uiStore.ts 的 toast 用于操作反馈；ModelViewer 负责 3D 模型预览。
+ */
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { AssetFolder, AssetKind, AssetMeta } from '../lib/assets';
 import {
@@ -31,15 +49,21 @@ import { Icon } from './Icon';
 import { ModelViewer } from './ModelViewer';
 import { ConfirmDialog, Modal } from './ui';
 
+/** 浏览器工作模式：manage 为完整管理，pick 为选择素材插入画板。 */
 type BrowserMode = 'manage' | 'pick';
 
 interface AssetBrowserProps {
   mode: BrowserMode;
   /** 选择模式下允许插入的类型，未限定则全部 */
   kinds?: AssetKind[];
+  /** pick 模式确认插入时回调：asset 为元数据，src 为已读取的资源内容（dataURL）。 */
   onPick?: (asset: AssetMeta, src: string) => void;
 }
 
+/**
+ * 当前弹出的对话框描述。
+ * 用一个可辨识联合（type 字段）统一管理所有弹窗，保证同一时间只显示一个对话框。
+ */
 type Dialog =
   | { type: 'newFolder'; parentId: string | null }
   | { type: 'renameFolder'; folder: AssetFolder }
@@ -51,13 +75,20 @@ type Dialog =
   | { type: 'emptyTrash' }
   | null;
 
+/** 上传文件选择框接受的 MIME 类型集合：常见图片 / 视频 / 音频 + 3D 模型扩展名。 */
 const ACCEPT_ALL = `image/png,image/jpeg,image/webp,image/gif,video/*,audio/*,${MODEL_ACCEPT}`;
 
+/**
+ * 生成资源 / 文件夹 id。
+ * 优先使用 crypto.randomUUID；在不支持的环境（旧浏览器、非安全上下文）退化为
+ * 时间戳 + 随机串，保证本地唯一即可。
+ */
 function uid(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID();
   return `a-${Math.random().toString(36).slice(2)}-${Date.now().toString(36)}`;
 }
 
+/** 把资源类型映射为图标名；lottie / file 统一用文本图标兜底。 */
 function kindIcon(kind: AssetKind): 'image' | 'video' | 'audio' | 'model' | 'text' {
   if (kind === 'image') return 'image';
   if (kind === 'video') return 'video';
@@ -66,6 +97,10 @@ function kindIcon(kind: AssetKind): 'image' | 'video' | 'audio' | 'model' | 'tex
   return 'text';
 }
 
+/**
+ * 通用单输入框对话框：用于新建文件夹、重命名文件夹 / 资源。
+ * 名称由外部 draft 状态统一持有，回车等同确认；maxLength 与存储层的名称上限保持一致。
+ */
 function PromptDialog({
   title,
   label,
@@ -116,6 +151,12 @@ function PromptDialog({
   );
 }
 
+/**
+ * 左侧文件夹树：递归渲染文件夹层级，并附带根目录「全部资源」和「回收站」入口。
+ *
+ * counts 为每个文件夹直接包含的资源数（不含子文件夹）；
+ * depth 用于控制缩进，每层增加 12px，不额外维护树形数据结构。
+ */
 function FolderTree({
   folders,
   activeId,
@@ -137,6 +178,7 @@ function FolderTree({
 }) {
   const renderNodes = (parentId: string | null, depth: number): ReactNode[] =>
     folders
+      // 先按 parentId 找直接子级，再按创建时间升序保持稳定顺序；递归时重复同样的过滤逻辑。
       .filter((folder) => folder.parentId === parentId)
       .sort((a, b) => a.createdAt - b.createdAt)
       .map((folder) => {
@@ -190,6 +232,10 @@ function FolderTree({
   );
 }
 
+/**
+ * 资源卡片缩略图：优先显示上传时生成的缩略 dataURL；
+ * 没有缩略图（旧资源 / 解析失败）时退化为类型图标，视频额外叠加播放角标。
+ */
 function AssetThumb({ asset }: { asset: AssetMeta }) {
   if (asset.thumb) {
     return <img src={asset.thumb} alt="" loading="lazy" />;
@@ -202,6 +248,14 @@ function AssetThumb({ asset }: { asset: AssetMeta }) {
   );
 }
 
+/**
+ * Lottie 动画预览：解析资源内容后用 lottie-web 的 canvas 渲染器循环播放。
+ *
+ * 副作用与生命周期：
+ * - 动态 import('lottie-web')，避免主包体积过大；加载期间组件可能已卸载，用 cancelled 标记丢弃结果。
+ * - 动画实例在清理函数中 destroy，防止切换预览时残留 RAF 与 canvas 引用。
+ * - 解析或加载失败时只显示错误文案，资源文件本身仍完整保存在库中。
+ */
 function LottiePreview({ src }: { src: string }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
@@ -219,6 +273,7 @@ function LottiePreview({ src }: { src: string }) {
     let animation: AnimationItem | null = null;
     void import('lottie-web')
       .then(({ default: lottie }) => {
+        // 异步加载完成时若已卸载或宿主节点消失，则不再创建动画。
         if (cancelled || !hostRef.current) return;
         animation = lottie.loadAnimation({
           container: host,
@@ -235,6 +290,7 @@ function LottiePreview({ src }: { src: string }) {
         setError(reason instanceof Error ? reason.message : 'Lottie 加载失败');
       });
     return () => {
+      // 卸载或切换资源时销毁动画实例，并置空引用避免再次访问。
       cancelled = true;
       animation?.destroy();
       animation = null;
@@ -252,6 +308,11 @@ function LottiePreview({ src }: { src: string }) {
   return <div className="asset-preview-lottie" ref={hostRef} aria-label="Lottie 动画预览" />;
 }
 
+/**
+ * 根据资源类型渲染预览内容：
+ * 图片 / 视频 / 音频直接使用 src；Lottie 交给 LottiePreview；模型交给 ModelViewer；
+ * 其余类型（如压缩包等）只提示不支持预览。
+ */
 function AssetPreviewContent({ asset, src }: { asset: AssetMeta; src: string }) {
   if (asset.kind === 'image') {
     return <img className="asset-preview-img" src={src} alt={asset.name} />;
@@ -283,6 +344,10 @@ function AssetPreviewContent({ asset, src }: { asset: AssetMeta; src: string }) 
   );
 }
 
+/**
+ * 预览弹窗底部的元数据网格：类型、大小、尺寸、时长、格式与添加时间。
+ * 缺失信息统一显示为破折号，避免出现 undefined / NaN 字样。
+ */
 function AssetMetaGrid({ asset }: { asset: AssetMeta }) {
   const dims = asset.width && asset.height ? `${asset.width} × ${asset.height}` : '—';
   return (
@@ -315,6 +380,16 @@ function AssetMetaGrid({ asset }: { asset: AssetMeta }) {
   );
 }
 
+/**
+ * 资源浏览器主组件。
+ *
+ * 状态分组：
+ * - 数据：assets / folders（全量元数据），ready 表示首次读取完成。
+ * - 位置与筛选：folderId / trashMode / kind / query 决定当前可见列表。
+ * - 交互：selectedIds（多选）、dialog（当前弹窗）、draft（输入框草稿）、
+ *   previewAsset / previewSrc（预览资源及其按需读取的内容）。
+ * - uploading 用于禁用上传按钮与文件夹操作，防止并发写入造成列表错乱。
+ */
 export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
   const [assets, setAssets] = useState<AssetMeta[]>([]);
   const [folders, setFolders] = useState<AssetFolder[]>([]);
@@ -332,7 +407,9 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
   const fileInput = useRef<HTMLInputElement>(null);
   const thumbBackfill = useRef(new Set<string>());
 
+  /** 重新读取全部元数据与文件夹，用于每次写操作后刷新界面。 */
   const reload = async () => {
+    // 两个列表互不依赖，并行读取减少一次等待；由调用方统一 setState。
     const [metas, nextFolders] = await Promise.all([listAssetMetas(), listFolders()]);
     setAssets(metas);
     setFolders(nextFolders);
@@ -342,6 +419,7 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
     void reload()
       .then(() => setReady(true))
       .catch((error: unknown) => {
+        // 即使读取失败也要结束 loading 状态，否则界面会一直停留在「正在读取资源库…」。
         setReady(true);
         toast(error instanceof Error ? error.message : '资源库读取失败', 'error');
       });
@@ -352,6 +430,8 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
       setPreviewSrc(null);
       return;
     }
+    // 切换预览对象时先清空旧内容，避免短暂显示上一个资源；
+    // cancelled 防止快速切换时旧请求晚到并覆盖新资源。
     let cancelled = false;
     setPreviewSrc(null);
     void getAssetSource(previewAsset.id).then((src) => {
@@ -362,11 +442,14 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
     };
   }, [previewAsset]);
 
+  // 按删除标记拆分为「正常资源」与「回收站资源」，后续列表与计数都基于这两份派生数据。
   const activeAssets = useMemo(() => assets.filter((asset) => asset.deletedAt === null), [assets]);
   const trashedAssets = useMemo(() => assets.filter((asset) => asset.deletedAt !== null), [assets]);
 
   // 旧版上传的 Lottie 没有首帧缩略图，读取资源内容后补渲染一帧并回填
   useEffect(() => {
+    // thumbBackfill 记录已尝试过的 id：activeAssets 每次更新都会触发本 effect，
+    // 用 Set 防止对同一资源重复读取与渲染。
     const missing = activeAssets.filter(
       (asset) => asset.kind === 'lottie' && !asset.thumb && !thumbBackfill.current.has(asset.id),
     );
@@ -375,12 +458,14 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
     void (async () => {
       for (const asset of missing) {
         if (cancelled) return;
+        // 先登记再处理，避免本轮中途再次触发 effect 时重复。
         thumbBackfill.current.add(asset.id);
         const src = await getAssetSource(asset.id);
         if (!src) continue;
         const thumb = await renderLottieThumbnail(src);
         if (cancelled || !thumb) continue;
         await updateAssetMeta(asset.id, { thumb });
+        // 局部更新列表而不是整表 reload，减少一次 IndexedDB 全量读取。
         setAssets((prev) => prev.map((item) => (item.id === asset.id ? { ...item, thumb } : item)));
       }
     })();
@@ -389,6 +474,7 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
     };
   }, [activeAssets]);
 
+  // 每个文件夹直接包含的资源数量（不含子文件夹），用于树节点的计数角标。
   const counts = useMemo(() => {
     const map = new Map<string, number>();
     for (const asset of activeAssets) {
@@ -397,11 +483,13 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
     return map;
   }, [activeAssets]);
 
+  // 当前文件夹及其所有后代文件夹的 id 集合；选中父文件夹时连同子文件夹资源一起展示。
   const folderScope = useMemo(
     () => new Set(folderId ? folderDescendantIds(folders, folderId) : []),
     [folderId, folders],
   );
 
+  // 可见列表的计算顺序：来源（回收站 / 正常）→ 文件夹范围 → 类型 → 名称搜索 → 按添加时间倒序。
   const visible = useMemo(() => {
     const base = trashMode ? trashedAssets : activeAssets;
     const text = query.trim().toLowerCase();
@@ -417,6 +505,7 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
   }, [trashMode, trashedAssets, activeAssets, folderId, folderScope, kind, query]);
 
   const allowedKinds = useMemo(() => new Set(kinds ?? []), [kinds]);
+  // pick 模式可能限定可插入类型：有筛选时类型栏只展示允许项，无筛选时展示全部类型。
   const hasKindFilter = kinds !== undefined && kinds.length > 0;
   const kindOptions = useMemo(
     () => ['all' as const, ...(hasKindFilter ? kinds! : ASSET_KIND_ORDER)],
@@ -424,20 +513,32 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
   );
 
   useEffect(() => {
+    // 列表变化（删除、筛选、切换文件夹）后剔除已不可见的选中项；长度不变则保持原引用避免重渲染。
     setSelectedIds((prev) => {
       const next = prev.filter((id) => visible.some((asset) => asset.id === id));
       return next.length === prev.length ? prev : next;
     });
   }, [visible]);
 
+  /** 判断该资源在当前模式下是否可插入（未限定类型时恒为 true）。 */
   const canPick = (asset: AssetMeta) => !hasKindFilter || allowedKinds.has(asset.kind);
 
+  /** 切换单个资源的选中状态（多选模式下的点击行为）。 */
   const toggleSelect = (asset: AssetMeta) => {
     setSelectedIds((prev) =>
       prev.includes(asset.id) ? prev.filter((id) => id !== asset.id) : [...prev, asset.id],
     );
   };
 
+  /**
+   * 上传并解析一批文件。
+   *
+   * 流程：逐个 readAssetFile（读取内容、类型、尺寸 / 时长，并生成缩略图）
+   * → 生成元数据（newFolder 为当前文件夹，回收站中上传则落到根目录）
+   * → putAssetMeta 分别写入元数据与内容 → 全部结束后统一 reload。
+   *
+   * 单个文件失败只记录错误、不中断后续文件；最后只弹第一条错误提示，避免刷屏。
+   */
   const uploadFiles = async (files: FileList | null) => {
     if (!files || files.length === 0 || uploading) return;
     const list = Array.from(files);
@@ -446,12 +547,14 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
     const failed: string[] = [];
     for (const file of list) {
       try {
+        // readAssetFile 承担大部分素材解析：MIME 判断、dataURL 读取、图片 / 视频尺寸与缩略图。
         const payload = await readAssetFile(file);
         const now = Date.now();
         await putAssetMeta(
           {
             id: uid(),
             ...payload.meta,
+            // 在回收站界面里上传时没有有效文件夹上下文，直接放到根目录。
             folderId: trashMode ? null : folderId,
             createdAt: now,
             updatedAt: now,
@@ -461,6 +564,7 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
         );
         ok += 1;
       } catch (error) {
+        // 记录「文件名：原因」，方便用户判断是哪个文件解析失败。
         failed.push(`${file.name}：${error instanceof Error ? error.message : '读取失败'}`);
       }
     }
@@ -470,6 +574,10 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
     if (failed.length > 0) toast(failed[0], 'error');
   };
 
+  /**
+   * 提交名称类对话框（新建 / 重命名文件夹、重命名资源）。
+   * 名称统一 trim 并截断到 60 字；成功后关闭弹窗并重新读取列表。
+   */
   const submitPrompt = async () => {
     if (!dialog) return;
     const name = draft.trim();
@@ -495,6 +603,7 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
     }
   };
 
+  /** 批量移动资源到目标文件夹（null 表示根目录），随后清空选中并刷新。 */
   const moveAssets = async (targetId: string | null) => {
     if (!dialog || dialog.type !== 'moveAssets') return;
     try {
@@ -510,6 +619,10 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
     }
   };
 
+  /**
+   * 删除文件夹：先收集该文件夹及所有后代 id，把其中资源移到根目录，
+   * 再删除文件夹记录；若当前正停留在被删目录，则退回「全部资源」。
+   */
   const removeFolder = async (folder: AssetFolder) => {
     try {
       const ids = folderDescendantIds(folders, folder.id);
@@ -528,6 +641,7 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
     }
   };
 
+  /** 移入回收站（软删除）：只标记 deletedAt，内容与元数据保留，可还原。 */
   const confirmTrash = async (ids: string[]) => {
     try {
       await trashAssets(ids);
@@ -540,6 +654,7 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
     }
   };
 
+  /** 彻底删除（物理删除）：元数据与资源内容一并清除，无法恢复。 */
   const confirmDeleteForever = async (ids: string[]) => {
     try {
       await deleteAssetsPermanently(ids);
@@ -552,6 +667,7 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
     }
   };
 
+  /** 从回收站还原资源：清除 deletedAt 标记，资源回到原来的文件夹。 */
   const restoreSelected = async (ids: string[]) => {
     try {
       await restoreAssets(ids);
@@ -563,6 +679,7 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
     }
   };
 
+  /** 清空回收站：物理删除所有已标记删除的资源，返回实际清理数量。 */
   const confirmEmptyTrash = async () => {
     try {
       const count = await emptyAssetTrash();
@@ -720,6 +837,7 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
 
         {selectedIds.length > 0 && (
           <div className="asset-bulk">
+            {/* 批量操作栏：回收站中提供还原 / 彻底删除，正常目录中提供移动 / 移入回收站 */}
             <span>已选 {selectedIds.length} 项</span>
             {trashMode ? (
               <>
@@ -771,11 +889,13 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
             {visible.map((asset) => {
               const selected = selectedIds.includes(asset.id);
               const pickable = canPick(asset);
+              // 双击始终打开预览；卡片右上角操作区会阻止冒泡，避免触发选择逻辑。
               return (
                 <article
                   key={asset.id}
                   className={`asset-card ${selected ? 'is-selected' : ''} ${!pickable ? 'is-disabled' : ''}`}
                   onClick={() => {
+                    // 卡片单击语义：pick 模式打开预览准备插入；manage 模式切换多选。
                     if (mode === 'pick') {
                       setPreviewAsset(asset);
                     } else {
@@ -903,6 +1023,7 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
           }
         >
           <div className="asset-preview">
+            {/* previewSrc 三态：null 读取中 / '' 内容缺失 / 非空可预览 */}
             {previewSrc === null ? (
               <div className="asset-preview-loading">正在读取资源内容…</div>
             ) : previewSrc === '' ? (
@@ -1011,6 +1132,10 @@ interface AssetsPageProps {
   onBack: () => void;
 }
 
+/**
+ * 素材库独立页面：顶部标题栏 + 完整管理模式的资源浏览器。
+ * 该页面不依赖 deckStore，仅操作本地 IndexedDB 中的素材数据。
+ */
 export function AssetsPage({ onBack }: AssetsPageProps) {
   return (
     <div className="assets-page">

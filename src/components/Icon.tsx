@@ -1,5 +1,26 @@
+/**
+ * Icon.tsx —— 全项目统一的线性图标组件
+ *
+ * 组件职责：
+ * - 用内联 SVG 渲染界面所需的全部图标，避免引入图标库与额外的网络 / 字体依赖；
+ * - 通过 IconName 联合类型约束可用的图标名，调用处拼错时能获得类型提示；
+ * - 图标风格统一：24 x 24 viewBox、无填充、1.7px 描边、圆角端点，颜色跟随父级文字色。
+ *
+ * 主要交互：
+ * - 纯展示组件，不接受点击等交互；需要交互时由外层按钮 / span 提供；
+ * - 支持透传任意 SVG 属性（className、style、onClick 等）；
+ * - 固定 aria-hidden="true"，图标本身不作为无障碍语义来源，语义由外层 aria-label 承担。
+ *
+ * 与其他模块的关系：
+ * - 编辑器内所有组件（TopBar、ObjectList、MediaPlayer、ui.tsx 等）均从这里取图标。
+ */
+
 import type { SVGProps, ReactNode } from 'react';
 
+/**
+ * 支持的图标名集合。
+ * 新增图标时需要同时在这里补上名称，并在下方 paths 中提供对应的 SVG 路径。
+ */
 export type IconName =
   | 'plus'
   | 'undo'
@@ -43,10 +64,18 @@ export type IconName =
   | 'gear';
 
 interface IconProps extends SVGProps<SVGSVGElement> {
+  /** 要渲染的图标名，必须是 IconName 中的值。 */
   name: IconName;
+  /** 图标边长（像素），同时用于 width 与 height，默认 18。 */
   size?: number;
 }
 
+/**
+ * 图标名到 SVG 内容的映射。
+ * 所有路径均为按 24 x 24 坐标系手工绘制的线性图标（几何图形用 rect / circle 表达），
+ * 以描边而非填充呈现；个别图标（如 pause、more）在自身节点上覆盖 strokeWidth / fill。
+ * 使用 Record<IconName, ReactNode> 保证每个图标名都有对应图形，漏写会被类型检查发现。
+ */
 const paths: Record<IconName, ReactNode> = {
   plus: <path d="M12 5v14M5 12h14" />,
   undo: <path d="M9 14 4 9l5-5M4 9h10a6 6 0 0 1 0 12H9" />,
@@ -203,6 +232,14 @@ const paths: Record<IconName, ReactNode> = {
   ),
 };
 
+/**
+ * 渲染指定图标。
+ *
+ * 使用 currentColor 作为描边颜色，因此图标的颜色由所在元素的 color 决定；
+ * 其余 SVG 属性通过 {...rest} 透传，调用方可覆盖默认描边宽度、添加类名或事件。
+ *
+ * @param props 见 IconProps
+ */
 export function Icon({ name, size = 18, ...rest }: IconProps) {
   return (
     <svg
@@ -217,6 +254,7 @@ export function Icon({ name, size = 18, ...rest }: IconProps) {
       aria-hidden="true"
       {...rest}
     >
+      {/* 按名称从映射表中取出对应图形，作为 svg 的子节点渲染 */}
       {paths[name]}
     </svg>
   );

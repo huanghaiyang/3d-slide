@@ -1,3 +1,25 @@
+/**
+ * Inspector.tsx —— 右侧属性检查器面板
+ *
+ * 职责：
+ * - 根据当前选中状态渲染四种互斥面板：作品设置（DeckPanel）、单个对象（ObjectPanel）、
+ *   多选（MultiPanel）与视点（FramePanel）。
+ * - 作为「受控视图」工作：所有修改都直接写入 deckStore，由 store 统一处理撤销历史、
+ *   数值边界裁剪与自动保存；面板自身只保留少量输入过程中的本地草稿（名称、备注）。
+ *
+ * 主要交互：
+ * - 输入框 / 滑块 / 开关修改对象或作品属性；连续输入通过 historyKey 合并成一步撤销。
+ * - 替换图片 / 媒体 / 模型 / Lottie 由外层传入的回调触发（文件选择与上传解析在 App 层）。
+ * - 多选面板提供对齐、等距分布、统一不透明度、批量显隐与批量删除。
+ * - 视点面板可改名、调整过渡与停留时长、填写演讲备注、用当前视图覆盖取景或跳转。
+ *
+ * 依赖：
+ * - store/deckStore.ts：读取 deck 与选中 id，调用 updateObject / removeObject /
+ *   updateDeckSettings / 视点相关操作等。
+ * - lib/constants.ts：LIMITS 各项数值上限、DEFAULT_HOLD 默认停留时长。
+ * - lib/media.ts 的 formatDuration，types.ts 的中文标签映射，以及 ./ui 中的表单原子组件。
+ */
+
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type {
   AudioObject,
@@ -19,14 +41,24 @@ import { Icon } from './Icon';
 import { ColorField, NumberField, Segmented, Switch } from './ui';
 
 interface InspectorProps {
+  /** 只读模式：为 true 时禁用内部所有 fieldset，仅可查看属性。 */
   readonly: boolean;
+  /** 请求用新文件替换指定对象的图片。 */
   onReplaceImage: (id: string) => void;
+  /** 请求替换视频 / 音频素材。 */
   onReplaceMedia: (id: string) => void;
+  /** 请求替换 3D 模型文件。 */
   onReplaceModel: (id: string) => void;
+  /** 请求替换 Lottie 动画文件。 */
   onReplaceLottie: (id: string) => void;
+  /** 请求用当前相机视图更新指定视点的取景。 */
   onUpdateFrameView: (id: string) => void;
 }
 
+/**
+ * 属性面板中的通用分组容器：统一的标题栏 + 内容区。
+ * extra 用于在标题右侧放置额外操作（多数面板未使用）。
+ */
 function Section({ title, extra, children }: { title: string; extra?: ReactNode; children: ReactNode }) {
   return (
     <section className="prop-section">
@@ -39,6 +71,15 @@ function Section({ title, extra, children }: { title: string; extra?: ReactNode;
   );
 }
 
+/**
+ * 单行文本输入：内部维护 draft 草稿，只在失焦或回车时才提交。
+ *
+ * 状态含义：
+ * - draft：输入过程中的本地值，输入法组合期间也以它为准。
+ * - focused ref：记录是否正在编辑，避免外部 value 变化（例如撤销）覆盖用户未提交的输入。
+ *
+ * 副作用：提交时对内容 trim，空值回退为原值（不允许把名称清空），并按 maxLength 截断。
+ */
 function TextValueField({
   value,
   maxLength,
@@ -57,12 +98,14 @@ function TextValueField({
   const [draft, setDraft] = useState(value);
   const focused = useRef(false);
 
+  // 仅当用户不在输入状态时，才把外部值同步回草稿；否则会打断正在输入的内容。
   useEffect(() => {
     if (!focused.current) setDraft(value);
   }, [value]);
 
   const commit = () => {
     const trimmed = draft.trim();
+    // 空内容视为取消编辑，恢复原值，避免对象 / 视点丢失名称。
     if (!trimmed) {
       setDraft(value);
       return;
@@ -98,6 +141,10 @@ function TextValueField({
   );
 }
 
+/**
+ * 滑块 + 数字输入组合控件：两者共享同一数值，拖动滑块会即时回调 onChange，
+ * 数字框则在失焦 / 回车时提交。单位（unit）只用于数字框后缀显示。
+ */
 function SliderRow({
   label,
   value,
@@ -137,8 +184,15 @@ function SliderRow({
   );
 }
 
+/** 舞台背景预设色板，用于快速切换常见的深色 / 浅色背景。 */
 const BACKGROUND_PRESETS = ['#10161F', '#171A21', '#1B2A2A', '#F5F2EC', '#E9E2D4'];
 
+/**
+ * 作品级设置面板：未选中任何对象、视点或未多选时展示。
+ *
+ * 数据全部来自 deck 字段；修改通过 updateDeckSettings 写回 store，
+ * 传入的 historyKey（如 'deck-bg'、'deck-duration'）让连续拖动只占一步撤销。
+ */
 function DeckPanel({ deck, readonly }: { deck: Deck; readonly: boolean }) {
   const updateDeckSettings = useDeckStore((state) => state.updateDeckSettings);
   return (
@@ -221,9 +275,16 @@ function DeckPanel({ deck, readonly }: { deck: Deck; readonly: boolean }) {
   );
 }
 
+/**
+ * 文本对象专属属性：内容、字体样式、行高与 3D 挤出厚度。
+ *
+ * 注意：文本高度由内容行数自动决定，因此这里不提供 H 输入；
+ * 文本清空后失焦会自动删除该对象（空文本框在舞台上没有意义）。
+ */
 function TextFields({ object }: { object: TextObject }) {
   const updateObject = useDeckStore((state) => state.updateObject);
   const removeObject = useDeckStore((state) => state.removeObject);
+  // historyKey：同一对象同一字段的连续输入在 1 秒内合并，避免逐字产生大量撤销步骤。
   const key = (field: string) => `${object.id}:${field}`;
 
   return (
@@ -327,10 +388,17 @@ function TextFields({ object }: { object: TextObject }) {
   );
 }
 
+/**
+ * 图片对象属性：预览、替换 / 重试 / 还原尺寸、适配方式与比例锁定。
+ *
+ * naturalWidth / naturalHeight 是素材解析时记录的原始像素尺寸，用于「还原原始尺寸」
+ * 以及锁定比例时计算宽高比；修改宽高会由 store 按 aspectLocked 自动联动。
+ */
 function ImageFields({ object, onReplaceImage }: { object: ImageObject; onReplaceImage: (id: string) => void }) {
   const updateObject = useDeckStore((state) => state.updateObject);
   const removeObject = useDeckStore((state) => state.removeObject);
   const retryImage = useDeckStore((state) => state.retryImage);
+  // 加载错误来自 store 的 imageErrors 映射；重试计数变化会促使 SceneManager 重新加载贴图。
   const error = useDeckStore((state) => state.imageErrors[object.id]);
 
   return (
@@ -408,6 +476,7 @@ function ImageFields({ object, onReplaceImage }: { object: ImageObject; onReplac
   );
 }
 
+/** SVG 矢量对象属性：复用图片的替换回调，但展示矢量原始尺寸并支持等比放大。 */
 function SvgFields({ object, onReplaceImage }: { object: SvgObject; onReplaceImage: (id: string) => void }) {
   const updateObject = useDeckStore((state) => state.updateObject);
 
@@ -448,6 +517,13 @@ function SvgFields({ object, onReplaceImage }: { object: SvgObject; onReplaceIma
   );
 }
 
+/**
+ * 视频 / 音频共用属性面板（两者字段大部分重叠）。
+ *
+ * - 视频显示分辨率且可还原原始尺寸；音频没有画面，改为显示素材大小。
+ * - 播放设置统一写入对象的 loop / autoplay / volume；muted 仅视频有。
+ * - 错误信息同样存于 imageErrors，重试会清空错误并递增重试计数。
+ */
 function MediaFields({
   object,
   onReplaceMedia,
@@ -579,6 +655,10 @@ function MediaFields({
   );
 }
 
+/**
+ * 仅按 dataURL 字符串长度估算素材体积，得到近似的 B / KB / MB 展示。
+ * 注意：这不是精确的文件大小（素材以 base64 形式存在对象里），仅用于给用户量级参考。
+ */
 function formatBytesOf(src: string): string {
   const size = src.length;
   if (size < 1024) return `${size} B`;
@@ -586,6 +666,12 @@ function formatBytesOf(src: string): string {
   return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }
 
+/**
+ * 3D 模型对象属性：格式 / 体积信息、替换与重试、重置包围盒、自动旋转设置。
+ *
+ * 模型在 SceneManager 中按包围盒等比缩放居中渲染，因此这里的 W / H 只是
+ * 包围盒的显示尺寸；「重置包围盒」固定回 760 × 760 便于恢复默认构图。
+ */
 function ModelFields({
   object,
   onReplaceModel,
@@ -670,6 +756,13 @@ function ModelFields({
   );
 }
 
+/**
+ * 形状对象属性：类型切换、填充 / 描边颜色与宽度。
+ *
+ * 形状类型切换有两条特殊规则（见下方分支）：
+ * - 切到「直线」时，把当前高度（或描边宽度）转成线宽，避免线太细看不见，并用填充色补描边色；
+ * - 从「直线」切回面状形状时，若高度仍是线的厚度（< 20），恢复为默认高度 340，避免变成扁条。
+ */
 function ShapeFields({ object }: { object: ShapeObject }) {
   const updateObject = useDeckStore((state) => state.updateObject);
   const key = (field: string) => `${object.id}:${field}`;
@@ -684,6 +777,7 @@ function ShapeFields({ object }: { object: ShapeObject }) {
             className={`shape-chip${object.shape === kind ? ' is-active' : ''}`}
             onClick={() => {
               if (kind === 'line' && object.shape !== 'line') {
+                // 直线用「高度」表示线宽：取原描边宽度，最少 6px；描边色缺失时沿用填充色。
                 const thickness = Math.max(6, object.strokeWidth || 0);
                 updateObject(object.id, {
                   shape: kind,
@@ -694,6 +788,7 @@ function ShapeFields({ object }: { object: ShapeObject }) {
                 return;
               }
               if (kind !== 'line' && object.shape === 'line' && object.height < 20) {
+                // 从细线切回面状形状：过薄的高度会变成一条扁条，恢复默认高度。
                 updateObject(object.id, { shape: kind, height: 340 });
                 return;
               }
@@ -753,6 +848,10 @@ function ShapeFields({ object }: { object: ShapeObject }) {
   );
 }
 
+/**
+ * Lottie 动画属性：画布尺寸、时长、替换 / 重试、循环与播放速度。
+ * duration 为 0 通常表示动画信息未解析出来或依赖循环播放，此时展示「循环」。
+ */
 function LottieFields({
   object,
   onReplaceLottie,
@@ -822,6 +921,12 @@ function LottieFields({
   );
 }
 
+/**
+ * 单个对象的属性面板入口：名称 + 按类型分发到具体字段组 + 通用变换 / 图层 / 删除。
+ *
+ * 图层顺序说明：sorted 按 z 降序，索引 0 为最靠前的对象；因此
+ * 「上移图层」取 sorted[index - 1]（更靠前），「下移」取 sorted[index + 1]。
+ */
 function ObjectPanel({
   deck,
   object,
@@ -859,6 +964,7 @@ function ObjectPanel({
   const removeObject = useDeckStore((state) => state.removeObject);
   const moveObjectLayer = useDeckStore((state) => state.moveObjectLayer);
   const requestFocus = useDeckStore((state) => state.requestFocus);
+  // 按 z 从大到小排序，得到从最上层到最下层的展示顺序；layerIndex 用于判断能否上移 / 下移。
   const sorted = [...deck.objects].sort((a, b) => b.z - a.z);
   const layerIndex = sorted.findIndex((item) => item.id === object.id);
   const key = (field: string) => `${object.id}:${field}`;
@@ -927,6 +1033,7 @@ function ObjectPanel({
               ariaLabel="宽度"
               onCommit={(width) => updateObject(object.id, { width }, key('width'))}
             />
+            {/* 文本高度由内容自动排版决定，这里只读展示，不能直接编辑 */}
             {object.type === 'text' ? (
               <label className="number-field is-disabled">
                 <span className="field-label">H</span>
@@ -1038,6 +1145,13 @@ function ObjectPanel({
   );
 }
 
+/**
+ * 视点（帧）属性面板：名称、过渡时长、自动停留、演讲者备注、取景更新与删除。
+ *
+ * 备注使用本地 notes 状态做输入缓冲，同时每次输入都同步写 store：
+ * 本地状态保证输入不丢字，store 保证撤销与自动保存可用；当切换视点或外部修改
+ * 备注时，依赖 frame.id / frame.notes 重新同步。
+ */
 function FramePanel({ deck, onUpdateFrameView }: { deck: Deck; onUpdateFrameView: (id: string) => void }) {
   const selectedFrameId = useDeckStore((state) => state.selectedFrameId);
   const renameFrame = useDeckStore((state) => state.renameFrame);
@@ -1050,6 +1164,7 @@ function FramePanel({ deck, onUpdateFrameView }: { deck: Deck; onUpdateFrameView
   const [notes, setNotes] = useState(frame?.notes ?? '');
 
   useEffect(() => {
+    // 切换视点或备注被外部改写（如撤销）时，把 store 中的备注同步回本地输入框。
     setNotes(frame?.notes ?? '');
   }, [frame?.id, frame?.notes]);
 
@@ -1144,12 +1259,19 @@ function FramePanel({ deck, onUpdateFrameView }: { deck: Deck; onUpdateFrameView
   );
 }
 
+/**
+ * 多选属性面板：批量对齐、等距分布、统一不透明度、批量显隐 / 删除。
+ *
+ * 注意：包围盒按未旋转的 width / height 计算（未考虑 rotation），
+ * 因此对齐结果对旋转对象是近似值，这与舞台框选的几何判断保持一致。
+ */
 function MultiPanel({ deck, ids, readonly }: { deck: Deck; ids: string[]; readonly: boolean }) {
   const updateObject = useDeckStore((state) => state.updateObject);
   const removeObjects = useDeckStore((state) => state.removeObjects);
   const selectObjects = useDeckStore((state) => state.selectObjects);
   const objects = deck.objects.filter((object) => ids.includes(object.id));
   if (objects.length === 0) return null;
+  // 选中集合的整体包围盒：由每个对象中心 ± 宽高的一半推导。
   const bounds = {
     minX: Math.min(...objects.map((object) => object.x - object.width / 2)),
     maxX: Math.max(...objects.map((object) => object.x + object.width / 2)),
@@ -1159,6 +1281,8 @@ function MultiPanel({ deck, ids, readonly }: { deck: Deck; ids: string[]; readon
   const opacity = Math.round(objects[0].opacity);
 
   const align = (kind: 'left' | 'centerX' | 'right' | 'top' | 'centerY' | 'bottom') => {
+    // 逐个计算目标坐标：左 / 上按包围盒边对齐，中心取包围盒中点，右 / 下按边减去自身尺寸。
+    // 只在坐标确实变化时写 store，并共用 historyKey 让一次对齐只产生一步撤销。
     for (const object of objects) {
       let x = object.x;
       let y = object.y;
@@ -1173,7 +1297,9 @@ function MultiPanel({ deck, ids, readonly }: { deck: Deck; ids: string[]; readon
   };
 
   const distribute = (axis: 'x' | 'y') => {
+    // 等距分布至少需要 3 个对象；少于 3 个时两端不动，没有中间项可调整。
     if (objects.length < 3) return;
+    // 先按中心坐标排序，确定左右 / 上下两个端点对象。
     const sorted = [...objects].sort((a, b) => (axis === 'x' ? a.x - b.x : a.y - b.y));
     const start =
       axis === 'x'
@@ -1184,6 +1310,7 @@ function MultiPanel({ deck, ids, readonly }: { deck: Deck; ids: string[]; readon
         ? Math.max(...sorted.map((object) => object.x + object.width / 2))
         : Math.max(...sorted.map((object) => object.y + object.height / 2));
     const total = sorted.reduce((sum, object) => sum + (axis === 'x' ? object.width : object.height), 0);
+    // 剩余空间平均分给 n - 1 个间隙；间隙可以为负（对象过宽重叠时会被压缩排列）。
     const gap = (end - start - total) / (sorted.length - 1);
     let cursor = start;
     for (const object of sorted) {
@@ -1270,6 +1397,7 @@ function MultiPanel({ deck, ids, readonly }: { deck: Deck; ids: string[]; readon
             step={1}
             unit="%"
             onChange={(value) => {
+              // 以主选中对象的值为滑块基准；逐个更新，只跳过已经一致的对象以减少无谓渲染。
               for (const object of objects) {
                 if (Math.round(object.opacity) !== value) updateObject(object.id, { opacity: value }, 'multi-opacity');
               }
@@ -1294,6 +1422,12 @@ function MultiPanel({ deck, ids, readonly }: { deck: Deck; ids: string[]; readon
   );
 }
 
+/**
+ * 属性检查器根组件：根据当前选中状态分发到对应子面板。
+ *
+ * 优先级：多选（selectedIds.length > 1）> 单对象（selectedObjectId 命中）> 视点 > 作品设置。
+ * 该顺序保证多选时即使主选中对象仍存在，也不会误显示单对象面板。
+ */
 export function Inspector({
   readonly,
   onReplaceImage,
@@ -1310,6 +1444,7 @@ export function Inspector({
   const object = deck.objects.find((item) => item.id === selectedObjectId);
 
   if (selectedIds.length > 1) {
+    // 多选优先：ids 中第一个即主选中对象，MultiPanel 内部会据此高亮。
     return (
       <aside className="rightbar">
         <MultiPanel deck={deck} ids={selectedIds} readonly={readonly} />
