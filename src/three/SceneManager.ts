@@ -74,8 +74,6 @@ interface LottieRuntime {
   animation: AnimationItem | null;
   /** 画布长边像素，用于判断是否需要按当前缩放重新栅格化 */
   rasterSide: number;
-  /** 高分辨率重建进行中，避免重复触发 */
-  resizing: boolean;
   error?: string;
 }
 
@@ -1751,7 +1749,6 @@ export class SceneManager {
       texture: null,
       animation: null,
       rasterSide: 0,
-      resizing: false,
     };
     node.lottie = runtime;
     const data = parseLottieSource(object.src);
@@ -1811,98 +1808,60 @@ export class SceneManager {
       });
   }
 
-  /** 缩放稳定后按目标像素重建 Lottie 画布，保留当前帧与播放状态，旧纹理保留到新动画绘制完成才切换 */
+  /**
+   * 缩放稳定后按目标像素调整 Lottie 画布尺寸。
+   * 直接复用当前 AnimationItem 与 CanvasTexture，不重新 import / loadAnimation，
+   * 不重建元素树，也不会在缩放过程中反复创建大画布。
+   */
   private resizeLottie(node: ObjectNode, object: LottieObject) {
     const runtime = node.lottie;
-    if (!runtime || runtime.status !== 'ready' || runtime.resizing || !runtime.animation) return;
-    const key = node.objectId;
-    if (this.vectorPending.has(key)) return;
+    if (!runtime || runtime.status !== 'ready' || !runtime.animation) return;
+    const animation = runtime.animation;
+    // 资源尚未加载完成时先不改画布，等就绪后再补一次
+    if (!animation.isLoaded) {
+      this.scheduleVectorRefresh(300);
+      return;
+    }
     const side = Math.min(this.lottieMaxSide(), this.vectorBucket(this.vectorTargetSide(object)));
     if (side < runtime.rasterSide * 1.4) return;
-    const data = parseLottieSource(object.src);
-    if (!data) return;
+    const renderer = animation.renderer as
+      | { updateContainerSize?: (width: number, height: number) => void; elements?: unknown[] }
+      | null
+      | undefined;
+    const update = renderer?.updateContainerSize;
+    if (!renderer || !update) return;
     const naturalWidth = Math.max(1, object.naturalWidth || 800);
     const naturalHeight = Math.max(1, object.naturalHeight || 600);
     const { width, height } = this.fitVectorCanvas(side, naturalWidth, naturalHeight);
-    runtime.resizing = true;
-    this.vectorPending.add(key);
-    const canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
-    const texture = new THREE.CanvasTexture(canvas);
-    texture.colorSpace = THREE.SRGBColorSpace;
-    texture.minFilter = THREE.LinearFilter;
-    texture.magFilter = THREE.LinearFilter;
-    texture.generateMipmaps = false;
-    let swapped = false;
-    let swapFrame = 0;
-    const fail = () => {
-      if (swapped) return;
-      texture.dispose();
-      runtime.resizing = false;
-      this.vectorPending.delete(key);
-    };
-    void import('lottie-web')
-      .then(({ default: lottie }) => {
-        if (this.disposed || this.nodes.get(key) !== node || node.lottie !== runtime) {
-          fail();
-          return;
-        }
-        const context = canvas.getContext('2d');
-        if (!context) {
-          fail();
-          return;
-        }
-        const animation = lottie.loadAnimation<'canvas'>({
-          renderer: 'canvas',
-          loop: object.loop,
-          autoplay: false,
-          animationData: data,
-          rendererSettings: {
-            context,
-            clearCanvas: true,
-            preserveAspectRatio: 'xMidYMid meet',
-          },
-        } as unknown as AnimationConfigWithData<'canvas'>);
-        animation.setSpeed(Math.max(0.1, object.speed || 1));
-        const swap = () => {
-          if (swapped) return;
-          if (this.disposed || this.nodes.get(key) !== node || node.lottie !== runtime) {
-            animation.destroy();
-            fail();
-            return;
+    // 轨道遮罩层内部的缓冲画布按创建时的画布尺寸分配，需先同步尺寸再放大画布
+    this.resizeLottieBuffers(renderer.elements, width, height);
+    runtime.rasterSide = Math.max(width, height);
+    update.call(renderer, width, height);
+    // three 首次上传 CanvasTexture 时用 texStorage2D 固定了存储尺寸，
+    // 画布变大后 texSubImage2D 会因尺寸不匹配而失败（画面冻结在 resize 前的帧），
+    // 这里释放旧的 GPU 纹理，让下一帧按新尺寸重新分配并上传。
+    if (runtime.texture) {
+      runtime.texture.dispose();
+      runtime.texture.needsUpdate = true;
+    }
+  }
+
+  /** 同步 Lottie 轨道遮罩层内部缓冲画布的尺寸（canvas renderer 不会随画布缩放自动调整） */
+  private resizeLottieBuffers(elements: unknown[] | undefined, width: number, height: number) {
+    if (!elements) return;
+    for (const raw of elements) {
+      if (!raw || typeof raw !== 'object') continue;
+      const element = raw as { buffers?: HTMLCanvasElement[]; elements?: unknown[] };
+      if (element.buffers) {
+        for (const buffer of element.buffers) {
+          if (buffer && (buffer.width !== width || buffer.height !== height)) {
+            buffer.width = width;
+            buffer.height = height;
           }
-          swapped = true;
-          const oldAnimation = runtime.animation;
-          const oldTexture = runtime.texture;
-          if (oldAnimation) swapFrame = oldAnimation.currentFrame;
-          animation.goToAndStop(swapFrame, true);
-          runtime.animation = animation;
-          runtime.canvas = canvas;
-          runtime.texture = texture;
-          runtime.rasterSide = Math.max(width, height);
-          runtime.resizing = false;
-          this.vectorPending.delete(key);
-          // Lottie 在舞台上始终自动播放，重建后从原帧继续，避免旧动画尚未起播时新动画停在首帧
-          animation.play();
-          if (oldAnimation) oldAnimation.destroy();
-          if (oldTexture) oldTexture.dispose();
-          node.visualKey = '';
-          this.rebuildContent(node);
-        };
-        animation.addEventListener('DOMLoaded', () => {
-          if (swapped) {
-            // 兜底切换发生在 DOMLoaded 之前时，动画尚未起播，等就绪后回到原帧继续播放
-            animation.goToAndStop(swapFrame, true);
-            animation.play();
-            return;
-          }
-          swap();
-        });
-        // 隐藏窗口等场景下 DOMLoaded 可能不触发，仍需完成分辨率切换
-        window.setTimeout(swap, 500);
-      })
-      .catch(() => fail());
+        }
+      }
+      this.resizeLottieBuffers(element.elements, width, height);
+    }
   }
 
   private disposeLottie(node: ObjectNode) {
