@@ -37,9 +37,21 @@ import {
 } from '../lib/storage';
 import { parseSlideFile, uniqueTitle } from '../lib/validate';
 import { DECK_TEMPLATES, buildTemplateDeck, type DeckTemplate } from '../lib/templates';
+import {
+  ensurePluginSetup,
+  getPlugin,
+  listPluginTemplates,
+  type PluginTemplateEntry,
+} from '../plugins';
 import { toast } from '../store/uiStore';
 import { Icon } from './Icon';
 import { ConfirmDialog, Modal } from './ui';
+
+/**
+ * 插件贡献的模板列表（模块加载时注册中心已完成内置插件注册）。
+ * 放在组件外避免每次渲染重复遍历插件；插件注册只在启动阶段发生。
+ */
+const PLUGIN_TEMPLATES = listPluginTemplates();
 
 interface HomeProps {
   onOpen: (id: string) => void;
@@ -283,6 +295,29 @@ export function Home({ onOpen, onOpenAssets }: HomeProps) {
   };
 
   /**
+   * 从插件模板生成作品。
+   *
+   * 与内置模板不同，插件模板的 build 可能是异步的（例如 G6 需要先离屏渲染图表）。
+   * 创建前先执行插件 setup 预热依赖，失败时统一提示，不写入任何数据。
+   */
+  const createFromPluginTemplate = async (template: PluginTemplateEntry) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const plugin = getPlugin(template.pluginId);
+      if (plugin) await ensurePluginSetup(plugin);
+      const deck = await template.build(uniqueTitle(template.name, titles()));
+      await putDeck(deck);
+      toast(`已从「${template.name}」创建`, 'success');
+      onOpen(deck.id);
+    } catch (error) {
+      toast(error instanceof Error ? error.message : '插件模板创建失败', 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
    * 导入 .slide 工程文件。
    * 先做扩展名与体积校验，再由 parseSlideFile 做结构校验与字段修正；
    * 导入时标题会自动去重，若存在被修正的字段则提示修正项数量。
@@ -455,6 +490,38 @@ export function Home({ onOpen, onOpenAssets }: HomeProps) {
                   <span className="template-info">
                     <strong>{template.name}</strong>
                     <span>{template.description}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {decks !== null && !loadError && PLUGIN_TEMPLATES.length > 0 && (
+          <section className="deck-section template-section">
+            <div className="deck-section-head">
+              <h2>插件模板</h2>
+              <span>{PLUGIN_TEMPLATES.length} 个模板 · 由插件动态提供</span>
+            </div>
+            <div className="template-grid">
+              {PLUGIN_TEMPLATES.map((template, index) => (
+                <button
+                  key={`${template.pluginId}:${template.id}`}
+                  className="template-card"
+                  disabled={busy}
+                  onClick={() => void createFromPluginTemplate(template)}
+                  title={`使用「${template.name}」插件模板`}
+                >
+                  <span className="template-art" style={{ background: template.background }}>
+                    <span className="template-glow" style={{ background: template.accent }} />
+                    <span className="template-index">{String(index + 1).padStart(2, '0')}</span>
+                    <span className="template-frame-count">{template.frameCount} 视点</span>
+                  </span>
+                  <span className="template-info">
+                    <strong>{template.name}</strong>
+                    <span>
+                      {template.pluginName} · {template.description}
+                    </span>
                   </span>
                 </button>
               ))}

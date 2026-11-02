@@ -10,6 +10,7 @@
     "mcp": "node mcp/server.mjs"
   },
   "dependencies": {
+    "@antv/g6": "^5.1.1",
     "idb": "^8.0.0",
     "lottie-web": "^5.12.2",
     "react": "^18.3.1",
