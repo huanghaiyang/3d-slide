@@ -74,6 +74,8 @@ interface LottieRuntime {
   animation: AnimationItem | null;
   /** 画布长边像素，用于判断是否需要按当前缩放重新栅格化 */
   rasterSide: number;
+  /** 上次上传到 GPU 时的动画帧号，避免同一帧重复上传整幅画布 */
+  lastFrame: number;
   error?: string;
 }
 
@@ -1236,9 +1238,16 @@ export class SceneManager {
     return Math.min(4096, max);
   }
 
-  /** Lottie 每帧都要重绘并整幅上传 GPU，长边上限比 SVG 更保守，避免放大后掉帧 */
+  /**
+   * Lottie 每帧都要重绘并整幅上传 GPU，像素量是主要开销（实测 1024→2048 后帧率约降至 1/4）。
+   * 因此长边上限取三者最小值：
+   * - 1536 硬上限（比 SVG 的 4096 保守，避免放大后整幅上传拖垮帧率）
+   * - 物理视口长边（超出屏幕的像素看不到，没必要分配）
+   * - 显卡最大纹理尺寸
+   */
   private lottieMaxSide(): number {
-    return Math.min(2048, this.vectorMaxSide());
+    const viewportLong = Math.max(this.width, this.height) * this.renderer.getPixelRatio();
+    return Math.min(1536, this.vectorMaxSide(), Math.max(512, Math.round(viewportLong)));
   }
 
   /** 按当前相机到对象的距离，计算该对象在屏幕上实际占用的像素长边 */
@@ -1749,6 +1758,7 @@ export class SceneManager {
       texture: null,
       animation: null,
       rasterSide: 0,
+      lastFrame: -1,
     };
     node.lottie = runtime;
     const data = parseLottieSource(object.src);
@@ -2366,7 +2376,16 @@ export class SceneManager {
     const dt = Math.min(0.06, Math.max(0, (now - this.lastTickAt) / 1000));
     this.lastTickAt = now;
     for (const node of this.nodes.values()) {
-      if (node.lottie?.texture && node.group.visible) node.lottie.texture.needsUpdate = true;
+      const lottie = node.lottie;
+      if (lottie?.texture && node.group.visible) {
+        // 仅当 Lottie 画出了新的一帧才整幅上传 GPU：
+        // 动画暂停/结束或渲染循环与动画帧不同步时，避免重复上传大画布。
+        const frame = lottie.animation ? lottie.animation.currentFrame : -1;
+        if (frame !== lottie.lastFrame) {
+          lottie.lastFrame = frame;
+          lottie.texture.needsUpdate = true;
+        }
+      }
       const runtime = node.model;
       const object = node.data;
       if (!runtime || runtime.status !== 'ready' || !runtime.group) continue;
