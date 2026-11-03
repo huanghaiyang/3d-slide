@@ -217,6 +217,8 @@ function normalizeObject(raw: unknown, warnings: string[]): SlideObject {
       duration: Math.max(0, num(r.duration, 0)),
       loop: bool(r.loop, true),
       speed: clamp(num(r.speed, 1), 0.1, 4),
+      // 渲染后端 id：旧存档没有该字段，保持 undefined 以便运行时回退到默认 canvas 后端
+      renderer: str(r.renderer, '').trim().slice(0, 32) || undefined,
     };
   }
   if (type === 'video') {

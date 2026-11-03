@@ -39,6 +39,7 @@ import { useDeckStore } from '../store/deckStore';
 import { FONT_LABELS, MODEL_FORMAT_LABELS, OBJECT_LABELS, SHAPE_LABELS } from '../types';
 // 图表属性面板由插件提供，核心只负责按对象上的 plugin 字段解析
 import { resolveChartPlugin } from '../plugins/registry';
+import { LOTTIE_BACKEND_CANVAS, listLottieBackends } from '../lib/lottieBackends';
 import { Icon } from './Icon';
 import { Section, TextValueField } from './inspectorKit';
 import { ColorField, NumberField, Segmented, Switch } from './ui';
@@ -780,6 +781,10 @@ function LottieFields({
   const retryImage = useDeckStore((state) => state.retryImage);
   const error = useDeckStore((state) => state.imageErrors[object.id]);
   const key = (field: string) => `${object.id}:${field}`;
+  // 后端列表来自注册中心：后续新增 WebGPU 等方案时下拉框会自动多出一项
+  const backends = listLottieBackends();
+  const activeBackend = object.renderer ?? LOTTIE_BACKEND_CANVAS;
+  const activeHint = backends.find((backend) => backend.id === activeBackend)?.hint ?? '';
   return (
     <>
       <Section title="Lottie 动画">
@@ -818,6 +823,27 @@ function LottieFields({
           unit="×"
           onChange={(speed) => updateObject(object.id, { speed }, key('speed'))}
         />
+        <div className="prop-row">
+          <span className="field-label">渲染后端</span>
+          <select
+            className="select"
+            value={activeBackend}
+            aria-label="Lottie 渲染后端"
+            onChange={(event) => {
+              // 默认后端不写入字段，保持与旧存档一致的数据形态
+              const next = event.target.value;
+              updateObject(object.id, { renderer: next === LOTTIE_BACKEND_CANVAS ? undefined : next });
+            }}
+          >
+            {backends.map((backend) => (
+              <option key={backend.id} value={backend.id} disabled={!backend.supported}>
+                {backend.label}
+                {backend.supported ? '' : '（不支持）'}
+              </option>
+            ))}
+          </select>
+        </div>
+        <span className="field-hint">{activeHint}</span>
         <span className="field-hint">Lottie 支持导入 .json / .lottie 动画文件，编辑与演示时实时播放。</span>
       </Section>
       {error && (

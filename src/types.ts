@@ -185,6 +185,11 @@ export interface LottieObject extends ObjectBase {
   loop: boolean;
   /** 播放速度倍率 */
   speed: number;
+  /**
+   * Lottie 渲染后端 id（见 lib/lottieBackends）。
+   * 缺省表示使用默认的 canvas 后端，用于兼容旧存档；切换到 GPU 后端后写入具体 id。
+   */
+  renderer?: string;
   /** 首帧截图（dataURL），加载动画前先作为占位图显示 */
   poster?: string;
 }

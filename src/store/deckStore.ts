@@ -25,6 +25,7 @@ import type {
   Deck,
   Frame,
   ImageObject,
+  LottieObject,
   MediaKind,
   ModelFormat,
   SaveStatus,
@@ -437,6 +438,12 @@ function normalizeEditedObject(object: SlideObject, patch: ObjectPatch): SlideOb
       if (widthChanged && !heightChanged) image.height = image.width / ratio;
       else if (heightChanged && !widthChanged) image.width = image.height * ratio;
     }
+  } else if (next.type === 'lottie') {
+    // Lottie：速度裁剪到有效区间；后端 id 只保留合法字符串，空值表示默认 canvas 后端
+    const lottie = next as LottieObject;
+    lottie.speed = clampNumber(lottie.speed, 0.1, 4, 1);
+    lottie.renderer =
+      typeof lottie.renderer === 'string' ? lottie.renderer.trim().slice(0, 32) || undefined : undefined;
   }
   return next;
 }

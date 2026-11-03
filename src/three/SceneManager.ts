@@ -54,7 +54,12 @@ import type { ChartHandle } from '../lib/chartRenderer';
 import { cameraPosition, clampPitch, lerpView } from '../lib/camera';
 import { disposeObject3D, loadModelGroup } from '../lib/model3d';
 import { parseLottieSource } from '../lib/lottie';
-import type { AnimationConfigWithData, AnimationItem } from 'lottie-web';
+import {
+  LOTTIE_BACKEND_CANVAS,
+  resolveLottieBackend,
+  type LottieBackend,
+  type LottieBackendInstance,
+} from '../lib/lottieBackends';
 import { sampleBezierPath } from '../lib/curve';
 import { buildTextExtrudeGeometry } from './text3d';
 import { fontCss, layoutText } from '../lib/text';
@@ -155,25 +160,30 @@ interface ModelRuntime {
 
 /**
  * Lottie 动画运行时。
- * lottie-web 以 canvas 渲染器逐帧画到离屏画布，再包装为 CanvasTexture 供材质使用。
+ * 动画始终由后端绘制到离屏画布，再包装为 CanvasTexture 供材质使用。
+ * 具体栅格化方式（Canvas2D / WebGL2）由图示后端决定，核心只依赖统一句柄。
  */
 interface LottieRuntime {
   /** 动画素材地址（可能是 URL 或内联 JSON） */
   src: string;
+  /** 实际使用的渲染后端 id；GPU 后端初始化失败时会回退为 canvas */
+  backendId: string;
   /** loading 加载中 / ready 可用 / error 失败 */
   status: 'loading' | 'ready' | 'error';
-  /** lottie 绘制使用的离屏画布 */
+  /** 后端绘制使用的离屏画布 */
   canvas: HTMLCanvasElement | null;
   /** 由 canvas 生成的纹理，每帧按需标记 needsUpdate 上传 */
   texture: THREE.CanvasTexture | null;
-  /** lottie-web 动画实例，负责播放与帧推进 */
-  animation: AnimationItem | null;
+  /** 渲染后端句柄，负责播放控制、帧号与尺寸调整 */
+  engine: LottieBackendInstance | null;
+  /** 解析后的动画数据，回退后端时需要复用，避免重复解析 */
+  data: ReturnType<typeof parseLottieSource>;
+  /** 提示文案 / 失败原因 */
+  error?: string;
   /** 画布长边像素，用于判断是否需要按当前缩放重新栅格化 */
   rasterSide: number;
   /** 上次上传到 GPU 时的动画帧号，避免同一帧重复上传整幅画布 */
   lastFrame: number;
-  /** 失败原因 */
-  error?: string;
 }
 
 /**
@@ -397,6 +407,8 @@ export class SceneManager {
   private xrRig: THREE.Group | null = null;
   /** 是否处于 XR 会话中，渲染循环据此切换立体渲染分支 */
   private xrActive = false;
+  /** GPU Lottie 后端需要的屏幕外 DOM 容器；懒创建，销毁时移除 */
+  private lottieHostEl: HTMLDivElement | null = null;
 
   /**
    * 创建场景管理器并挂载渲染画布。
@@ -1181,7 +1193,16 @@ export class SceneManager {
     }
     if (object.type === 'lottie') {
       const lottie = object as LottieObject;
-      return ['lottie', lottie.src, lottie.width, lottie.height, lottie.loop, lottie.speed].join('|');
+      // 渲染后端参与脏检查：切换后端后需要按新方式重新初始化画布
+      return [
+        'lottie',
+        lottie.src,
+        lottie.width,
+        lottie.height,
+        lottie.loop,
+        lottie.speed,
+        lottie.renderer ?? '',
+      ].join('|');
     }
     if (object.type === 'chart') {
       const chart = object as ChartObject;
@@ -2212,9 +2233,9 @@ export class SceneManager {
     this.ensureLottie(node, object);
     this.ensurePoster(node, object.poster);
     const runtime = node.lottie;
-    if (runtime?.animation) {
-      runtime.animation.setLoop(object.loop);
-      runtime.animation.setSpeed(Math.max(0.1, object.speed || 1));
+    if (runtime?.engine) {
+      runtime.engine.setLoop(object.loop);
+      runtime.engine.setSpeed(Math.max(0.1, object.speed || 1));
     }
     if (runtime?.status === 'ready' && runtime.texture) {
       const material = new THREE.MeshBasicMaterial({
@@ -2244,24 +2265,30 @@ export class SceneManager {
 
   /**
    * 确保 Lottie 动画已初始化。
-   * 先按当前缩放创建离屏画布与 CanvasTexture，再动态加载 lottie-web 并绑定到该画布上；
-   * 动态 import 让 lottie 只在真正用到时进入主包，减小首屏体积。
+   *
+   * 是否重建由「素材地址 + 后端 id」共同决定：切换渲染后端时对象会被重建，
+   * 从而在一块新的画布上重新初始化，不会残留上一个后端的上下文。
+   * 旧存档没有 renderer 字段，解析结果固定为默认的 canvas 后端。
    */
   private ensureLottie(node: ObjectNode, object: LottieObject) {
     const existing = node.lottie;
-    if (existing && existing.src === object.src) return;
+    const backend = resolveLottieBackend(object.renderer);
+    if (existing && existing.src === object.src && existing.backendId === backend.id) return;
     this.disposeLottie(node);
     const runtime: LottieRuntime = {
       src: object.src,
+      backendId: backend.id,
       status: 'loading',
       canvas: null,
       texture: null,
-      animation: null,
+      engine: null,
+      data: null,
       rasterSide: 0,
       lastFrame: -1,
     };
     node.lottie = runtime;
     const data = parseLottieSource(object.src);
+    runtime.data = data;
     if (!data) {
       runtime.status = 'error';
       runtime.error = 'Lottie 数据无法解析';
@@ -2272,6 +2299,24 @@ export class SceneManager {
     const naturalHeight = Math.max(1, object.naturalHeight || 600);
     const side = Math.min(this.lottieMaxSide(), this.vectorBucket(this.vectorTargetSide(object)));
     const { width, height } = this.fitVectorCanvas(side, naturalWidth, naturalHeight);
+    this.startLottie(node, runtime, object, backend, data, width, height);
+  }
+
+  /**
+   * 用指定后端启动 Lottie 动画。
+   *
+   * 画布与纹理在这里创建，后端只负责在其上初始化渲染上下文；
+   * GPU 后端初始化失败时会自动回退到 canvas 后端，保证动画最终一定能显示。
+   */
+  private startLottie(
+    node: ObjectNode,
+    runtime: LottieRuntime,
+    object: LottieObject,
+    backend: LottieBackend,
+    data: NonNullable<ReturnType<typeof parseLottieSource>>,
+    width: number,
+    height: number,
+  ) {
     const canvas = document.createElement('canvas');
     canvas.width = width;
     canvas.height = height;
@@ -2283,34 +2328,44 @@ export class SceneManager {
     runtime.canvas = canvas;
     runtime.texture = texture;
     runtime.rasterSide = Math.max(width, height);
+    runtime.backendId = backend.id;
 
-    void import('lottie-web')
-      .then(({ default: lottie }) => {
-        // 异步守卫：动画加载完成前节点可能已被删除或换素材
-        if (this.nodes.get(node.objectId) !== node || node.lottie !== runtime || this.disposed) return;
-        const context = canvas.getContext('2d');
-        if (!context) throw new Error('无法创建 Lottie 画布');
-        const animation = lottie.loadAnimation<'canvas'>({
-          renderer: 'canvas',
-          loop: object.loop,
-          autoplay: true,
-          animationData: data,
-          rendererSettings: {
-            context,
-            clearCanvas: true,
-            preserveAspectRatio: 'xMidYMid meet',
-          },
-          // 不传 container：lottie-web 会忽略 context 并新建子 canvas，
-          // 这里要让动画直接绘制到 CanvasTexture 使用的画布上。
-        } as unknown as AnimationConfigWithData<'canvas'>);
-        animation.setSpeed(Math.max(0.1, object.speed || 1));
-        runtime.animation = animation;
+    void backend
+      .create({
+        canvas,
+        data,
+        width,
+        height,
+        loop: object.loop,
+        speed: Math.max(0.1, object.speed || 1),
+        host: this.lottieHost(),
+      })
+      .then((engine) => {
+        // 异步守卫：初始化完成前节点可能已被删除、换素材或换后端
+        if (this.disposed || this.nodes.get(node.objectId) !== node || node.lottie !== runtime) {
+          engine.dispose();
+          return;
+        }
+        runtime.engine = engine;
+        runtime.backendId = engine.id;
         runtime.status = 'ready';
         node.visualKey = '';
         this.rebuildContent(node);
       })
       .catch((error: unknown) => {
-        if (node.lottie !== runtime) return;
+        if (this.disposed || this.nodes.get(node.objectId) !== node || node.lottie !== runtime) return;
+        // GPU 后端可能已经在该画布上占用了 WebGL 上下文，此时这块画布无法再取 2D context，
+        // 必须换一块全新画布重试；只回退一次，避免无限递归。
+        if (backend.id !== LOTTIE_BACKEND_CANVAS) {
+          texture.dispose();
+          // GPU 初始化可能已经把画布挂到隐藏容器上，失败后要一并移除
+          canvas.remove();
+          runtime.texture = null;
+          runtime.canvas = null;
+          const fallback = resolveLottieBackend(LOTTIE_BACKEND_CANVAS);
+          this.startLottie(node, runtime, object, fallback, data, width, height);
+          return;
+        }
         runtime.status = 'error';
         runtime.error = error instanceof Error ? error.message : 'Lottie 加载失败';
         this.callbacks.onImageError(node.objectId, `Lottie 无法加载：${runtime.error}`);
@@ -2320,34 +2375,44 @@ export class SceneManager {
   }
 
   /**
+   * GPU 渲染后端需要一个有 CSS 尺寸的 DOM 上下文；这里懒创建一块屏幕外容器，
+   * 画布本身在屏幕外不可见，只作为纹理源使用。
+   */
+  private lottieHost(): HTMLElement {
+    if (this.lottieHostEl) return this.lottieHostEl;
+    const host = document.createElement('div');
+    host.setAttribute('aria-hidden', 'true');
+    // 不能使用 display:none（会得到 0 尺寸）；用移出视口的方式隐藏
+    host.style.cssText =
+      'position:fixed;left:-100000px;top:0;width:0;height:0;overflow:hidden;pointer-events:none;opacity:0;';
+    document.body.appendChild(host);
+    this.lottieHostEl = host;
+    return host;
+  }
+
+  /**
    * 缩放稳定后按目标像素调整 Lottie 画布尺寸。
-   * 直接复用当前 AnimationItem 与 CanvasTexture，不重新 import / loadAnimation，
-   * 不重建元素树，也不会在缩放过程中反复创建大画布。
+   * 尺寸调整完全交给后端（canvas 会同步内部图层画布，webgl 会重建 GL 目标），
+   * 不重新创建动画实例，避免缩放过程中反复解析动画数据。
    */
   private resizeLottie(node: ObjectNode, object: LottieObject) {
     const runtime = node.lottie;
-    if (!runtime || runtime.status !== 'ready' || !runtime.animation) return;
-    const animation = runtime.animation;
+    if (!runtime || runtime.status !== 'ready' || !runtime.engine) return;
     // 资源尚未加载完成时先不改画布，等就绪后再补一次
-    if (!animation.isLoaded) {
+    if (!runtime.engine.ready) {
       this.scheduleVectorRefresh(300);
       return;
     }
     const side = Math.min(this.lottieMaxSide(), this.vectorBucket(this.vectorTargetSide(object)));
     if (side < runtime.rasterSide * 1.4) return;
-    const renderer = animation.renderer as
-      | { updateContainerSize?: (width: number, height: number) => void; elements?: unknown[] }
-      | null
-      | undefined;
-    const update = renderer?.updateContainerSize;
-    if (!renderer || !update) return;
     const naturalWidth = Math.max(1, object.naturalWidth || 800);
     const naturalHeight = Math.max(1, object.naturalHeight || 600);
     const { width, height } = this.fitVectorCanvas(side, naturalWidth, naturalHeight);
-    // 轨道遮罩层内部的缓冲画布按创建时的画布尺寸分配，需先同步尺寸再放大画布
-    this.resizeLottieBuffers(renderer.elements, width, height);
+    if (!runtime.engine.resize(width, height)) {
+      this.scheduleVectorRefresh(300);
+      return;
+    }
     runtime.rasterSide = Math.max(width, height);
-    update.call(renderer, width, height);
     // three 首次上传 CanvasTexture 时用 texStorage2D 固定了存储尺寸，
     // 画布变大后 texSubImage2D 会因尺寸不匹配而失败（画面冻结在 resize 前的帧），
     // 这里释放旧的 GPU 纹理，让下一帧按新尺寸重新分配并上传。
@@ -2357,35 +2422,19 @@ export class SceneManager {
     }
   }
 
-  /** 同步 Lottie 轨道遮罩层内部缓冲画布的尺寸（canvas renderer 不会随画布缩放自动调整） */
-  private resizeLottieBuffers(elements: unknown[] | undefined, width: number, height: number) {
-    if (!elements) return;
-    for (const raw of elements) {
-      if (!raw || typeof raw !== 'object') continue;
-      const element = raw as { buffers?: HTMLCanvasElement[]; elements?: unknown[] };
-      if (element.buffers) {
-        for (const buffer of element.buffers) {
-          if (buffer && (buffer.width !== width || buffer.height !== height)) {
-            buffer.width = width;
-            buffer.height = height;
-          }
-        }
-      }
-      this.resizeLottieBuffers(element.elements, width, height);
-    }
-  }
-
-  /** 释放 Lottie 运行时：销毁动画实例、释放纹理并断开画布引用 */
+  /** 释放 Lottie 运行时：销毁后端实例、释放纹理并断开画布引用 */
   private disposeLottie(node: ObjectNode) {
     const runtime = node.lottie;
     if (!runtime) return;
     node.lottie = null;
-    if (runtime.animation) {
-      runtime.animation.destroy();
-      runtime.animation = null;
+    if (runtime.engine) {
+      runtime.engine.dispose();
+      runtime.engine = null;
     }
     if (runtime.texture) runtime.texture.dispose();
     runtime.texture = null;
+    // canvas 后端不挂 DOM，webgl 后端已由 engine.dispose 移除；这里兜底清理
+    runtime.canvas?.remove();
     runtime.canvas = null;
   }
 
@@ -3105,7 +3154,7 @@ export class SceneManager {
       if (lottie?.texture && node.group.visible) {
         // 仅当 Lottie 画出了新的一帧才整幅上传 GPU：
         // 动画暂停/结束或渲染循环与动画帧不同步时，避免重复上传大画布。
-        const frame = lottie.animation ? lottie.animation.currentFrame : -1;
+        const frame = lottie.engine ? lottie.engine.frame() : -1;
         if (frame !== lottie.lastFrame) {
           lottie.lastFrame = frame;
           lottie.texture.needsUpdate = true;
@@ -3511,6 +3560,9 @@ export class SceneManager {
     // 节点自己持有媒体元素、模型、Lottie 实例与纹理，统一交给 removeNode 释放
     for (const node of this.nodes.values()) this.removeNode(node);
     this.nodes.clear();
+    // 隐藏的 GPU 画布容器随最后一个节点的 Lottie 实例一起释放
+    this.lottieHostEl?.remove();
+    this.lottieHostEl = null;
     if (this.grid) {
       this.grid.geometry.dispose();
       (this.grid.material as THREE.Material).dispose();
