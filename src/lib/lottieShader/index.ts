@@ -3,20 +3,23 @@
  *
  * 工作方式：
  * 1. Rust（lottie2shader crate）解析 Lottie JSON，用 lyon 对贝塞尔路径做自适应离散化，
- *    并以扫描线三角化的方式生成填充/描边的三角形；几何一次烘焙到图层局部坐标；
+ *    并以扫描线三角化的方式生成填充/描边的三角形；几何一次烘焙到图层局部坐标，
+ *    含关键帧的形状/组变换/trim path 等动态层在渲染时逐帧重烘焙；
  * 2. 每帧只做「图层矩阵变换 + 顶点输出」，把结果通过线性内存交给 JS；
  * 3. 本模块把顶点上传到 WebGL2，用着色器完成纯色 / 线性渐变 / 径向渐变的填充，
+ *    图片图层用纹理采样，轨道遮罩用离屏 FBO 生成 alpha 遮罩后逐像素合成；
  *    光栅化与抗锯齿交给 GPU（MSAA），最终画布作为纹理供 three.js 采样。
  *
  * 数据格式（Rust 输出，单位 u32 / f32 混合，小端）：
- * - word 0：批次数量 N
- * - 每个批次固定 53 个字：
+ * - word 0 / 1 / 2：批次数量、顶点数量（对）、UV 数量（对）
+ * - 每个批次固定 64 个字：
  *   kind、顶点起始、顶点数量、颜色 RGBA、整体 alpha、渐变起点、渐变终点、
- *   色标数量、8 个色标（每个 offset + RGBA 共 5 个字）
- * - 批次之后是顶点数组，每个顶点 x、y 两个 f32。
+ *   色标数量、8 个色标（每个 offset + RGBA 共 5 个字）、UV 起始、
+ *   遮罩分组、遮罩模式、遮罩角色（1 遮罩源 / 2 被遮罩）、图片索引
+ * - 批次之后是顶点数组，每个顶点 x、y 两个 f32；再之后是图片 UV 数组（u、v）。
  *
- * 未支持的 Lottie 特性（文本/图片/遮罩/表达式等）由注册中心自动回退到其他后端，
- * 本模块只负责能编译的形状动画。
+ * 未支持的 Lottie 特性（文本/表达式/图层蒙版/图层特效等）由 Rust 侧显式报错，
+ * 注册中心据此自动回退到其他后端，本模块只负责能无损编译的动画。
  */
 
 import wasmUrl from './lottie2shader.wasm?url';
@@ -24,9 +27,11 @@ import type { LottieBackend, LottieBackendCreateOptions, LottieBackendInstance }
 import type { LottieDocument } from '../lottie';
 
 /** 批次头固定字数，必须与 Rust 侧 BATCH_WORDS 保持一致 */
-const BATCH_WORDS = 53;
+const BATCH_WORDS = 64;
 /** 渐变色标上限，与 Rust 和着色器 uniform 数组长度一致 */
 const MAX_STOPS = 8;
+/** 图片批次类型，与 Rust 侧一致 */
+const KIND_IMAGE = 3;
 /** 后端 id，注册中心按该值把对象解析到本实现 */
 export const SHADER_BACKEND_ID = 'shader';
 
@@ -45,6 +50,9 @@ interface ShaderExports extends WebAssembly.Exports {
   l2s_fps: () => number;
   l2s_ip: () => number;
   l2s_op: () => number;
+  l2s_image_count: () => number;
+  l2s_image_src_ptr: (index: number) => number;
+  l2s_image_src_len: (index: number) => number;
 }
 
 let modulePromise: Promise<WebAssembly.Module> | null = null;
@@ -75,10 +83,13 @@ export function loadShaderModule(): Promise<WebAssembly.Module> {
 
 const VERTEX_SHADER = `#version 300 es
 layout(location = 0) in vec2 a_pos;
+layout(location = 1) in vec2 a_uv;
 uniform vec2 u_size;
 out vec2 v_pos;
+out vec2 v_uv;
 void main() {
   v_pos = a_pos;
+  v_uv = a_uv;
   // 像素坐标（Y 向下）转裁剪空间
   vec2 clip = vec2(a_pos.x / u_size.x * 2.0 - 1.0, 1.0 - a_pos.y / u_size.y * 2.0);
   gl_Position = vec4(clip, 0.0, 1.0);
@@ -87,7 +98,8 @@ void main() {
 const FRAGMENT_SHADER = `#version 300 es
 precision mediump float;
 in vec2 v_pos;
-uniform int u_kind;        // 0 纯色 / 1 线性渐变 / 2 径向渐变
+in vec2 v_uv;
+uniform int u_kind;        // 0 纯色 / 1 线性渐变 / 2 径向渐变 / 3 图片
 uniform vec4 u_color;
 uniform float u_alpha;
 uniform vec2 u_p0;
@@ -95,6 +107,10 @@ uniform vec2 u_p1;
 uniform int u_stopCount;
 uniform float u_offsets[${MAX_STOPS}];
 uniform vec4 u_colors[${MAX_STOPS}];
+uniform sampler2D u_tex;
+uniform sampler2D u_mask;
+uniform int u_maskMode;    // 0 无遮罩 / 1 alpha / 2 alpha 反相
+uniform vec2 u_size;
 out vec4 outColor;
 
 vec4 sampleGradient(float t) {
@@ -116,7 +132,9 @@ vec4 sampleGradient(float t) {
 
 void main() {
   vec4 color;
-  if (u_kind == 0) {
+  if (u_kind == 3) {
+    color = texture(u_tex, v_uv);
+  } else if (u_kind == 0) {
     color = u_color;
   } else if (u_kind == 1) {
     vec2 dir = u_p1 - u_p0;
@@ -125,6 +143,11 @@ void main() {
   } else {
     float radius = max(1e-5, length(u_p1 - u_p0));
     color = sampleGradient(length(v_pos - u_p0) / radius);
+  }
+  if (u_maskMode != 0) {
+    // 遮罩 FBO 与画布同尺寸、同一屏幕坐标系，直接按像素取 alpha
+    float m = texelFetch(u_mask, ivec2(gl_FragCoord.xy), 0).a;
+    color.a *= ((u_maskMode == 2) ? (1.0 - m) : m);
   }
   color.a *= u_alpha;
   outColor = color;
@@ -153,6 +176,23 @@ interface DrawBatch {
   p0: [number, number];
   p1: [number, number];
   stops: [number, number, number, number, number][];
+  /** UV 数组中的起始下标（对）；仅图片批次有效 */
+  uvFirst: number;
+  /** 轨道遮罩分组 id，0 表示普通批次 */
+  group: number;
+  /** 遮罩模式：1 alpha、2 alpha 反相 */
+  matteMode: number;
+  /** 遮罩角色：0 普通、1 遮罩源、2 被遮罩 */
+  role: number;
+  /** 图片纹理索引，-1 表示非图片批次 */
+  imageIndex: number;
+}
+
+/** 解析后的整帧渲染计划 */
+interface RenderPlan {
+  batches: DrawBatch[];
+  vertexCount: number;
+  uvCount: number;
 }
 
 /**
@@ -161,17 +201,20 @@ interface DrawBatch {
  * @param ints   以小端 u32 视图读取的渲染计划（长度 = result_len / 4）
  * @param floats 与 ints 共享同一块内存的 f32 视图，用于读取颜色/坐标/透明度
  */
-function parseBatches(ints: Uint32Array, floats: Float32Array): DrawBatch[] {
+function parsePlan(ints: Uint32Array, floats: Float32Array): RenderPlan {
   const count = ints[0] ?? 0;
+  const vertexCount = ints[1] ?? 0;
+  const uvCount = ints[2] ?? 0;
   const batches: DrawBatch[] = [];
   for (let i = 0; i < count; i += 1) {
-    const base = 1 + i * BATCH_WORDS;
+    const base = 3 + i * BATCH_WORDS;
     const stops: [number, number, number, number, number][] = [];
     const stopCount = ints[base + 12] ?? 0;
     for (let s = 0; s < Math.min(MAX_STOPS, stopCount); s += 1) {
       const off = base + 13 + s * 5;
       stops.push([floats[off], floats[off + 1], floats[off + 2], floats[off + 3], floats[off + 4]]);
     }
+    const imageWord = ints[base + 57] ?? 0xffffffff;
     batches.push({
       kind: ints[base] ?? 0,
       first: ints[base + 1] ?? 0,
@@ -181,9 +224,14 @@ function parseBatches(ints: Uint32Array, floats: Float32Array): DrawBatch[] {
       p0: [floats[base + 8], floats[base + 9]],
       p1: [floats[base + 10], floats[base + 11]],
       stops,
+      uvFirst: ints[base + 53] ?? 0,
+      group: ints[base + 54] ?? 0,
+      matteMode: ints[base + 55] ?? 0,
+      role: ints[base + 56] ?? 0,
+      imageIndex: imageWord === 0xffffffff ? -1 : imageWord,
     });
   }
-  return batches;
+  return { batches, vertexCount, uvCount };
 }
 
 /**
@@ -202,6 +250,7 @@ class ShaderLottiePlayer implements LottieBackendInstance {
   readonly program: WebGLProgram;
   readonly vao: WebGLVertexArrayObject;
   readonly vbo: WebGLBuffer;
+  readonly uvbo: WebGLBuffer;
   readonly uniforms: {
     size: WebGLUniformLocation;
     kind: WebGLUniformLocation;
@@ -212,7 +261,17 @@ class ShaderLottiePlayer implements LottieBackendInstance {
     stopCount: WebGLUniformLocation;
     offsets: WebGLUniformLocation;
     colors: WebGLUniformLocation;
+    tex: WebGLUniformLocation;
+    mask: WebGLUniformLocation;
+    maskMode: WebGLUniformLocation;
   };
+  /** 未加载 / 缺失图片时使用的 1×1 透明纹理，避免采样不完整纹理得到黑块 */
+  private readonly blankTex: WebGLTexture;
+  private textures: (WebGLTexture | null)[] = [];
+  private maskTex: WebGLTexture | null = null;
+  private maskFbo: WebGLFramebuffer | null = null;
+  private maskW = 0;
+  private maskH = 0;
   // 时间轴参数必须在 compile 之后才能从 WASM 读取，因此不能是构造期常量
   private fr = 30;
   private ip = 0;
@@ -260,17 +319,36 @@ class ShaderLottiePlayer implements LottieBackendInstance {
       stopCount: gl.getUniformLocation(program, 'u_stopCount') as WebGLUniformLocation,
       offsets: gl.getUniformLocation(program, `u_offsets[0]`) as WebGLUniformLocation,
       colors: gl.getUniformLocation(program, `u_colors[0]`) as WebGLUniformLocation,
+      tex: gl.getUniformLocation(program, 'u_tex') as WebGLUniformLocation,
+      mask: gl.getUniformLocation(program, 'u_mask') as WebGLUniformLocation,
+      maskMode: gl.getUniformLocation(program, 'u_maskMode') as WebGLUniformLocation,
     };
     const vao = gl.createVertexArray();
     const vbo = gl.createBuffer();
-    if (!vao || !vbo) throw new Error('无法创建 WebGL 缓冲');
+    const uvbo = gl.createBuffer();
+    if (!vao || !vbo || !uvbo) throw new Error('无法创建 WebGL 缓冲');
     this.vao = vao;
     this.vbo = vbo;
+    this.uvbo = uvbo;
     gl.bindVertexArray(vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, uvbo);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 0, 0);
     gl.bindVertexArray(null);
+    // 1×1 全透明纹理：图片未解码完成时绘制“空”，而不是被当成不完整纹理的黑色
+    const blank = gl.createTexture();
+    if (!blank) throw new Error('无法创建 WebGL 纹理');
+    this.blankTex = blank;
+    gl.bindTexture(gl.TEXTURE_2D, blank);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
     gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
     gl.disable(gl.DEPTH_TEST);
     gl.clearColor(0, 0, 0, 0);
@@ -303,6 +381,7 @@ class ShaderLottiePlayer implements LottieBackendInstance {
     this.lastTime = 0;
     this.frameValue = -1;
     this.exports.l2s_set_size(this.width, this.height);
+    this.loadImages();
   }
 
   private readError(): string {
@@ -311,6 +390,155 @@ class ShaderLottiePlayer implements LottieBackendInstance {
     const ptr = this.exports.l2s_error_ptr();
     const bytes = new Uint8Array(this.exports.memory.buffer, ptr, len);
     return new TextDecoder().decode(bytes);
+  }
+
+  /** 读取编译期收集的图片源并异步解码为 WebGL 纹理 */
+  private loadImages(): void {
+    const gl = this.gl;
+    const count = this.exports.l2s_image_count();
+    this.textures = new Array(count).fill(null);
+    for (let i = 0; i < count; i += 1) {
+      const len = this.exports.l2s_image_src_len(i);
+      const ptr = this.exports.l2s_image_src_ptr(i);
+      if (!len || !ptr) continue;
+      const src = new TextDecoder().decode(new Uint8Array(this.exports.memory.buffer, ptr, len));
+      const texture = gl.createTexture();
+      if (!texture) continue;
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
+      this.textures[i] = texture;
+      const image = new Image();
+      // 允许跨域图片上传为纹理（服务端需返回 CORS 头；失败时保持透明占位）
+      image.crossOrigin = 'anonymous';
+      image.onload = () => {
+        if (this.disposed) return;
+        try {
+          gl.bindTexture(gl.TEXTURE_2D, texture);
+          gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+          // 纹理已就绪：强制重绘当前帧
+          this.frameValue = -1;
+        } catch (error) {
+          console.warn('Lottie 图片纹理上传失败', src, error);
+        }
+      };
+      image.onerror = () => {
+        console.warn('Lottie 图片加载失败', src);
+      };
+      image.src = src;
+    }
+  }
+
+  /** 创建（或复用）与画布等尺寸的遮罩 FBO */
+  private ensureMaskTarget(): boolean {
+    const gl = this.gl;
+    const w = this.canvas.width;
+    const h = this.canvas.height;
+    if (this.maskFbo && this.maskTex && this.maskW === w && this.maskH === h) return true;
+    this.disposeMaskTarget();
+    const texture = gl.createTexture();
+    const fbo = gl.createFramebuffer();
+    if (!texture || !fbo) return false;
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+    const complete = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    if (!complete) {
+      gl.deleteTexture(texture);
+      gl.deleteFramebuffer(fbo);
+      return false;
+    }
+    this.maskTex = texture;
+    this.maskFbo = fbo;
+    this.maskW = w;
+    this.maskH = h;
+    return true;
+  }
+
+  private disposeMaskTarget(): void {
+    const gl = this.gl;
+    if (this.maskFbo) gl.deleteFramebuffer(this.maskFbo);
+    if (this.maskTex) gl.deleteTexture(this.maskTex);
+    this.maskFbo = null;
+    this.maskTex = null;
+    this.maskW = 0;
+    this.maskH = 0;
+  }
+
+  /** 绘制单个批次；maskMode 为 0 时不采样遮罩 */
+  private drawBatch(batch: DrawBatch, maskMode: number): void {
+    if (batch.count <= 0) return;
+    const gl = this.gl;
+    gl.uniform1i(this.uniforms.kind, batch.kind);
+    gl.uniform4f(this.uniforms.color, batch.color[0], batch.color[1], batch.color[2], batch.color[3]);
+    gl.uniform1f(this.uniforms.alpha, batch.alpha);
+    gl.uniform2f(this.uniforms.p0, batch.p0[0], batch.p0[1]);
+    gl.uniform2f(this.uniforms.p1, batch.p1[0], batch.p1[1]);
+    gl.uniform1i(this.uniforms.stopCount, batch.stops.length);
+    this.offsetBuf.fill(0);
+    this.colorBuf.fill(0);
+    batch.stops.forEach((stop, index) => {
+      this.offsetBuf[index] = stop[0];
+      this.colorBuf[index * 4] = stop[1];
+      this.colorBuf[index * 4 + 1] = stop[2];
+      this.colorBuf[index * 4 + 2] = stop[3];
+      this.colorBuf[index * 4 + 3] = stop[4];
+    });
+    gl.uniform1fv(this.uniforms.offsets, this.offsetBuf);
+    gl.uniform4fv(this.uniforms.colors, this.colorBuf);
+    gl.uniform1i(this.uniforms.maskMode, maskMode);
+    if (batch.kind === KIND_IMAGE) {
+      const texture = (batch.imageIndex >= 0 ? this.textures[batch.imageIndex] : null) ?? this.blankTex;
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.uniform1i(this.uniforms.tex, 0);
+      // 图片批次共用一张 UV 缓冲，按 uvFirst 调整属性偏移
+      gl.bindBuffer(gl.ARRAY_BUFFER, this.uvbo);
+      gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 0, batch.uvFirst * 8);
+    }
+    gl.drawArrays(gl.TRIANGLES, batch.first, batch.count);
+  }
+
+  /**
+   * 绘制一个轨道遮罩分组：
+   * 1. 遮罩源（role 1）先画到离屏 FBO，得到 alpha 蒙版；
+   * 2. 被遮罩批次（role 2）按蒙版逐像素调制 alpha 后画到画布。
+   */
+  private drawMaskedGroup(batches: DrawBatch[]): void {
+    const gl = this.gl;
+    const sources = batches.filter((batch) => batch.role === 1);
+    const masked = batches.filter((batch) => batch.role === 2 && batch.count > 0);
+    if (!masked.length) return;
+    if (!sources.length || !this.ensureMaskTarget()) {
+      // 遮罩目标不可用时退化为普通绘制，至少保证图层可见
+      for (const batch of masked) this.drawBatch(batch, 0);
+      return;
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.maskFbo);
+    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    // 遮罩纹理此时仍绑定在单元 1 上，而它正是当前 FBO 的颜色附件：
+    // 即便着色器分支不采样，WebGL 也会判定为反馈回路并抛出 INVALID_OPERATION
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.blankTex);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    for (const batch of sources) this.drawBatch(batch, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.maskTex);
+    gl.uniform1i(this.uniforms.mask, 1);
+    const mode = masked[0].matteMode || 1;
+    for (const batch of masked) this.drawBatch(batch, mode);
   }
 
   /** 生成一帧并绘制到画布；帧号未变化时跳过重绘 */
@@ -325,48 +553,59 @@ class ShaderLottiePlayer implements LottieBackendInstance {
     const ptr = this.exports.l2s_result_ptr();
     const ints = new Uint32Array(this.exports.memory.buffer, ptr, totalWords);
     const floats = new Float32Array(this.exports.memory.buffer, ptr, totalWords);
-    const batches = parseBatches(ints, floats);
-    const headerWords = 1 + batches.length * BATCH_WORDS;
-    const vertexCount = Math.max(0, (totalWords - headerWords) / 2);
-    if (vertexCount <= 0) {
+    const plan = parsePlan(ints, floats);
+    const { batches, vertexCount, uvCount } = plan;
+    if (vertexCount <= 0 || !batches.length) {
       this.frameValue = frame;
       this.frameCounter += 1;
       return;
     }
+    const headerWords = 3 + batches.length * BATCH_WORDS;
     const vertexPtr = ptr + headerWords * 4;
     const vertices = new Float32Array(this.exports.memory.buffer, vertexPtr, vertexCount * 2);
+    const uvPtr = vertexPtr + vertexCount * 2 * 4;
+    const uvs = uvCount > 0 ? new Float32Array(this.exports.memory.buffer, uvPtr, uvCount * 2) : null;
 
-    if (!batches.length) {
-      this.frameValue = frame;
-      this.frameCounter += 1;
-      return;
-    }
     gl.useProgram(this.program);
     gl.bindVertexArray(this.vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.vbo);
     gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.DYNAMIC_DRAW);
-    gl.uniform2f(this.uniforms.size, this.canvas.width, this.canvas.height);
-    for (const batch of batches) {
-      if (batch.count <= 0) continue;
-      gl.uniform1i(this.uniforms.kind, batch.kind);
-      gl.uniform4f(this.uniforms.color, batch.color[0], batch.color[1], batch.color[2], batch.color[3]);
-      gl.uniform1f(this.uniforms.alpha, batch.alpha);
-      gl.uniform2f(this.uniforms.p0, batch.p0[0], batch.p0[1]);
-      gl.uniform2f(this.uniforms.p1, batch.p1[0], batch.p1[1]);
-      gl.uniform1i(this.uniforms.stopCount, batch.stops.length);
-      this.offsetBuf.fill(0);
-      this.colorBuf.fill(0);
-      batch.stops.forEach((stop, index) => {
-        this.offsetBuf[index] = stop[0];
-        this.colorBuf[index * 4] = stop[1];
-        this.colorBuf[index * 4 + 1] = stop[2];
-        this.colorBuf[index * 4 + 2] = stop[3];
-        this.colorBuf[index * 4 + 3] = stop[4];
-      });
-      gl.uniform1fv(this.uniforms.offsets, this.offsetBuf);
-      gl.uniform4fv(this.uniforms.colors, this.colorBuf);
-      gl.drawArrays(gl.TRIANGLES, batch.first, batch.count);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.uvbo);
+    gl.bufferData(gl.ARRAY_BUFFER, uvs ?? new Float32Array(0), gl.DYNAMIC_DRAW);
+    // 无 UV（无图片批次）时禁用属性 1：缓冲长度为 0 时若仍启用，
+    // 整次 drawArrays 会因数组越界触发 INVALID_OPERATION 而丢弃绘制
+    if (uvCount > 0) {
+      gl.enableVertexAttribArray(1);
+      gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 0, 0);
+    } else {
+      gl.disableVertexAttribArray(1);
     }
+    gl.uniform2f(this.uniforms.size, this.canvas.width, this.canvas.height);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.blankTex);
+    gl.uniform1i(this.uniforms.tex, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.blankTex);
+    gl.uniform1i(this.uniforms.mask, 1);
+
+    let index = 0;
+    while (index < batches.length) {
+      const batch = batches[index];
+      if (batch.role !== 0 && batch.group !== 0) {
+        // 同一分组的遮罩源与被遮罩批次在计划中连续排列
+        const group: DrawBatch[] = [];
+        while (index < batches.length && batches[index].group === batch.group) {
+          group.push(batches[index]);
+          index += 1;
+        }
+        this.drawMaskedGroup(group);
+      } else {
+        this.drawBatch(batch, 0);
+        index += 1;
+      }
+    }
+
     gl.bindVertexArray(null);
     this.frameValue = frame;
     this.frameCounter += 1;
@@ -408,6 +647,8 @@ class ShaderLottiePlayer implements LottieBackendInstance {
     this.canvas.width = Math.max(1, Math.round(width));
     this.canvas.height = Math.max(1, Math.round(height));
     this.exports.l2s_set_size(this.canvas.width, this.canvas.height);
+    // 遮罩 FBO 与画布等尺寸，尺寸变化后必须重建
+    this.disposeMaskTarget();
     this.frameValue = -1;
     this.drawFrame(this.ip + (this.elapsed / 1000) * this.fr);
     return true;
@@ -425,7 +666,14 @@ class ShaderLottiePlayer implements LottieBackendInstance {
       this.raf = 0;
     }
     const gl = this.gl;
+    this.disposeMaskTarget();
+    for (const texture of this.textures) {
+      if (texture) gl.deleteTexture(texture);
+    }
+    this.textures = [];
+    gl.deleteTexture(this.blankTex);
     gl.deleteBuffer(this.vbo);
+    gl.deleteBuffer(this.uvbo);
     gl.deleteVertexArray(this.vao);
     gl.deleteProgram(this.program);
     gl.getExtension('WEBGL_lose_context')?.loseContext();
@@ -475,7 +723,7 @@ function supportsShaderBackend(): boolean {
 export const shaderLottieBackend: LottieBackend = {
   id: SHADER_BACKEND_ID,
   label: 'Rust Shader（WASM）',
-  hint: 'Rust 解析并三角化形状动画，WebGL2 着色器绘制；暂不支持文本/图片/遮罩。',
+  hint: 'Rust 解析并三角化形状动画，WebGL2 着色器绘制；含预合成、轨道遮罩、trim path、渐变与图片，文本/表达式会回退。',
   supported: supportsShaderBackend,
   create: createShaderBackend,
 };
