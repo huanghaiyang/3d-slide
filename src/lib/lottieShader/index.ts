@@ -8,7 +8,10 @@
  * 2. 每帧只做「图层矩阵变换 + 顶点输出」，把结果通过线性内存交给 JS；
  * 3. 本模块把顶点上传到 WebGL2，用着色器完成纯色 / 线性渐变 / 径向渐变的填充，
  *    图片图层用纹理采样，轨道遮罩用离屏 FBO 生成 alpha 遮罩后逐像素合成；
- *    光栅化与抗锯齿交给 GPU（MSAA），最终画布作为纹理供 three.js 采样。
+ *    光栅化与抗锯齿交给 GPU（MSAA）。
+ * 4. 所有播放器共享同一个隐藏的 WebGL2 上下文（浏览器上下文配额有限，
+ *    每个对象单开上下文会挤掉 three.js 自己的上下文），渲染完成后把结果
+ *    拷回各对象的 2D 画布，最终作为纹理供 three.js 采样。
  *
  * 数据格式（Rust 输出，单位 u32 / f32 混合，小端）：
  * - word 0 / 1 / 2：批次数量、顶点数量（对）、UV 数量（对）
@@ -234,6 +237,115 @@ function parsePlan(ints: Uint32Array, floats: Float32Array): RenderPlan {
   return { batches, vertexCount, uvCount };
 }
 
+/** 着色器 uniform 位置集合（同一上下文内的所有播放器共享） */
+interface UniformSet {
+  size: WebGLUniformLocation;
+  kind: WebGLUniformLocation;
+  color: WebGLUniformLocation;
+  alpha: WebGLUniformLocation;
+  p0: WebGLUniformLocation;
+  p1: WebGLUniformLocation;
+  stopCount: WebGLUniformLocation;
+  offsets: WebGLUniformLocation;
+  colors: WebGLUniformLocation;
+  tex: WebGLUniformLocation;
+  mask: WebGLUniformLocation;
+  maskMode: WebGLUniformLocation;
+}
+
+/**
+ * 全局共享的 WebGL2 上下文。
+ *
+ * 浏览器对同时存活的 WebGL 上下文有硬上限（常见为 16 个），超限时最旧的上下文
+ * 会被强制回收。若每个 Lottie 对象各建一个上下文，页面上的动画一多，就会先回收
+ * three.js 自己的上下文，表现为整场景渲染时程序链接日志读取空指针。
+ *
+ * 因此这里只建立一个隐藏画布与上下文：各播放器按自身尺寸渲染到它的默认帧缓冲，
+ * 再把结果拷回自己的 2D 画布（SceneManager 仍按画布取纹理），上下文数量恒为 1。
+ */
+interface SharedGL {
+  canvas: HTMLCanvasElement;
+  gl: WebGL2RenderingContext;
+  program: WebGLProgram;
+  vao: WebGLVertexArrayObject;
+  vbo: WebGLBuffer;
+  uvbo: WebGLBuffer;
+  blankTex: WebGLTexture;
+  uniforms: UniformSet;
+}
+
+let sharedGL: SharedGL | null = null;
+
+/** 获取（或惰性创建）全局共享上下文 */
+function getSharedGL(): SharedGL {
+  if (sharedGL) return sharedGL;
+  const canvas = document.createElement('canvas');
+  canvas.width = 1;
+  canvas.height = 1;
+  const gl = canvas.getContext('webgl2', {
+    alpha: true,
+    antialias: true,
+    premultipliedAlpha: true,
+    preserveDrawingBuffer: true,
+  });
+  if (!gl) throw new Error('浏览器不支持 WebGL2');
+  const vs = compileShader(gl, gl.VERTEX_SHADER, VERTEX_SHADER);
+  const fs = compileShader(gl, gl.FRAGMENT_SHADER, FRAGMENT_SHADER);
+  const program = gl.createProgram();
+  if (!program) throw new Error('无法创建着色器程序');
+  gl.attachShader(program, vs);
+  gl.attachShader(program, fs);
+  gl.linkProgram(program);
+  gl.deleteShader(vs);
+  gl.deleteShader(fs);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    const info = gl.getProgramInfoLog(program) ?? '';
+    gl.deleteProgram(program);
+    throw new Error(`着色器链接失败：${info}`);
+  }
+  const uniforms: UniformSet = {
+    size: gl.getUniformLocation(program, 'u_size') as WebGLUniformLocation,
+    kind: gl.getUniformLocation(program, 'u_kind') as WebGLUniformLocation,
+    color: gl.getUniformLocation(program, 'u_color') as WebGLUniformLocation,
+    alpha: gl.getUniformLocation(program, 'u_alpha') as WebGLUniformLocation,
+    p0: gl.getUniformLocation(program, 'u_p0') as WebGLUniformLocation,
+    p1: gl.getUniformLocation(program, 'u_p1') as WebGLUniformLocation,
+    stopCount: gl.getUniformLocation(program, 'u_stopCount') as WebGLUniformLocation,
+    offsets: gl.getUniformLocation(program, `u_offsets[0]`) as WebGLUniformLocation,
+    colors: gl.getUniformLocation(program, `u_colors[0]`) as WebGLUniformLocation,
+    tex: gl.getUniformLocation(program, 'u_tex') as WebGLUniformLocation,
+    mask: gl.getUniformLocation(program, 'u_mask') as WebGLUniformLocation,
+    maskMode: gl.getUniformLocation(program, 'u_maskMode') as WebGLUniformLocation,
+  };
+  const vao = gl.createVertexArray();
+  const vbo = gl.createBuffer();
+  const uvbo = gl.createBuffer();
+  if (!vao || !vbo || !uvbo) throw new Error('无法创建 WebGL 缓冲');
+  gl.bindVertexArray(vao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  gl.bindBuffer(gl.ARRAY_BUFFER, uvbo);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
+  // 1×1 全透明纹理：图片未解码完成时绘制“空”，而不是被当成不完整纹理的黑色
+  const blankTex = gl.createTexture();
+  if (!blankTex) throw new Error('无法创建 WebGL 纹理');
+  gl.bindTexture(gl.TEXTURE_2D, blankTex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+  gl.disable(gl.DEPTH_TEST);
+  gl.clearColor(0, 0, 0, 0);
+  sharedGL = { canvas, gl, program, vao, vbo, uvbo, blankTex, uniforms };
+  return sharedGL;
+}
+
 /**
  * 一个 Lottie 对象的 GPU 播放器。
  * 自身驱动 requestAnimationFrame，帧号只在真正重绘时递增，
@@ -267,6 +379,10 @@ class ShaderLottiePlayer implements LottieBackendInstance {
   };
   /** 未加载 / 缺失图片时使用的 1×1 透明纹理，避免采样不完整纹理得到黑块 */
   private readonly blankTex: WebGLTexture;
+  /** 共享上下文画布：所有播放器轮流渲染到它，再拷贝到各自的 2D 画布 */
+  private readonly sharedCanvas: HTMLCanvasElement;
+  /** 把共享上下文的结果拷回对象画布（SceneManager 以此画布作为纹理源） */
+  private readonly ctx: CanvasRenderingContext2D;
   private textures: (WebGLTexture | null)[] = [];
   private maskTex: WebGLTexture | null = null;
   private maskFbo: WebGLFramebuffer | null = null;
@@ -287,71 +403,26 @@ class ShaderLottiePlayer implements LottieBackendInstance {
   private readonly offsetBuf = new Float32Array(MAX_STOPS);
   private readonly colorBuf = new Float32Array(MAX_STOPS * 4);
 
-  constructor(canvas: HTMLCanvasElement, gl: WebGL2RenderingContext, instance: WebAssembly.Instance) {
+  constructor(canvas: HTMLCanvasElement, instance: WebAssembly.Instance) {
     this.canvas = canvas;
-    this.gl = gl;
     this.instance = instance;
     this.exports = instance.exports as ShaderExports;
     this.width = canvas.width;
     this.height = canvas.height;
-    const vs = compileShader(gl, gl.VERTEX_SHADER, VERTEX_SHADER);
-    const fs = compileShader(gl, gl.FRAGMENT_SHADER, FRAGMENT_SHADER);
-    const program = gl.createProgram();
-    if (!program) throw new Error('无法创建着色器程序');
-    gl.attachShader(program, vs);
-    gl.attachShader(program, fs);
-    gl.linkProgram(program);
-    gl.deleteShader(vs);
-    gl.deleteShader(fs);
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-      const info = gl.getProgramInfoLog(program) ?? '';
-      gl.deleteProgram(program);
-      throw new Error(`着色器链接失败：${info}`);
-    }
-    this.program = program;
-    this.uniforms = {
-      size: gl.getUniformLocation(program, 'u_size') as WebGLUniformLocation,
-      kind: gl.getUniformLocation(program, 'u_kind') as WebGLUniformLocation,
-      color: gl.getUniformLocation(program, 'u_color') as WebGLUniformLocation,
-      alpha: gl.getUniformLocation(program, 'u_alpha') as WebGLUniformLocation,
-      p0: gl.getUniformLocation(program, 'u_p0') as WebGLUniformLocation,
-      p1: gl.getUniformLocation(program, 'u_p1') as WebGLUniformLocation,
-      stopCount: gl.getUniformLocation(program, 'u_stopCount') as WebGLUniformLocation,
-      offsets: gl.getUniformLocation(program, `u_offsets[0]`) as WebGLUniformLocation,
-      colors: gl.getUniformLocation(program, `u_colors[0]`) as WebGLUniformLocation,
-      tex: gl.getUniformLocation(program, 'u_tex') as WebGLUniformLocation,
-      mask: gl.getUniformLocation(program, 'u_mask') as WebGLUniformLocation,
-      maskMode: gl.getUniformLocation(program, 'u_maskMode') as WebGLUniformLocation,
-    };
-    const vao = gl.createVertexArray();
-    const vbo = gl.createBuffer();
-    const uvbo = gl.createBuffer();
-    if (!vao || !vbo || !uvbo) throw new Error('无法创建 WebGL 缓冲');
-    this.vao = vao;
-    this.vbo = vbo;
-    this.uvbo = uvbo;
-    gl.bindVertexArray(vao);
-    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
-    gl.enableVertexAttribArray(0);
-    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-    gl.bindBuffer(gl.ARRAY_BUFFER, uvbo);
-    gl.enableVertexAttribArray(1);
-    gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 0, 0);
-    gl.bindVertexArray(null);
-    // 1×1 全透明纹理：图片未解码完成时绘制“空”，而不是被当成不完整纹理的黑色
-    const blank = gl.createTexture();
-    if (!blank) throw new Error('无法创建 WebGL 纹理');
-    this.blankTex = blank;
-    gl.bindTexture(gl.TEXTURE_2D, blank);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-    gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-    gl.disable(gl.DEPTH_TEST);
-    gl.clearColor(0, 0, 0, 0);
+    // 对象画布只作为“显示表面”：渲染在共享上下文里完成，再拷回这块 2D 画布，
+    // 从而避免每个 Lottie 对象各占一个 WebGL 上下文而触发浏览器的上下文回收
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('无法创建 2D 画布');
+    this.ctx = ctx;
+    const shared = getSharedGL();
+    this.gl = shared.gl;
+    this.program = shared.program;
+    this.vao = shared.vao;
+    this.vbo = shared.vbo;
+    this.uvbo = shared.uvbo;
+    this.blankTex = shared.blankTex;
+    this.uniforms = shared.uniforms;
+    this.sharedCanvas = shared.canvas;
 
     this.start();
   }
@@ -547,7 +618,14 @@ class ShaderLottiePlayer implements LottieBackendInstance {
     if (Math.abs(frame - this.frameValue) < 0.01) return;
     const gl = this.gl;
     if (!this.exports.l2s_render(frame)) return;
-    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    const width = this.canvas.width;
+    const height = this.canvas.height;
+    // 共享上下文按当前对象的像素尺寸渲染，随后拷贝回对象画布
+    const target = this.sharedCanvas;
+    if (target.width !== width) target.width = width;
+    if (target.height !== height) target.height = height;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, width, height);
     gl.clear(gl.COLOR_BUFFER_BIT);
     const totalWords = this.exports.l2s_result_len() / 4;
     const ptr = this.exports.l2s_result_ptr();
@@ -556,6 +634,7 @@ class ShaderLottiePlayer implements LottieBackendInstance {
     const plan = parsePlan(ints, floats);
     const { batches, vertexCount, uvCount } = plan;
     if (vertexCount <= 0 || !batches.length) {
+      this.present(width, height);
       this.frameValue = frame;
       this.frameCounter += 1;
       return;
@@ -607,8 +686,15 @@ class ShaderLottiePlayer implements LottieBackendInstance {
     }
 
     gl.bindVertexArray(null);
+    this.present(width, height);
     this.frameValue = frame;
     this.frameCounter += 1;
+  }
+
+  /** 把共享上下文的渲染结果拷贝到本对象的 2D 画布 */
+  private present(width: number, height: number): void {
+    this.ctx.clearRect(0, 0, width, height);
+    this.ctx.drawImage(this.sharedCanvas, 0, 0, width, height);
   }
 
   /** 推进时间并按需重绘；非循环播放到结尾后保持最后一帧 */
@@ -671,12 +757,7 @@ class ShaderLottiePlayer implements LottieBackendInstance {
       if (texture) gl.deleteTexture(texture);
     }
     this.textures = [];
-    gl.deleteTexture(this.blankTex);
-    gl.deleteBuffer(this.vbo);
-    gl.deleteBuffer(this.uvbo);
-    gl.deleteVertexArray(this.vao);
-    gl.deleteProgram(this.program);
-    gl.getExtension('WEBGL_lose_context')?.loseContext();
+    // blankTex / program / VAO / 顶点缓冲属于全局共享上下文，不能随单个对象释放
     this.canvas.remove();
   }
 }
@@ -684,19 +765,12 @@ class ShaderLottiePlayer implements LottieBackendInstance {
 /** 创建 shader 后端实例；WASM 加载与文档编译失败时由 SceneManager 回退 */
 async function createShaderBackend(options: LottieBackendCreateOptions): Promise<LottieBackendInstance> {
   const { canvas, data, width, height } = options;
-  const gl = canvas.getContext('webgl2', {
-    alpha: true,
-    antialias: true,
-    premultipliedAlpha: true,
-    preserveDrawingBuffer: true,
-  });
-  if (!gl) throw new Error('浏览器不支持 WebGL2');
   canvas.width = width;
   canvas.height = height;
   const module = await loadShaderModule();
   // 每个播放器独立实例：Rust 侧的编译结果是实例级全局状态，共享实例会被互相覆盖
   const instance = await WebAssembly.instantiate(module, {});
-  const player = new ShaderLottiePlayer(canvas, gl, instance);
+  const player = new ShaderLottiePlayer(canvas, instance);
   player.setLoop(options.loop);
   player.setSpeed(options.speed);
   player.compile(data as LottieDocument);

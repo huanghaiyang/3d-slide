@@ -166,6 +166,8 @@ interface ModelRuntime {
 interface LottieRuntime {
   /** 动画素材地址（可能是 URL 或内联 JSON） */
   src: string;
+  /** 对象请求的渲染后端 id；GPU 后端回退后仍保留原值，避免反复触发重建 */
+  requestedId: string;
   /** 实际使用的渲染后端 id；GPU 后端初始化失败时会回退为 canvas */
   backendId: string;
   /** loading 加载中 / ready 可用 / error 失败 */
@@ -2273,10 +2275,11 @@ export class SceneManager {
   private ensureLottie(node: ObjectNode, object: LottieObject) {
     const existing = node.lottie;
     const backend = resolveLottieBackend(object.renderer);
-    if (existing && existing.src === object.src && existing.backendId === backend.id) return;
+    if (existing && existing.src === object.src && existing.requestedId === backend.id) return;
     this.disposeLottie(node);
     const runtime: LottieRuntime = {
       src: object.src,
+      requestedId: backend.id,
       backendId: backend.id,
       status: 'loading',
       canvas: null,
