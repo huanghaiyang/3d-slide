@@ -224,6 +224,68 @@ void main() {
   outColor = vec4(src.rgb * a, src.a * a);
 }`;
 
+/**
+ * 图层混合模式程序：把图层内容按 lottie 的 bm 与背景混合。
+ * WebGL2 无法读回当前帧缓冲，因此调用方会先把目标复制到 u_dst 再执行本程序。
+ * u_blend 使用 lottie 的 bm 原值：1 multiply、2 screen、3 overlay、4 darken、
+ * 5 lighten、6 color-dodge、7 color-burn、8 hard-light、9 soft-light、
+ * 10 difference、11 exclusion，0 / 12+ 按正常混合处理。
+ */
+const BLEND_FRAGMENT_SHADER = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_src;
+uniform sampler2D u_dst;
+uniform int u_blend;
+out vec4 outColor;
+
+float hardLight(float cb, float cs) {
+  return cs <= 0.5 ? 2.0 * cb * cs : 1.0 - 2.0 * (1.0 - cb) * (1.0 - cs);
+}
+
+vec3 blendColor(vec3 cb, vec3 cs, int mode) {
+  if (mode == 1) {
+    return cb * cs;
+  } else if (mode == 2) {
+    return cb + cs - cb * cs;
+  } else if (mode == 3) {
+    return vec3(hardLight(cs.r, cb.r), hardLight(cs.g, cb.g), hardLight(cs.b, cb.b));
+  } else if (mode == 4) {
+    return min(cb, cs);
+  } else if (mode == 5) {
+    return max(cb, cs);
+  } else if (mode == 6) {
+    return min(vec3(1.0), cb / max(vec3(1e-5), 1.0 - cs));
+  } else if (mode == 7) {
+    return 1.0 - min(vec3(1.0), (1.0 - cb) / max(vec3(1e-5), cs));
+  } else if (mode == 8) {
+    return vec3(hardLight(cb.r, cs.r), hardLight(cb.g, cs.g), hardLight(cb.b, cs.b));
+  } else if (mode == 9) {
+    vec3 d = mix(cb * cb * (3.0 - 2.0 * cb), sqrt(cb), cs);
+    return vec3(
+      cs.r <= 0.5 ? cb.r - (1.0 - 2.0 * cs.r) * cb.r * (1.0 - cb.r) : d.r,
+      cs.g <= 0.5 ? cb.g - (1.0 - 2.0 * cs.g) * cb.g * (1.0 - cb.g) : d.g,
+      cs.b <= 0.5 ? cb.b - (1.0 - 2.0 * cs.b) * cb.b * (1.0 - cb.b) : d.b);
+  } else if (mode == 10) {
+    return abs(cb - cs);
+  } else if (mode == 11) {
+    return cb + cs - 2.0 * cb * cs;
+  }
+  return cs;
+}
+
+void main() {
+  // 两侧都是预乘颜色，混合函数需要非预乘分量
+  vec4 s = texture(u_src, v_uv);
+  vec4 d = texture(u_dst, v_uv);
+  vec3 cs = s.a > 0.0 ? s.rgb / s.a : vec3(0.0);
+  vec3 cb = d.a > 0.0 ? d.rgb / d.a : vec3(0.0);
+  vec3 b = blendColor(cb, cs, u_blend);
+  // 先按混合函数替换交叠区域，再做 source-over
+  vec3 co = s.rgb * (1.0 - d.a) + s.a * d.a * b + d.rgb * (1.0 - s.a);
+  outColor = vec4(co, s.a + d.a * (1.0 - s.a));
+}`;
+
 
 function compileShader(gl: WebGL2RenderingContext, type: number, source: string): WebGLShader {
   const shader = gl.createShader(type);
@@ -260,6 +322,10 @@ interface DrawBatch {
   imageIndex: number;
   /** 所属图层 pass（模糊 / 蒙版图层），0xFFFFFFFF 表示直接画到目标 */
   passId: number;
+  /** 所属图层的混合模式（lottie bm 原值，0 表示正常） */
+  blend: number;
+  /** 所属图层下标：同一图层的批次连续存放，混合模式按图层整体生效 */
+  layer: number;
 }
 
 /** 图层离屏 pass（模糊或蒙版） */
@@ -333,6 +399,8 @@ function parsePlan(ints: Uint32Array, floats: Float32Array): RenderPlan {
       role: ints[base + 56] ?? 0,
       imageIndex: imageWord === 0xffffffff ? -1 : imageWord,
       passId: ints[base + 58] ?? 0xffffffff,
+      blend: ints[base + 59] ?? 0,
+      layer: ints[base + 60] ?? 0,
     });
   }
   // 尾部：pass 与蒙版记录
@@ -396,6 +464,13 @@ interface CompositeUniformSet {
   mode: WebGLUniformLocation;
 }
 
+/** 混合模式程序 uniform 位置 */
+interface BlendUniformSet {
+  src: WebGLUniformLocation;
+  dst: WebGLUniformLocation;
+  mode: WebGLUniformLocation;
+}
+
 /**
  * 全局共享的 WebGL2 上下文。
  *
@@ -412,6 +487,8 @@ interface SharedGL {
   program: WebGLProgram;
   blurProgram: WebGLProgram;
   compositeProgram: WebGLProgram;
+  /** 图层混合模式合成程序 */
+  blendProgram: WebGLProgram;
   vao: WebGLVertexArrayObject;
   vbo: WebGLBuffer;
   uvbo: WebGLBuffer;
@@ -422,6 +499,7 @@ interface SharedGL {
   uniforms: UniformSet;
   blurUniforms: BlurUniformSet;
   compositeUniforms: CompositeUniformSet;
+  blendUniforms: BlendUniformSet;
 }
 
 let sharedGL: SharedGL | null = null;
@@ -461,6 +539,7 @@ function getSharedGL(): SharedGL {
   const program = linkProgram(gl, VERTEX_SHADER, FRAGMENT_SHADER);
   const blurProgram = linkProgram(gl, QUAD_VERTEX_SHADER, BLUR_FRAGMENT_SHADER);
   const compositeProgram = linkProgram(gl, QUAD_VERTEX_SHADER, COMPOSITE_FRAGMENT_SHADER);
+  const blendProgram = linkProgram(gl, QUAD_VERTEX_SHADER, BLEND_FRAGMENT_SHADER);
   const uniforms: UniformSet = {
     size: gl.getUniformLocation(program, 'u_size') as WebGLUniformLocation,
     kind: gl.getUniformLocation(program, 'u_kind') as WebGLUniformLocation,
@@ -481,6 +560,11 @@ function getSharedGL(): SharedGL {
     src: gl.getUniformLocation(compositeProgram, 'u_src') as WebGLUniformLocation,
     mask: gl.getUniformLocation(compositeProgram, 'u_mask') as WebGLUniformLocation,
     mode: gl.getUniformLocation(compositeProgram, 'u_mode') as WebGLUniformLocation,
+  };
+  const blendUniforms: BlendUniformSet = {
+    src: gl.getUniformLocation(blendProgram, 'u_src') as WebGLUniformLocation,
+    dst: gl.getUniformLocation(blendProgram, 'u_dst') as WebGLUniformLocation,
+    mode: gl.getUniformLocation(blendProgram, 'u_blend') as WebGLUniformLocation,
   };
   const vao = gl.createVertexArray();
   const vbo = gl.createBuffer();
@@ -519,6 +603,8 @@ function getSharedGL(): SharedGL {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
   // 预乘 alpha 合成：所有程序都输出预乘颜色
+  // 必须先 enable(BLEND)：否则 blendFunc 不生效，半透明批次会直接覆盖目标
+  gl.enable(gl.BLEND);
   gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
   gl.disable(gl.DEPTH_TEST);
   gl.clearColor(0, 0, 0, 0);
@@ -528,6 +614,7 @@ function getSharedGL(): SharedGL {
     program,
     blurProgram,
     compositeProgram,
+    blendProgram,
     vao,
     vbo,
     uvbo,
@@ -537,6 +624,7 @@ function getSharedGL(): SharedGL {
     uniforms,
     blurUniforms,
     compositeUniforms,
+    blendUniforms,
   };
   return sharedGL;
 }
@@ -560,10 +648,12 @@ class ShaderLottiePlayer implements LottieBackendInstance {
   readonly uvbo: WebGLBuffer;
   private readonly blurProgram: WebGLProgram;
   private readonly compositeProgram: WebGLProgram;
+  private readonly blendProgram: WebGLProgram;
   private readonly quadVao: WebGLVertexArrayObject;
   readonly uniforms: UniformSet;
   private readonly blurUniforms: BlurUniformSet;
   private readonly compositeUniforms: CompositeUniformSet;
+  private readonly blendUniforms: BlendUniformSet;
   /** 未加载 / 缺失图片时使用的 1×1 透明纹理，避免采样不完整纹理得到黑块 */
   private readonly blankTex: WebGLTexture;
   /** 共享上下文画布：所有播放器轮流渲染到它，再拷贝到各自的 2D 画布 */
@@ -575,6 +665,8 @@ class ShaderLottiePlayer implements LottieBackendInstance {
   private targets: { tex: WebGLTexture; fbo: WebGLFramebuffer }[] = [];
   /** 当前帧已占用的目标数量（渲染 pass 时按嵌套深度租用 / 归还） */
   private targetLease = 0;
+  /** 正在把混合模式图层渲染到离屏目标时的嵌套深度（避免递归重复分发） */
+  private blendDepth = 0;
   // 时间轴参数必须在 compile 之后才能从 WASM 读取，因此不能是构造期常量
   private fr = 30;
   private ip = 0;
@@ -606,6 +698,7 @@ class ShaderLottiePlayer implements LottieBackendInstance {
     this.program = shared.program;
     this.blurProgram = shared.blurProgram;
     this.compositeProgram = shared.compositeProgram;
+    this.blendProgram = shared.blendProgram;
     this.vao = shared.vao;
     this.vbo = shared.vbo;
     this.uvbo = shared.uvbo;
@@ -614,6 +707,7 @@ class ShaderLottiePlayer implements LottieBackendInstance {
     this.uniforms = shared.uniforms;
     this.blurUniforms = shared.blurUniforms;
     this.compositeUniforms = shared.compositeUniforms;
+    this.blendUniforms = shared.blendUniforms;
     this.sharedCanvas = shared.canvas;
 
     this.start();
@@ -863,6 +957,8 @@ class ShaderLottiePlayer implements LottieBackendInstance {
   ): void {
     const gl = this.gl;
     this.bindTarget(dst);
+    // 目标可能在上一帧留有内容：模糊结果需要整屏替换，先清空再绘制
+    gl.clear(gl.COLOR_BUFFER_BIT);
     gl.useProgram(this.blurProgram);
     gl.bindVertexArray(this.quadVao);
     gl.activeTexture(gl.TEXTURE0);
@@ -905,6 +1001,50 @@ class ShaderLottiePlayer implements LottieBackendInstance {
   }
 
   /**
+   * 把图层内容按混合模式合成到目标。
+   *
+   * WebGL2 不能在同一个帧缓冲里同时读 dst 与写结果，因此先把目标 blit 到一张
+   * 离屏纹理，再运行混合程序：结果已包含背景，写入时必须关闭固定混合。
+   */
+  private blendComposite(
+    src: { tex: WebGLTexture; fbo: WebGLFramebuffer },
+    target: { tex: WebGLTexture; fbo: WebGLFramebuffer } | null,
+    blend: number,
+  ): void {
+    const gl = this.gl;
+    if (!target) {
+      this.composite(src, null, 0, target);
+      return;
+    }
+    const saved = this.targetLease;
+    const dst = this.leaseTarget();
+    if (!dst) {
+      this.targetLease = saved;
+      this.composite(src, null, 0, target);
+      return;
+    }
+    const width = this.canvas.width;
+    const height = this.canvas.height;
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, target.fbo);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, dst.fbo);
+    gl.blitFramebuffer(0, 0, width, height, 0, 0, width, height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    this.bindTarget(target);
+    gl.useProgram(this.blendProgram);
+    gl.bindVertexArray(this.quadVao);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, src.tex);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, dst.tex);
+    gl.uniform1i(this.blendUniforms.src, 0);
+    gl.uniform1i(this.blendUniforms.dst, 1);
+    gl.uniform1i(this.blendUniforms.mode, blend);
+    gl.disable(gl.BLEND);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.enable(gl.BLEND);
+    this.targetLease = saved;
+  }
+
+  /**
    * 绘制一个图层 pass：内容先画到离屏目标，再按需做高斯模糊 / 蒙版合成。
    * 嵌套 pass（预合成里的模糊图层）会被 renderRange 递归处理。
    */
@@ -924,7 +1064,10 @@ class ShaderLottiePlayer implements LottieBackendInstance {
     this.bindTarget(content);
     this.gl.clear(this.gl.COLOR_BUFFER_BIT);
     this.restoreMain();
-    this.renderRange(plan, from, to, content, pass.id);
+    // 预合成图层本身若属于某个轨道遮罩分组，该分组由外层统一处理，
+    // 这里的子批次不要再次按分组分发（否则组内没有遮罩源，内容会被整组丢弃）。
+    const contentGroup = plan.batches[from]?.group ?? 0;
+    this.renderRange(plan, from, to, content, pass.id, false, contentGroup);
     let src = content;
     if (pass.sigmaX > 0.4) {
       const horizontal = this.leaseTarget();
@@ -973,8 +1116,13 @@ class ShaderLottiePlayer implements LottieBackendInstance {
       return;
     }
     if (split === start) {
-      // 遮罩源不可见：直接绘制被遮罩内容（必须在分组内关闭分组递归）
-      this.renderRange(plan, split, end, target, ownerPass, true);
+      // 遮罩源在本帧不可见（超出 ip/op 或完全透明），蒙版为空：
+      // 正向遮罩（tt=1 alpha-in / tt=3 luma-in）结果全透明，什么都不画；
+      // 反向遮罩（tt=2 / tt=4）等价于蒙版处处不透明，内容照常绘制。
+      const tt = plan.batches[split]?.matteMode || 1;
+      if (tt === 2 || tt === 4) {
+        this.renderRange(plan, split, end, target, ownerPass, true);
+      }
       return;
     }
     const saved = this.targetLease;
@@ -997,7 +1145,22 @@ class ShaderLottiePlayer implements LottieBackendInstance {
     // 1 alpha-in、2 alpha-out、3 亮度-in、4 亮度-out
     const tt = plan.batches[split]?.matteMode || 1;
     const mode = tt === 1 ? 2 : tt === 2 ? 3 : tt === 3 ? 4 : 5;
-    this.composite(temp, matte, mode, target);
+    // 被遮罩图层的混合模式作用在「遮罩后的整层」上
+    const blend = plan.batches[split]?.blend ?? 0;
+    if (blend !== 0) {
+      const composed = this.leaseTarget();
+      if (composed) {
+        this.bindTarget(composed);
+        this.gl.clear(this.gl.COLOR_BUFFER_BIT);
+        this.restoreMain();
+        this.composite(temp, matte, mode, composed);
+        this.blendComposite(composed, target, blend);
+      } else {
+        this.composite(temp, matte, mode, target);
+      }
+    } else {
+      this.composite(temp, matte, mode, target);
+    }
     this.restoreMain();
     this.targetLease = saved;
   }
@@ -1010,6 +1173,8 @@ class ShaderLottiePlayer implements LottieBackendInstance {
    *
    * @param skipGroups 为 true 时不再按分组递归：renderMatteGroup 内部拆分出的
    *   子区间仍然是同一分组，若再次分发会无限递归直到栈溢出。
+   * @param skipGroup 只在 pass 内部生效：该分组已由外层区间统一处理（遮罩源已画到
+   *   matte 目标），pass 里同一分组的批次直接绘制，不再重复分组。
    */
   private renderRange(
     plan: RenderPlan,
@@ -1018,6 +1183,7 @@ class ShaderLottiePlayer implements LottieBackendInstance {
     target: { tex: WebGLTexture; fbo: WebGLFramebuffer } | null,
     ownerPass: number,
     skipGroups = false,
+    skipGroup = 0,
   ): void {
     const passesById = new Map<number, LayerPass>();
     for (const pass of plan.passes) passesById.set(pass.id, pass);
@@ -1029,12 +1195,41 @@ class ShaderLottiePlayer implements LottieBackendInstance {
         index += 1;
         continue;
       }
-      if (!skipGroups && batch.group !== 0) {
+      if (!skipGroups && batch.group !== 0 && batch.group !== skipGroup) {
         let next = index;
         while (next < end && plan.batches[next].group === batch.group) next += 1;
         this.renderMatteGroup(plan, index, next, target, ownerPass);
         index = next;
         continue;
+      }
+      // 混合模式按图层整体生效：同图层（同 group=0）的连续批次先渲染到离屏目标，
+      // 再与背景混合。轨道遮罩内部的混合由 renderMatteGroup 在遮罩合成后处理。
+      if (!skipGroups && this.blendDepth === 0 && batch.blend !== 0 && batch.group === 0) {
+        let next = index + 1;
+        while (
+          next < end &&
+          plan.batches[next].group === 0 &&
+          plan.batches[next].layer === batch.layer &&
+          plan.batches[next].blend === batch.blend
+        ) {
+          next += 1;
+        }
+        const saved = this.targetLease;
+        const layer = this.leaseTarget();
+        if (layer) {
+          this.bindTarget(layer);
+          this.gl.clear(this.gl.COLOR_BUFFER_BIT);
+          this.restoreMain();
+          this.blendDepth += 1;
+          this.renderRange(plan, index, next, layer, ownerPass, false, 0);
+          this.blendDepth -= 1;
+          this.blendComposite(layer, target, batch.blend);
+          this.restoreMain();
+          this.targetLease = saved;
+          index = next;
+          continue;
+        }
+        this.targetLease = saved;
       }
       if (batch.passId === PASS_NONE || batch.passId === ownerPass) {
         this.drawBatch(batch);
@@ -1106,9 +1301,27 @@ class ShaderLottiePlayer implements LottieBackendInstance {
     gl.bindTexture(gl.TEXTURE_2D, this.blankTex);
     gl.uniform1i(this.uniforms.tex, 0);
 
-    // 先按图层 pass（模糊 / 蒙版）做离屏合成，普通批次直接画到默认帧缓冲
+    // 先按图层 pass（模糊 / 蒙版 / 混合模式）做离屏合成，最后整帧拷贝到默认帧缓冲
     this.targetLease = 0;
-    this.renderRange(plan, 0, batches.length, null, PASS_NONE);
+    this.blendDepth = 0;
+    const scene = this.leaseTarget();
+    if (scene) {
+      this.bindTarget(scene);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      this.restoreMain();
+      this.renderRange(plan, 0, batches.length, scene, PASS_NONE);
+      gl.bindVertexArray(null);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, width, height);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      this.composite(scene, null, 0, null);
+    } else {
+      // 目标池分配失败时退化为直接画到默认帧缓冲（混合模式不生效）
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, width, height);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      this.renderRange(plan, 0, batches.length, null, PASS_NONE);
+    }
 
     gl.bindVertexArray(null);
     this.present(width, height);
