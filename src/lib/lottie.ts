@@ -12,6 +12,7 @@
  * 避免影响编辑器主包加载速度。
  */
 
+import { unzipSync } from 'fflate';
 import type { AnimationConfigWithData, AnimationItem } from 'lottie-web';
 import { LIMITS } from './constants';
 import { formatBytes } from './image';
@@ -139,8 +140,95 @@ export function lottieSize(document: LottieDocument): { width: number; height: n
   return { width, height, duration: Math.max(0, (end - start) / fr) };
 }
 
+/** dotLottie 压缩包内常见图片后缀 -> MIME，用于把 zip 内资源内联进动画 JSON。 */
+const ZIP_IMAGE_MIME: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  svg: 'image/svg+xml',
+  avif: 'image/avif',
+};
+
+/** 判断字节流是否为 zip（dotLottie 的 .lottie 文件本质是 zip 容器）。 */
+function isZipBytes(bytes: Uint8Array): boolean {
+  if (bytes.length < 4) return false;
+  return bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04;
+}
+
+/** 把 zip 内的二进制转成 base64，分块拼接避免超长 apply 导致栈溢出。 */
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+/** 规范化 zip 内路径：去掉 ./ 前缀与重复斜杠，便于按 JSON 里的 u / p 查找。 */
+function normalizeZipPath(path: string): string {
+  return path.replace(/^\.\//, '').replace(/\/+/g, '/').replace(/^\//, '');
+}
+
+/**
+ * 从 dotLottie 压缩包中取出首个动画的 JSON 文本。
+ *
+ * 寻找顺序：manifest.json 的 animations[0].id → animations/ 下的 JSON → 根目录 JSON。
+ * 随后把 JSON 里以相对路径引用的图片资源替换成 zip 内数据的 dataURL，
+ * 这样解压后的动画不再依赖压缩包，可直接用 lottie-web / 自研后端播放。
+ */
+function extractDotLottie(bytes: Uint8Array): string {
+  let files: Record<string, Uint8Array>;
+  try {
+    files = unzipSync(bytes);
+  } catch {
+    throw new Error('无法解析 .lottie 文件（不是有效的 dotLottie 压缩包）');
+  }
+  const textOf = (path: string) => new TextDecoder().decode(files[path]);
+  const animationPath = (() => {
+    if (files['manifest.json']) {
+      try {
+        const manifest = JSON.parse(textOf('manifest.json')) as {
+          animations?: Array<{ id?: string }>;
+        };
+        const id = manifest.animations?.[0]?.id;
+        if (typeof id === 'string' && files[`animations/${id}.json`]) return `animations/${id}.json`;
+      } catch {
+        // manifest 损坏时继续按文件名兜底
+      }
+    }
+    const candidates = Object.keys(files)
+      .filter((key) => /^animations\/.*\.json$/i.test(key))
+      .sort();
+    if (candidates.length > 0) return candidates[0];
+    return Object.keys(files).find((key) => /\.json$/i.test(key) && !/manifest\.json$/i.test(key)) ?? null;
+  })();
+  if (!animationPath) throw new Error('.lottie 压缩包里没有找到动画 JSON');
+  const document = JSON.parse(textOf(animationPath)) as {
+    assets?: Array<Record<string, unknown>>;
+  } & Record<string, unknown>;
+  for (const asset of document.assets ?? []) {
+    const path = asset.p;
+    if (typeof path !== 'string' || path.startsWith('data:')) continue;
+    const base = typeof asset.u === 'string' ? asset.u : '';
+    const data = files[normalizeZipPath(`${base}${path}`)] ?? files[normalizeZipPath(path)];
+    if (!data) continue;
+    const mime = ZIP_IMAGE_MIME[(path.split('.').pop() ?? '').toLowerCase()];
+    if (!mime) continue;
+    asset.u = '';
+    asset.p = `data:${mime};base64,${bytesToBase64(data)}`;
+  }
+  return JSON.stringify(document);
+}
+
 /**
  * 读取并校验用户选择的 Lottie 文件。
+ *
+ * 支持两种输入：
+ * - `.lottie`（dotLottie，zip 容器）：解压取出首个动画 JSON，并把包内图片内联为 dataURL；
+ * - `.json`：即普通 Lottie JSON 文本。
  *
  * 依次校验体积、解析 JSON、校验 layers 与画布尺寸 w/h，然后重新编码为
  * application/json 的 data URL（使用 URL 百分号编码而非 base64，
@@ -154,7 +242,8 @@ export async function readLottieFile(file: File): Promise<LottiePayload> {
   if (file.size > LIMITS.mediaBytes) {
     throw new Error(`Lottie 文件超过 ${formatBytes(LIMITS.mediaBytes)} 上限（当前 ${formatBytes(file.size)}）`);
   }
-  const text = await file.text();
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const text = isZipBytes(bytes) ? extractDotLottie(bytes) : new TextDecoder().decode(bytes);
   const document = parseLottieDocument(text);
   if (!document) throw new Error('不是有效的 Lottie JSON 文件（缺少 layers）');
   if (!Number(document.w) || !Number(document.h)) throw new Error('Lottie 文件缺少画布尺寸（w / h）');

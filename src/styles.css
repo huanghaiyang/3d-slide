@@ -3226,6 +3226,73 @@ button:disabled {
   padding: 2px 2px 16px;
 }
 
+/* 分页条固定在网格下方，网格自身滚动，翻页时列表高度不跳动 */
+.asset-pager {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 2px 12px;
+  border-top: 1px solid var(--line-soft);
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.asset-pager-count {
+  color: var(--dim);
+  font-size: 11px;
+}
+
+.asset-pager-pages {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.asset-page-btn {
+  min-width: 26px;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.asset-page-btn:hover:not(:disabled) {
+  border-color: var(--teal);
+  color: var(--teal);
+}
+
+.asset-page-btn.is-active {
+  border-color: var(--teal);
+  background: var(--teal-soft);
+  color: var(--teal);
+  font-weight: 600;
+}
+
+.asset-page-btn.is-text {
+  padding: 0 10px;
+}
+
+.asset-page-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.asset-page-gap {
+  padding: 0 2px;
+  color: var(--dim);
+}
+
+.asset-pager-info {
+  color: var(--dim);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 .asset-card {
   position: relative;
   display: flex;
@@ -3478,6 +3545,37 @@ button:disabled {
   font-size: 12px;
 }
 
+/* 文本类资源：预览里直接展示内容片段，避免只有「不支持预览」的空态 */
+.asset-preview-filewrap {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+}
+
+.asset-preview-text {
+  max-height: 52vh;
+  margin: 0;
+  padding: 14px 16px;
+  overflow: auto;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: #0f1620;
+  color: #cfe3ef;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.asset-preview-download {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .asset-preview-loading {
   padding: 60px 20px;
   color: #9fb0c2;
@@ -3545,7 +3643,7 @@ button:disabled {
 }
 
 .asset-picker {
-  height: min(560px, 66vh);
+  height: min(620px, 74vh);
   display: flex;
 }
 
@@ -3555,6 +3653,16 @@ button:disabled {
 
 .asset-picker .asset-side {
   flex-basis: 208px;
+}
+
+/* 插入面板更紧凑：卡片略小，一页能完整放下，避免频繁滚动 */
+.asset-picker .asset-grid {
+  grid-template-columns: repeat(auto-fill, minmax(138px, 1fr));
+  gap: 10px;
+}
+
+.asset-picker .asset-info b {
+  font-size: 11.5px;
 }
 
 /* ------------------------------- Model viewer --------------------------- */

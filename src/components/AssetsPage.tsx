@@ -75,8 +75,14 @@ type Dialog =
   | { type: 'emptyTrash' }
   | null;
 
-/** 上传文件选择框接受的 MIME 类型集合：常见图片 / 视频 / 音频 + 3D 模型扩展名。 */
-const ACCEPT_ALL = `image/png,image/jpeg,image/webp,image/gif,video/*,audio/*,${MODEL_ACCEPT}`;
+/**
+ * 上传文件选择框接受的 MIME 类型集合：
+ * 常见图片 / 视频 / 音频 + 3D 模型扩展名 + Lottie（.json / .lottie）。
+ */
+const ACCEPT_ALL = `image/png,image/jpeg,image/webp,image/gif,video/*,audio/*,${MODEL_ACCEPT},application/json,.json,.lottie`;
+
+/** 资源网格每页展示数量：与插入面板高度匹配，一页基本无需滚动，也避免一次渲染过多缩略图。 */
+const PAGE_SIZE = 16;
 
 /**
  * 生成资源 / 文件夹 id。
@@ -308,10 +314,54 @@ function LottiePreview({ src }: { src: string }) {
   return <div className="asset-preview-lottie" ref={hostRef} aria-label="Lottie 动画预览" />;
 }
 
+/** 文本类后缀：预览弹窗里直接读取内容展示，避免只能看到「不支持预览」。 */
+const TEXT_PREVIEW_EXTS = new Set([
+  'txt', 'md', 'csv', 'tsv', 'json', 'log', 'yml', 'yaml', 'xml', 'html', 'css', 'js', 'ts', 'tsx', 'ini', 'conf',
+]);
+
+/** 把 dataURL 解码为文本片段（base64 / 百分号编码都支持），失败时返回 null。 */
+function dataUrlText(src: string, max = 6000): string | null {
+  try {
+    if (!src.startsWith('data:')) return src.slice(0, max);
+    const comma = src.indexOf(',');
+    if (comma < 0) return null;
+    const head = src.slice(0, comma);
+    const body = src.slice(comma + 1);
+    // 只解码前 1MB 的 base64 片段，足够展示预览且避免大文件阻塞主线程
+    const text = head.includes('base64') ? atob(body.slice(0, 1_400_000)) : decodeURIComponent(body);
+    return text.slice(0, max);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 普通文件预览：文本类展示内容片段，其他类型给出说明，并统一提供原文件下载。
+ * 这样任何类型的资源在「预览」弹窗里都有可见结果，而不是只有一句「不支持」。
+ */
+function FilePreview({ asset, src }: { asset: AssetMeta; src: string }) {
+  const text = TEXT_PREVIEW_EXTS.has(asset.ext) ? dataUrlText(src) : null;
+  return (
+    <div className="asset-preview-filewrap">
+      {text !== null ? (
+        <pre className="asset-preview-text">{text || '（空文件）'}</pre>
+      ) : (
+        <div className="asset-preview-file">
+          <Icon name="text" size={38} />
+          <p>该文件无法内联预览，可下载后在本地查看。</p>
+        </div>
+      )}
+      <a className="btn btn-light btn-sm asset-preview-download" href={src} download={asset.name}>
+        <Icon name="download" size={14} /> 下载原文件
+      </a>
+    </div>
+  );
+}
+
 /**
  * 根据资源类型渲染预览内容：
  * 图片 / 视频 / 音频直接使用 src；Lottie 交给 LottiePreview；模型交给 ModelViewer；
- * 其余类型（如压缩包等）只提示不支持预览。
+ * 其余类型走通用文件预览（文本片段 + 下载）。
  */
 function AssetPreviewContent({ asset, src }: { asset: AssetMeta; src: string }) {
   if (asset.kind === 'image') {
@@ -336,12 +386,7 @@ function AssetPreviewContent({ asset, src }: { asset: AssetMeta; src: string }) 
   if (asset.kind === 'model' && asset.format) {
     return <ModelViewer src={src} format={asset.format} name={asset.name} height={440} />;
   }
-  return (
-    <div className="asset-preview-file">
-      <Icon name="text" size={38} />
-      <p>该类型暂不支持预览，但已完整保存。</p>
-    </div>
-  );
+  return <FilePreview asset={asset} src={src} />;
 }
 
 /**
@@ -376,6 +421,75 @@ function AssetMetaGrid({ asset }: { asset: AssetMeta }) {
         <b>{formatStamp(asset.createdAt)}</b>
         <span>添加时间</span>
       </div>
+    </div>
+  );
+}
+
+/**
+ * 页码窗口：总页数不超过 7 时全部展示；否则固定显示首尾页，
+ * 并在当前页附近展开 5 个页码，超出部分用省略号代替，避免按钮无限增长。
+ */
+function pageWindow(current: number, total: number): Array<number | '…'> {
+  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+  const start = Math.max(2, Math.min(current - 1, total - 4));
+  const end = Math.min(total - 1, Math.max(current + 1, 5));
+  const pages: Array<number | '…'> = [1];
+  if (start > 2) pages.push('…');
+  for (let p = start; p <= end; p += 1) pages.push(p);
+  if (end < total - 1) pages.push('…');
+  pages.push(total);
+  return pages;
+}
+
+/** 资源网格底部的分页条：总数量、上一页 / 页码 / 下一页与当前页信息。 */
+function AssetPager({
+  page,
+  pageCount,
+  total,
+  onChange,
+}: {
+  page: number;
+  pageCount: number;
+  total: number;
+  onChange: (page: number) => void;
+}) {
+  return (
+    <div className="asset-pager">
+      <span className="asset-pager-count">共 {total} 个资源</span>
+      {pageCount > 1 && (
+        <div className="asset-pager-pages">
+          <button className="asset-page-btn is-text" disabled={page <= 1} onClick={() => onChange(page - 1)}>
+            上一页
+          </button>
+          {pageWindow(page, pageCount).map((item, index) =>
+            item === '…' ? (
+              <span className="asset-page-gap" key={`gap-${index}`}>
+                …
+              </span>
+            ) : (
+              <button
+                key={item}
+                className={`asset-page-btn ${item === page ? 'is-active' : ''}`}
+                onClick={() => onChange(item)}
+              >
+                {item}
+              </button>
+            ),
+          )}
+          <button
+            className="asset-page-btn is-text"
+            disabled={page >= pageCount}
+            onClick={() => onChange(page + 1)}
+          >
+            下一页
+          </button>
+        </div>
+      )}
+      {pageCount > 1 && (
+        <span className="asset-pager-info">
+          第 {page} / {pageCount} 页
+        </span>
+      )}
     </div>
   );
 }
@@ -503,6 +617,19 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
       .filter((asset) => (text ? asset.name.toLowerCase().includes(text) : true))
       .sort((a, b) => b.createdAt - a.createdAt);
   }, [trashMode, trashedAssets, activeAssets, folderId, folderScope, kind, query]);
+
+  // 分页：按固定页大小切片渲染；筛选条件变化时回到第一页，删除后页码自动收敛到有效范围。
+  const [page, setPage] = useState(1);
+  const pageCount = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
+  const currentPage = Math.min(page, pageCount);
+  const pagedVisible = useMemo(
+    () => visible.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE),
+    [visible, currentPage],
+  );
+
+  useEffect(() => {
+    setPage(1);
+  }, [trashMode, folderId, kind, query]);
 
   const allowedKinds = useMemo(() => new Set(kinds ?? []), [kinds]);
   // pick 模式可能限定可插入类型：有筛选时类型栏只展示允许项，无筛选时展示全部类型。
@@ -882,11 +1009,12 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
             <span className="asset-empty-mark">
               <Icon name={trashMode ? 'trash' : 'image'} size={26} />
             </span>
-            <p>{trashMode ? '回收站是空的。删除的资源会先来到这里。' : '这里还没有资源。上传图片、视频、音频或 3D 模型开始。'}</p>
+            <p>{trashMode ? '回收站是空的。删除的资源会先来到这里。' : '这里还没有资源。上传图片、视频、音频、Lottie 或 3D 模型开始。'}</p>
           </div>
         ) : (
-          <div className="asset-grid">
-            {visible.map((asset) => {
+          <>
+            <div className="asset-grid">
+              {pagedVisible.map((asset) => {
               const selected = selectedIds.includes(asset.id);
               const pickable = canPick(asset);
               // 双击始终打开预览；卡片右上角操作区会阻止冒泡，避免触发选择逻辑。
@@ -990,7 +1118,9 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
                 </article>
               );
             })}
-          </div>
+            </div>
+            <AssetPager page={currentPage} pageCount={pageCount} total={visible.length} onChange={setPage} />
+          </>
         )}
       </section>
 
@@ -1146,7 +1276,7 @@ export function AssetsPage({ onBack }: AssetsPageProps) {
           </button>
           <div>
             <div className="assets-title">资源库</div>
-            <div className="assets-sub">图片、视频、音频与 3D 模型 · 保存在当前浏览器</div>
+            <div className="assets-sub">图片、视频、音频、Lottie 与 3D 模型 · 保存在当前浏览器</div>
           </div>
         </div>
         <a className="btn btn-ghost btn-sm" href="docs/02-PRD-3d-slide.html" target="_blank" rel="noreferrer">
