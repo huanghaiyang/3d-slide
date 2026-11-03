@@ -16,11 +16,14 @@
  */
 
 import type { LottieDocument } from './lottie';
+import { shaderLottieBackend } from './lottieShader';
 
 /** 默认后端：兼容旧存档，保持原有 Canvas2D 行为。 */
 export const LOTTIE_BACKEND_CANVAS = 'canvas';
 /** GPU 后端：dotLottie + WebGL2。 */
 export const LOTTIE_BACKEND_WEBGL = 'webgl';
+/** 自研 GPU 后端：Rust/WASM 三角化 + WebGL2 着色器。 */
+export const LOTTIE_BACKEND_SHADER = shaderLottieBackend.id;
 
 /** 后端实例：SceneManager 与具体渲染实现之间的唯一契约。 */
 export interface LottieBackendInstance {
@@ -138,11 +141,15 @@ const canvasBackend: LottieBackend = {
     const context = canvas.getContext('2d');
     if (!context) throw new Error('无法创建 2D 画布');
     const { default: lottie } = await import('lottie-web');
+    // lottie-web 会就地把传入的 animationData 改写成自己的内部结构（例如把路径/关键帧
+    // 转成绝对坐标）。同一份解析结果在切换渲染后端时还会交给 shader 后端做三角化，
+    // 被改写后会生成错误的几何，因此这里传入深拷贝，保证调用方的数据不被污染。
+    const animationData = JSON.parse(JSON.stringify(data)) as typeof data;
     const animation = lottie.loadAnimation({
       renderer: 'canvas',
       loop,
       autoplay: true,
-      animationData: data,
+      animationData,
       rendererSettings: {
         context,
         clearCanvas: true,
@@ -296,7 +303,7 @@ const webglBackend: LottieBackend = {
 };
 
 /** 全部后端（顺序即下拉框展示顺序）。 */
-const BACKENDS: LottieBackend[] = [canvasBackend, webglBackend];
+const BACKENDS: LottieBackend[] = [canvasBackend, webglBackend, shaderLottieBackend];
 const BACKEND_MAP = new Map(BACKENDS.map((backend) => [backend.id, backend]));
 
 /**
