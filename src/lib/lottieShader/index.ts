@@ -35,6 +35,12 @@ const BATCH_WORDS = 64;
 const MAX_STOPS = 8;
 /** 图片批次类型，与 Rust 侧一致 */
 const KIND_IMAGE = 3;
+/** 蒙版覆盖几何 */
+const KIND_MASK = 5;
+/** 全屏覆盖几何 */
+const KIND_FULL = 6;
+/** 没有图层 pass 的批次 */
+const PASS_NONE = 0xffffffff;
 /** 后端 id，注册中心按该值把对象解析到本实现 */
 export const SHADER_BACKEND_ID = 'shader';
 
@@ -102,7 +108,7 @@ const FRAGMENT_SHADER = `#version 300 es
 precision mediump float;
 in vec2 v_pos;
 in vec2 v_uv;
-uniform int u_kind;        // 0 纯色 / 1 线性渐变 / 2 径向渐变 / 3 图片
+uniform int u_kind;        // 0 纯色 / 1 线性渐变 / 2 径向渐变 / 3 图片 / 5 蒙版覆盖 / 6 全屏覆盖
 uniform vec4 u_color;
 uniform float u_alpha;
 uniform vec2 u_p0;
@@ -111,8 +117,6 @@ uniform int u_stopCount;
 uniform float u_offsets[${MAX_STOPS}];
 uniform vec4 u_colors[${MAX_STOPS}];
 uniform sampler2D u_tex;
-uniform sampler2D u_mask;
-uniform int u_maskMode;    // 0 无遮罩 / 1 alpha / 2 alpha 反相
 uniform vec2 u_size;
 out vec4 outColor;
 
@@ -134,6 +138,16 @@ vec4 sampleGradient(float t) {
 }
 
 void main() {
+  // 蒙版覆盖几何：输出白色覆盖度，由合成阶段按蒙版运算叠加
+  if (u_kind == 5) {
+    outColor = vec4(u_alpha);
+    return;
+  }
+  // 反向蒙版「加」模式的铺底：整屏覆盖度为 1
+  if (u_kind == 6) {
+    outColor = vec4(1.0);
+    return;
+  }
   vec4 color;
   if (u_kind == 3) {
     color = texture(u_tex, v_uv);
@@ -147,14 +161,69 @@ void main() {
     float radius = max(1e-5, length(u_p1 - u_p0));
     color = sampleGradient(length(v_pos - u_p0) / radius);
   }
-  if (u_maskMode != 0) {
-    // 遮罩 FBO 与画布同尺寸、同一屏幕坐标系，直接按像素取 alpha
-    float m = texelFetch(u_mask, ivec2(gl_FragCoord.xy), 0).a;
-    color.a *= ((u_maskMode == 2) ? (1.0 - m) : m);
-  }
   color.a *= u_alpha;
-  outColor = color;
+  // 全流程使用预乘 alpha：离屏 FBO 的模糊与合成都按预乘颜色进行
+  outColor = vec4(color.rgb * color.a, color.a);
 }`;
+
+/** 全屏 quad 的顶点着色器（模糊与合成程序共用） */
+const QUAD_VERTEX_SHADER = `#version 300 es
+layout(location = 0) in vec2 a_pos;
+out vec2 v_uv;
+void main() {
+  v_uv = a_pos * 0.5 + 0.5;
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+}`;
+
+/** 可分离高斯模糊：13 tap，采样半径覆盖 ±3σ */
+const BLUR_FRAGMENT_SHADER = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_tex;
+uniform vec2 u_step;   // 每个 tap 的 uv 偏移（sigma/2）
+out vec4 outColor;
+void main() {
+  vec4 sum = texture(u_tex, v_uv);
+  float norm = 1.0;
+  for (int i = 1; i <= 6; i++) {
+    float w = exp(-0.5 * float(i) * float(i) * 0.25);
+    vec2 off = u_step * float(i);
+    sum += (texture(u_tex, v_uv + off) + texture(u_tex, v_uv - off)) * w;
+    norm += 2.0 * w;
+  }
+  outColor = sum / norm;
+}`;
+
+/**
+ * 合成程序：把离屏图层与蒙版 / 轨道遮罩相乘后画到目标。
+ * u_mode：0 无遮罩、1 图层蒙版 alpha、2 alpha-in、3 alpha-out、4 亮度-in、5 亮度-out
+ */
+const COMPOSITE_FRAGMENT_SHADER = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+uniform sampler2D u_src;
+uniform sampler2D u_mask;
+uniform int u_mode;
+out vec4 outColor;
+void main() {
+  vec4 src = texture(u_src, v_uv);
+  float a = 1.0;
+  if (u_mode == 1) {
+    a = texture(u_mask, v_uv).a;
+  } else if (u_mode >= 2) {
+    vec4 m = texture(u_mask, v_uv);
+    if (u_mode >= 4) {
+      // 亮度遮罩：SVG 滤镜 alpha 行是 0.3*R+0.3*G+0.3*B（输入为预乘颜色），
+      // 因此直接对预乘 RGB 取亮度，天然带上遮罩图层自身的 alpha
+      float l = clamp(0.3 * (m.r + m.g + m.b), 0.0, 1.0);
+      a = u_mode == 4 ? l : 1.0 - l;
+    } else {
+      a = u_mode == 2 ? m.a : 1.0 - m.a;
+    }
+  }
+  outColor = vec4(src.rgb * a, src.a * a);
+}`;
+
 
 function compileShader(gl: WebGL2RenderingContext, type: number, source: string): WebGLShader {
   const shader = gl.createShader(type);
@@ -183,12 +252,40 @@ interface DrawBatch {
   uvFirst: number;
   /** 轨道遮罩分组 id，0 表示普通批次 */
   group: number;
-  /** 遮罩模式：1 alpha、2 alpha 反相 */
+  /** 轨道遮罩类型 tt：1 alpha-in、2 alpha-out、3 亮度-in、4 亮度-out */
   matteMode: number;
   /** 遮罩角色：0 普通、1 遮罩源、2 被遮罩 */
   role: number;
   /** 图片纹理索引，-1 表示非图片批次 */
   imageIndex: number;
+  /** 所属图层 pass（模糊 / 蒙版图层），0xFFFFFFFF 表示直接画到目标 */
+  passId: number;
+}
+
+/** 图层离屏 pass（模糊或蒙版） */
+interface LayerPass {
+  /** 图层索引（= pass id） */
+  id: number;
+  firstBatch: number;
+  batchCount: number;
+  wrap: boolean;
+  sigmaX: number;
+  sigmaY: number;
+  /** 图层蒙版在 masks 数组中的区间 */
+  maskFirst: number;
+  maskCount: number;
+}
+
+/** 一条图层蒙版 */
+interface LayerMask {
+  op: number;
+  inv: boolean;
+  /** 蒙版覆盖几何的批次 */
+  batch: number;
+  pass: number;
+  opacity: number;
+  /** 反向「加」蒙版的铺底批次，无则 -1 */
+  quad: number;
 }
 
 /** 解析后的整帧渲染计划 */
@@ -196,6 +293,9 @@ interface RenderPlan {
   batches: DrawBatch[];
   vertexCount: number;
   uvCount: number;
+  /** 模糊 / 蒙版图层（按渲染顺序） */
+  passes: LayerPass[];
+  masks: LayerMask[];
 }
 
 /**
@@ -232,12 +332,44 @@ function parsePlan(ints: Uint32Array, floats: Float32Array): RenderPlan {
       matteMode: ints[base + 55] ?? 0,
       role: ints[base + 56] ?? 0,
       imageIndex: imageWord === 0xffffffff ? -1 : imageWord,
+      passId: ints[base + 58] ?? 0xffffffff,
     });
   }
-  return { batches, vertexCount, uvCount };
+  // 尾部：pass 与蒙版记录
+  const afterBatches = 3 + count * BATCH_WORDS + vertexCount * 2 + uvCount * 2;
+  const passCount = ints[afterBatches] ?? 0;
+  const passes: LayerPass[] = [];
+  for (let i = 0; i < passCount; i += 1) {
+    const o = afterBatches + 1 + i * 10;
+    passes.push({
+      id: ints[o] ?? 0,
+      firstBatch: ints[o + 1] ?? 0,
+      batchCount: ints[o + 2] ?? 0,
+      wrap: (ints[o + 3] ?? 0) === 1,
+      sigmaX: floats[o + 4],
+      sigmaY: floats[o + 5],
+      maskFirst: ints[o + 7] ?? 0xffffffff,
+      maskCount: ints[o + 8] ?? 0,
+    });
+  }
+  const maskCount = ints[afterBatches + 1 + passCount * 10] ?? 0;
+  const masks: LayerMask[] = [];
+  for (let i = 0; i < maskCount; i += 1) {
+    const o = afterBatches + 2 + passCount * 10 + i * 6;
+    const quad = ints[o + 5] ?? 0xffffffff;
+    masks.push({
+      op: ints[o] ?? 0,
+      inv: (ints[o + 1] ?? 0) === 1,
+      batch: ints[o + 2] ?? 0,
+      pass: ints[o + 3] ?? 0,
+      opacity: floats[o + 4],
+      quad: quad === 0xffffffff ? -1 : quad,
+    });
+  }
+  return { batches, vertexCount, uvCount, passes, masks };
 }
 
-/** 着色器 uniform 位置集合（同一上下文内的所有播放器共享） */
+/** 主着色器 uniform 位置集合（同一上下文内的所有播放器共享） */
 interface UniformSet {
   size: WebGLUniformLocation;
   kind: WebGLUniformLocation;
@@ -249,8 +381,19 @@ interface UniformSet {
   offsets: WebGLUniformLocation;
   colors: WebGLUniformLocation;
   tex: WebGLUniformLocation;
+}
+
+/** 模糊程序 uniform 位置 */
+interface BlurUniformSet {
+  tex: WebGLUniformLocation;
+  step: WebGLUniformLocation;
+}
+
+/** 合成程序 uniform 位置 */
+interface CompositeUniformSet {
+  src: WebGLUniformLocation;
   mask: WebGLUniformLocation;
-  maskMode: WebGLUniformLocation;
+  mode: WebGLUniformLocation;
 }
 
 /**
@@ -267,14 +410,40 @@ interface SharedGL {
   canvas: HTMLCanvasElement;
   gl: WebGL2RenderingContext;
   program: WebGLProgram;
+  blurProgram: WebGLProgram;
+  compositeProgram: WebGLProgram;
   vao: WebGLVertexArrayObject;
   vbo: WebGLBuffer;
   uvbo: WebGLBuffer;
+  /** 覆盖整个视口的 quad（模糊 / 合成共用） */
+  quadVao: WebGLVertexArrayObject;
+  quadVbo: WebGLBuffer;
   blankTex: WebGLTexture;
   uniforms: UniformSet;
+  blurUniforms: BlurUniformSet;
+  compositeUniforms: CompositeUniformSet;
 }
 
 let sharedGL: SharedGL | null = null;
+
+/** 编译并链接一个着色器程序 */
+function linkProgram(gl: WebGL2RenderingContext, vsSource: string, fsSource: string): WebGLProgram {
+  const vs = compileShader(gl, gl.VERTEX_SHADER, vsSource);
+  const fs = compileShader(gl, gl.FRAGMENT_SHADER, fsSource);
+  const program = gl.createProgram();
+  if (!program) throw new Error('无法创建着色器程序');
+  gl.attachShader(program, vs);
+  gl.attachShader(program, fs);
+  gl.linkProgram(program);
+  gl.deleteShader(vs);
+  gl.deleteShader(fs);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    const info = gl.getProgramInfoLog(program) ?? '';
+    gl.deleteProgram(program);
+    throw new Error(`着色器链接失败：${info}`);
+  }
+  return program;
+}
 
 /** 获取（或惰性创建）全局共享上下文 */
 function getSharedGL(): SharedGL {
@@ -289,20 +458,9 @@ function getSharedGL(): SharedGL {
     preserveDrawingBuffer: true,
   });
   if (!gl) throw new Error('浏览器不支持 WebGL2');
-  const vs = compileShader(gl, gl.VERTEX_SHADER, VERTEX_SHADER);
-  const fs = compileShader(gl, gl.FRAGMENT_SHADER, FRAGMENT_SHADER);
-  const program = gl.createProgram();
-  if (!program) throw new Error('无法创建着色器程序');
-  gl.attachShader(program, vs);
-  gl.attachShader(program, fs);
-  gl.linkProgram(program);
-  gl.deleteShader(vs);
-  gl.deleteShader(fs);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-    const info = gl.getProgramInfoLog(program) ?? '';
-    gl.deleteProgram(program);
-    throw new Error(`着色器链接失败：${info}`);
-  }
+  const program = linkProgram(gl, VERTEX_SHADER, FRAGMENT_SHADER);
+  const blurProgram = linkProgram(gl, QUAD_VERTEX_SHADER, BLUR_FRAGMENT_SHADER);
+  const compositeProgram = linkProgram(gl, QUAD_VERTEX_SHADER, COMPOSITE_FRAGMENT_SHADER);
   const uniforms: UniformSet = {
     size: gl.getUniformLocation(program, 'u_size') as WebGLUniformLocation,
     kind: gl.getUniformLocation(program, 'u_kind') as WebGLUniformLocation,
@@ -314,8 +472,15 @@ function getSharedGL(): SharedGL {
     offsets: gl.getUniformLocation(program, `u_offsets[0]`) as WebGLUniformLocation,
     colors: gl.getUniformLocation(program, `u_colors[0]`) as WebGLUniformLocation,
     tex: gl.getUniformLocation(program, 'u_tex') as WebGLUniformLocation,
-    mask: gl.getUniformLocation(program, 'u_mask') as WebGLUniformLocation,
-    maskMode: gl.getUniformLocation(program, 'u_maskMode') as WebGLUniformLocation,
+  };
+  const blurUniforms: BlurUniformSet = {
+    tex: gl.getUniformLocation(blurProgram, 'u_tex') as WebGLUniformLocation,
+    step: gl.getUniformLocation(blurProgram, 'u_step') as WebGLUniformLocation,
+  };
+  const compositeUniforms: CompositeUniformSet = {
+    src: gl.getUniformLocation(compositeProgram, 'u_src') as WebGLUniformLocation,
+    mask: gl.getUniformLocation(compositeProgram, 'u_mask') as WebGLUniformLocation,
+    mode: gl.getUniformLocation(compositeProgram, 'u_mode') as WebGLUniformLocation,
   };
   const vao = gl.createVertexArray();
   const vbo = gl.createBuffer();
@@ -329,6 +494,20 @@ function getSharedGL(): SharedGL {
   gl.enableVertexAttribArray(1);
   gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 0, 0);
   gl.bindVertexArray(null);
+  // 全屏 quad：两个三角形，裁剪空间坐标
+  const quadVao = gl.createVertexArray();
+  const quadVbo = gl.createBuffer();
+  if (!quadVao || !quadVbo) throw new Error('无法创建全屏 quad 缓冲');
+  gl.bindVertexArray(quadVao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadVbo);
+  gl.bufferData(
+    gl.ARRAY_BUFFER,
+    new Float32Array([-1, -1, 1, -1, 1, 1, -1, -1, 1, 1, -1, 1]),
+    gl.STATIC_DRAW,
+  );
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
   // 1×1 全透明纹理：图片未解码完成时绘制“空”，而不是被当成不完整纹理的黑色
   const blankTex = gl.createTexture();
   if (!blankTex) throw new Error('无法创建 WebGL 纹理');
@@ -339,10 +518,26 @@ function getSharedGL(): SharedGL {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
-  gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+  // 预乘 alpha 合成：所有程序都输出预乘颜色
+  gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
   gl.disable(gl.DEPTH_TEST);
   gl.clearColor(0, 0, 0, 0);
-  sharedGL = { canvas, gl, program, vao, vbo, uvbo, blankTex, uniforms };
+  sharedGL = {
+    canvas,
+    gl,
+    program,
+    blurProgram,
+    compositeProgram,
+    vao,
+    vbo,
+    uvbo,
+    quadVao,
+    quadVbo,
+    blankTex,
+    uniforms,
+    blurUniforms,
+    compositeUniforms,
+  };
   return sharedGL;
 }
 
@@ -363,20 +558,12 @@ class ShaderLottiePlayer implements LottieBackendInstance {
   readonly vao: WebGLVertexArrayObject;
   readonly vbo: WebGLBuffer;
   readonly uvbo: WebGLBuffer;
-  readonly uniforms: {
-    size: WebGLUniformLocation;
-    kind: WebGLUniformLocation;
-    color: WebGLUniformLocation;
-    alpha: WebGLUniformLocation;
-    p0: WebGLUniformLocation;
-    p1: WebGLUniformLocation;
-    stopCount: WebGLUniformLocation;
-    offsets: WebGLUniformLocation;
-    colors: WebGLUniformLocation;
-    tex: WebGLUniformLocation;
-    mask: WebGLUniformLocation;
-    maskMode: WebGLUniformLocation;
-  };
+  private readonly blurProgram: WebGLProgram;
+  private readonly compositeProgram: WebGLProgram;
+  private readonly quadVao: WebGLVertexArrayObject;
+  readonly uniforms: UniformSet;
+  private readonly blurUniforms: BlurUniformSet;
+  private readonly compositeUniforms: CompositeUniformSet;
   /** 未加载 / 缺失图片时使用的 1×1 透明纹理，避免采样不完整纹理得到黑块 */
   private readonly blankTex: WebGLTexture;
   /** 共享上下文画布：所有播放器轮流渲染到它，再拷贝到各自的 2D 画布 */
@@ -384,10 +571,10 @@ class ShaderLottiePlayer implements LottieBackendInstance {
   /** 把共享上下文的结果拷回对象画布（SceneManager 以此画布作为纹理源） */
   private readonly ctx: CanvasRenderingContext2D;
   private textures: (WebGLTexture | null)[] = [];
-  private maskTex: WebGLTexture | null = null;
-  private maskFbo: WebGLFramebuffer | null = null;
-  private maskW = 0;
-  private maskH = 0;
+  /** 与画布等尺寸的离屏渲染目标池（图层 pass、模糊 ping-pong、蒙版、轨道遮罩） */
+  private targets: { tex: WebGLTexture; fbo: WebGLFramebuffer }[] = [];
+  /** 当前帧已占用的目标数量（渲染 pass 时按嵌套深度租用 / 归还） */
+  private targetLease = 0;
   // 时间轴参数必须在 compile 之后才能从 WASM 读取，因此不能是构造期常量
   private fr = 30;
   private ip = 0;
@@ -417,11 +604,16 @@ class ShaderLottiePlayer implements LottieBackendInstance {
     const shared = getSharedGL();
     this.gl = shared.gl;
     this.program = shared.program;
+    this.blurProgram = shared.blurProgram;
+    this.compositeProgram = shared.compositeProgram;
     this.vao = shared.vao;
     this.vbo = shared.vbo;
     this.uvbo = shared.uvbo;
+    this.quadVao = shared.quadVao;
     this.blankTex = shared.blankTex;
     this.uniforms = shared.uniforms;
+    this.blurUniforms = shared.blurUniforms;
+    this.compositeUniforms = shared.compositeUniforms;
     this.sharedCanvas = shared.canvas;
 
     this.start();
@@ -504,50 +696,78 @@ class ShaderLottiePlayer implements LottieBackendInstance {
     }
   }
 
-  /** 创建（或复用）与画布等尺寸的遮罩 FBO */
-  private ensureMaskTarget(): boolean {
+  /** 确保离屏目标池中第 index 个目标可用（与画布等尺寸） */
+  private ensureTarget(index: number): { tex: WebGLTexture; fbo: WebGLFramebuffer } | null {
     const gl = this.gl;
     const w = this.canvas.width;
     const h = this.canvas.height;
-    if (this.maskFbo && this.maskTex && this.maskW === w && this.maskH === h) return true;
-    this.disposeMaskTarget();
-    const texture = gl.createTexture();
-    const fbo = gl.createFramebuffer();
-    if (!texture || !fbo) return false;
-    gl.bindTexture(gl.TEXTURE_2D, texture);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
-    const complete = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    if (!complete) {
-      gl.deleteTexture(texture);
-      gl.deleteFramebuffer(fbo);
-      return false;
+    while (this.targets.length <= index) {
+      const tex = gl.createTexture();
+      const fbo = gl.createFramebuffer();
+      if (!tex || !fbo) return null;
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      // 线性过滤：合成是 1:1 采样不受影响，模糊的大步长采样靠插值避免块状边缘
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      const complete = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      if (!complete) {
+        gl.deleteTexture(tex);
+        gl.deleteFramebuffer(fbo);
+        return null;
+      }
+      this.targets.push({ tex, fbo });
     }
-    this.maskTex = texture;
-    this.maskFbo = fbo;
-    this.maskW = w;
-    this.maskH = h;
-    return true;
+    return this.targets[index] ?? null;
   }
 
-  private disposeMaskTarget(): void {
+  /** 租用一个离屏目标（渲染 pass 时按嵌套深度分配，帧结束后归还） */
+  private leaseTarget(): { tex: WebGLTexture; fbo: WebGLFramebuffer } | null {
+    const target = this.ensureTarget(this.targetLease);
+    this.targetLease += 1;
+    return target;
+  }
+
+  /**
+   * 绑定渲染目标，并把纹理单元 0/1 换回空白纹理。
+   * 目标纹理可能仍绑定在采样单元上；WebGL 会把它与当前 FBO 判定为反馈回路。
+   */
+  private bindTarget(target: { tex: WebGLTexture; fbo: WebGLFramebuffer } | null): void {
     const gl = this.gl;
-    if (this.maskFbo) gl.deleteFramebuffer(this.maskFbo);
-    if (this.maskTex) gl.deleteTexture(this.maskTex);
-    this.maskFbo = null;
-    this.maskTex = null;
-    this.maskW = 0;
-    this.maskH = 0;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fbo : null);
+    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    if (target) {
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.blankTex);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, this.blankTex);
+    }
   }
 
-  /** 绘制单个批次；maskMode 为 0 时不采样遮罩 */
-  private drawBatch(batch: DrawBatch, maskMode: number): void {
+  private disposeTargets(): void {
+    const gl = this.gl;
+    for (const target of this.targets) {
+      gl.deleteFramebuffer(target.fbo);
+      gl.deleteTexture(target.tex);
+    }
+    this.targets = [];
+    this.targetLease = 0;
+  }
+
+  /** 模糊 / 合成程序用完后恢复主着色器与主 VAO */
+  private restoreMain(): void {
+    const gl = this.gl;
+    gl.useProgram(this.program);
+    gl.bindVertexArray(this.vao);
+  }
+
+  /** 绘制单个批次（主着色器、当前绑定目标） */
+  private drawBatch(batch: DrawBatch): void {
     if (batch.count <= 0) return;
     const gl = this.gl;
     gl.uniform1i(this.uniforms.kind, batch.kind);
@@ -567,7 +787,6 @@ class ShaderLottiePlayer implements LottieBackendInstance {
     });
     gl.uniform1fv(this.uniforms.offsets, this.offsetBuf);
     gl.uniform4fv(this.uniforms.colors, this.colorBuf);
-    gl.uniform1i(this.uniforms.maskMode, maskMode);
     if (batch.kind === KIND_IMAGE) {
       const texture = (batch.imageIndex >= 0 ? this.textures[batch.imageIndex] : null) ?? this.blankTex;
       gl.activeTexture(gl.TEXTURE0);
@@ -580,36 +799,258 @@ class ShaderLottiePlayer implements LottieBackendInstance {
     gl.drawArrays(gl.TRIANGLES, batch.first, batch.count);
   }
 
-  /**
-   * 绘制一个轨道遮罩分组：
-   * 1. 遮罩源（role 1）先画到离屏 FBO，得到 alpha 蒙版；
-   * 2. 被遮罩批次（role 2）按蒙版逐像素调制 alpha 后画到画布。
-   */
-  private drawMaskedGroup(batches: DrawBatch[]): void {
+  /** 蒙版覆盖度写入时的混合模式 */
+  private setMaskBlend(op: 'add' | 'subtract' | 'intersect'): void {
     const gl = this.gl;
-    const sources = batches.filter((batch) => batch.role === 1);
-    const masked = batches.filter((batch) => batch.role === 2 && batch.count > 0);
-    if (!masked.length) return;
-    if (!sources.length || !this.ensureMaskTarget()) {
-      // 遮罩目标不可用时退化为普通绘制，至少保证图层可见
-      for (const batch of masked) this.drawBatch(batch, 0);
+    if (op === 'add') {
+      gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    } else if (op === 'subtract') {
+      // alpha -= dstAlpha * srcAlpha（颜色保持不变）
+      gl.blendFuncSeparate(gl.ZERO, gl.ONE, gl.ZERO, gl.ONE_MINUS_SRC_ALPHA);
+    } else {
+      // alpha *= srcAlpha
+      gl.blendFuncSeparate(gl.ZERO, gl.ONE, gl.ZERO, gl.SRC_ALPHA);
+    }
+  }
+
+  /** 把一条图层蒙版的覆盖度累加到蒙版目标 */
+  private buildMask(plan: RenderPlan, pass: LayerPass, target: { tex: WebGLTexture; fbo: WebGLFramebuffer }): void {
+    const gl = this.gl;
+    this.bindTarget(target);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    this.restoreMain();
+    for (let k = 0; k < pass.maskCount; k += 1) {
+      const mask = plan.masks[pass.maskFirst + k];
+      if (!mask) continue;
+      if (mask.inv) {
+        if (mask.op === 0) {
+          // 补集 = 全屏 1 - 路径覆盖度
+          if (mask.quad >= 0) {
+            this.setMaskBlend('add');
+            this.drawBatch(plan.batches[mask.quad]);
+          }
+          this.setMaskBlend('subtract');
+          this.drawBatch(plan.batches[mask.batch]);
+        } else if (mask.op === 1) {
+          this.setMaskBlend('intersect');
+          this.drawBatch(plan.batches[mask.batch]);
+        } else {
+          this.setMaskBlend('subtract');
+          this.drawBatch(plan.batches[mask.batch]);
+        }
+      } else if (mask.op === 0) {
+        this.setMaskBlend('add');
+        this.drawBatch(plan.batches[mask.batch]);
+      } else if (mask.op === 1) {
+        this.setMaskBlend('subtract');
+        this.drawBatch(plan.batches[mask.batch]);
+      } else {
+        this.setMaskBlend('intersect');
+        this.drawBatch(plan.batches[mask.batch]);
+      }
+    }
+    // 恢复正常合成
+    gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+  }
+
+  /** 可分离高斯模糊：src → dst（sigma 为画布像素） */
+  private blurTarget(
+    src: { tex: WebGLTexture; fbo: WebGLFramebuffer },
+    dst: { tex: WebGLTexture; fbo: WebGLFramebuffer },
+    sigma: number,
+    wrap: boolean,
+    horizontal: boolean,
+  ): void {
+    const gl = this.gl;
+    this.bindTarget(dst);
+    gl.useProgram(this.blurProgram);
+    gl.bindVertexArray(this.quadVao);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, src.tex);
+    const wrapMode = wrap ? gl.REPEAT : gl.CLAMP_TO_EDGE;
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrapMode);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrapMode);
+    gl.uniform1i(this.blurUniforms.tex, 0);
+    // 6 个 tap 覆盖 ±3σ：每个 tap 步进 σ/2
+    const step = sigma / 2;
+    gl.uniform2f(
+      this.blurUniforms.step,
+      horizontal ? step / this.canvas.width : 0,
+      horizontal ? 0 : step / this.canvas.height,
+    );
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  }
+
+  /** 把离屏结果（可带蒙版 / 轨道遮罩）合成到目标 */
+  private composite(
+    src: { tex: WebGLTexture; fbo: WebGLFramebuffer } | null,
+    mask: { tex: WebGLTexture; fbo: WebGLFramebuffer } | null,
+    mode: number,
+    target: { tex: WebGLTexture; fbo: WebGLFramebuffer } | null,
+  ): void {
+    const gl = this.gl;
+    this.bindTarget(target);
+    gl.useProgram(this.compositeProgram);
+    gl.bindVertexArray(this.quadVao);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, src ? src.tex : this.blankTex);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, mask ? mask.tex : this.blankTex);
+    gl.uniform1i(this.compositeUniforms.src, 0);
+    gl.uniform1i(this.compositeUniforms.mask, 1);
+    gl.uniform1i(this.compositeUniforms.mode, mask ? mode : 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
+  }
+
+  /**
+   * 绘制一个图层 pass：内容先画到离屏目标，再按需做高斯模糊 / 蒙版合成。
+   * 嵌套 pass（预合成里的模糊图层）会被 renderRange 递归处理。
+   */
+  private renderPass(
+    plan: RenderPlan,
+    pass: LayerPass,
+    target: { tex: WebGLTexture; fbo: WebGLFramebuffer } | null,
+    from = pass.firstBatch,
+    to = pass.firstBatch + pass.batchCount,
+  ): void {
+    const saved = this.targetLease;
+    const content = this.leaseTarget();
+    if (!content) {
+      this.targetLease = saved;
       return;
     }
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.maskFbo);
-    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
-    // 遮罩纹理此时仍绑定在单元 1 上，而它正是当前 FBO 的颜色附件：
-    // 即便着色器分支不采样，WebGL 也会判定为反馈回路并抛出 INVALID_OPERATION
-    gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, this.blankTex);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    for (const batch of sources) this.drawBatch(batch, 0);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
-    gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, this.maskTex);
-    gl.uniform1i(this.uniforms.mask, 1);
-    const mode = masked[0].matteMode || 1;
-    for (const batch of masked) this.drawBatch(batch, mode);
+    this.bindTarget(content);
+    this.gl.clear(this.gl.COLOR_BUFFER_BIT);
+    this.restoreMain();
+    this.renderRange(plan, from, to, content, pass.id);
+    let src = content;
+    if (pass.sigmaX > 0.4) {
+      const horizontal = this.leaseTarget();
+      if (horizontal) {
+        this.blurTarget(src, horizontal, pass.sigmaX, pass.wrap, true);
+        src = horizontal;
+      }
+    }
+    if (pass.sigmaY > 0.4) {
+      const vertical = this.leaseTarget();
+      if (vertical) {
+        this.blurTarget(src, vertical, pass.sigmaY, pass.wrap, false);
+        src = vertical;
+      }
+    }
+    if (pass.maskCount > 0 && pass.maskFirst !== 0xffffffff) {
+      const maskTarget = this.leaseTarget();
+      if (maskTarget) {
+        this.buildMask(plan, pass, maskTarget);
+        this.composite(src, maskTarget, 1, target);
+      } else {
+        this.composite(src, null, 0, target);
+      }
+    } else {
+      this.composite(src, null, 0, target);
+    }
+    this.restoreMain();
+    this.targetLease = saved;
+  }
+
+  /**
+   * 绘制一个轨道遮罩分组：遮罩源画到离屏目标作为 alpha / 亮度蒙版，
+   * 被遮罩内容画到另一个目标后与蒙版相乘，再合成到父目标。
+   */
+  private renderMatteGroup(
+    plan: RenderPlan,
+    start: number,
+    end: number,
+    target: { tex: WebGLTexture; fbo: WebGLFramebuffer } | null,
+    ownerPass: number,
+  ): void {
+    let split = start;
+    while (split < end && plan.batches[split].role === 1) split += 1;
+    if (split >= end) {
+      // 没有可见的被遮罩图层
+      return;
+    }
+    if (split === start) {
+      // 遮罩源不可见：直接绘制被遮罩内容（必须在分组内关闭分组递归）
+      this.renderRange(plan, split, end, target, ownerPass, true);
+      return;
+    }
+    const saved = this.targetLease;
+    const matte = this.leaseTarget();
+    const temp = matte ? this.leaseTarget() : null;
+    if (!matte || !temp) {
+      this.renderRange(plan, start, end, target, ownerPass, true);
+      this.targetLease = saved;
+      return;
+    }
+    this.bindTarget(matte);
+    this.gl.clear(this.gl.COLOR_BUFFER_BIT);
+    this.restoreMain();
+    this.renderRange(plan, start, split, matte, ownerPass, true);
+    this.bindTarget(temp);
+    this.gl.clear(this.gl.COLOR_BUFFER_BIT);
+    this.restoreMain();
+    this.renderRange(plan, split, end, temp, ownerPass, true);
+    // Rust 写入的是 lottie 的 tt 原值，这里翻译成合成程序的模式：
+    // 1 alpha-in、2 alpha-out、3 亮度-in、4 亮度-out
+    const tt = plan.batches[split]?.matteMode || 1;
+    const mode = tt === 1 ? 2 : tt === 2 ? 3 : tt === 3 ? 4 : 5;
+    this.composite(temp, matte, mode, target);
+    this.restoreMain();
+    this.targetLease = saved;
+  }
+
+  /**
+   * 按渲染顺序遍历批次区间：
+   * - 普通批次直接画到 target；
+   * - 遇到子 pass 起点时递归渲染整个 pass 并跳过其区间；
+   * - 轨道遮罩分组整体交给 renderMatteGroup。
+   *
+   * @param skipGroups 为 true 时不再按分组递归：renderMatteGroup 内部拆分出的
+   *   子区间仍然是同一分组，若再次分发会无限递归直到栈溢出。
+   */
+  private renderRange(
+    plan: RenderPlan,
+    start: number,
+    end: number,
+    target: { tex: WebGLTexture; fbo: WebGLFramebuffer } | null,
+    ownerPass: number,
+    skipGroups = false,
+  ): void {
+    const passesById = new Map<number, LayerPass>();
+    for (const pass of plan.passes) passesById.set(pass.id, pass);
+    let index = start;
+    while (index < end) {
+      const batch = plan.batches[index];
+      if (!batch) break;
+      if (batch.kind === KIND_MASK || batch.kind === KIND_FULL) {
+        index += 1;
+        continue;
+      }
+      if (!skipGroups && batch.group !== 0) {
+        let next = index;
+        while (next < end && plan.batches[next].group === batch.group) next += 1;
+        this.renderMatteGroup(plan, index, next, target, ownerPass);
+        index = next;
+        continue;
+      }
+      if (batch.passId === PASS_NONE || batch.passId === ownerPass) {
+        this.drawBatch(batch);
+        index += 1;
+        continue;
+      }
+      const pass = passesById.get(batch.passId);
+      if (!pass) {
+        this.drawBatch(batch);
+        index += 1;
+        continue;
+      }
+      // 只渲染落在当前区间内的部分，避免 pass 区间跨越当前区间时重复/越界渲染
+      this.renderPass(plan, pass, target, Math.max(index, pass.firstBatch), Math.min(end, pass.firstBatch + pass.batchCount));
+      index = Math.max(index + 1, pass.firstBatch + pass.batchCount);
+    }
   }
 
   /** 生成一帧并绘制到画布；帧号未变化时跳过重绘 */
@@ -664,26 +1105,10 @@ class ShaderLottiePlayer implements LottieBackendInstance {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.blankTex);
     gl.uniform1i(this.uniforms.tex, 0);
-    gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, this.blankTex);
-    gl.uniform1i(this.uniforms.mask, 1);
 
-    let index = 0;
-    while (index < batches.length) {
-      const batch = batches[index];
-      if (batch.role !== 0 && batch.group !== 0) {
-        // 同一分组的遮罩源与被遮罩批次在计划中连续排列
-        const group: DrawBatch[] = [];
-        while (index < batches.length && batches[index].group === batch.group) {
-          group.push(batches[index]);
-          index += 1;
-        }
-        this.drawMaskedGroup(group);
-      } else {
-        this.drawBatch(batch, 0);
-        index += 1;
-      }
-    }
+    // 先按图层 pass（模糊 / 蒙版）做离屏合成，普通批次直接画到默认帧缓冲
+    this.targetLease = 0;
+    this.renderRange(plan, 0, batches.length, null, PASS_NONE);
 
     gl.bindVertexArray(null);
     this.present(width, height);
@@ -733,8 +1158,8 @@ class ShaderLottiePlayer implements LottieBackendInstance {
     this.canvas.width = Math.max(1, Math.round(width));
     this.canvas.height = Math.max(1, Math.round(height));
     this.exports.l2s_set_size(this.canvas.width, this.canvas.height);
-    // 遮罩 FBO 与画布等尺寸，尺寸变化后必须重建
-    this.disposeMaskTarget();
+    // 离屏目标与画布等尺寸，尺寸变化后必须重建
+    this.disposeTargets();
     this.frameValue = -1;
     this.drawFrame(this.ip + (this.elapsed / 1000) * this.fr);
     return true;
@@ -752,7 +1177,7 @@ class ShaderLottiePlayer implements LottieBackendInstance {
       this.raf = 0;
     }
     const gl = this.gl;
-    this.disposeMaskTarget();
+    this.disposeTargets();
     for (const texture of this.textures) {
       if (texture) gl.deleteTexture(texture);
     }
