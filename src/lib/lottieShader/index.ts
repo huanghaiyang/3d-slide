@@ -504,6 +504,17 @@ interface SharedGL {
 
 let sharedGL: SharedGL | null = null;
 
+/** 多采样场景目标：fbo 用于绘制，resolveFbo/resolveTex 用于解析后的单采样结果 */
+interface SceneTarget {
+  tex: WebGLTexture;
+  fbo: WebGLFramebuffer;
+  color: WebGLRenderbuffer;
+  resolveFbo: WebGLFramebuffer;
+  samples: number;
+  width: number;
+  height: number;
+}
+
 /** 编译并链接一个着色器程序 */
 function linkProgram(gl: WebGL2RenderingContext, vsSource: string, fsSource: string): WebGLProgram {
   const vs = compileShader(gl, gl.VERTEX_SHADER, vsSource);
@@ -663,6 +674,8 @@ class ShaderLottiePlayer implements LottieBackendInstance {
   private textures: (WebGLTexture | null)[] = [];
   /** 与画布等尺寸的离屏渲染目标池（图层 pass、模糊 ping-pong、蒙版、轨道遮罩） */
   private targets: { tex: WebGLTexture; fbo: WebGLFramebuffer }[] = [];
+  /** 整帧场景的多采样目标：先 MSAA 渲染再解析到单采样纹理，避免图标/文字边缘锯齿 */
+  private sceneTarget: SceneTarget | null = null;
   /** 当前帧已占用的目标数量（渲染 pass 时按嵌套深度租用 / 归还） */
   private targetLease = 0;
   /** 正在把混合模式图层渲染到离屏目标时的嵌套深度（避免递归重复分发） */
@@ -825,6 +838,78 @@ class ShaderLottiePlayer implements LottieBackendInstance {
     const target = this.ensureTarget(this.targetLease);
     this.targetLease += 1;
     return target;
+  }
+
+  /**
+   * 确保整帧场景的多采样目标可用。
+   *
+   * 场景曾经直接画在单采样离屏目标上，几何边缘只有逐像素取舍，图标与文字会明显锯齿；
+   * 这里改为「多采样颜色缓冲 + 解析纹理」：场景正常绘制后 blit 解析到单采样纹理，
+   * 再合成到画布。采样数取硬件上限与 4 的较小值，兼顾质量与显存带宽。
+   */
+  private ensureSceneTarget(): SceneTarget | null {
+    const gl = this.gl;
+    const width = this.canvas.width;
+    const height = this.canvas.height;
+    const maxSamples = gl.getParameter(gl.MAX_SAMPLES) as number;
+    const samples = Math.max(1, Math.min(4, maxSamples || 1));
+    const current = this.sceneTarget;
+    if (current && current.samples === samples && current.width === width && current.height === height) {
+      return current;
+    }
+    this.disposeSceneTarget();
+    const color = gl.createRenderbuffer();
+    const fbo = gl.createFramebuffer();
+    const resolveTex = gl.createTexture();
+    const resolveFbo = gl.createFramebuffer();
+    if (!color || !fbo || !resolveTex || !resolveFbo) return null;
+    gl.bindRenderbuffer(gl.RENDERBUFFER, color);
+    gl.renderbufferStorageMultisample(gl.RENDERBUFFER, samples, gl.RGBA8, width, height);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.RENDERBUFFER, color);
+    const multisampleComplete = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+    gl.bindTexture(gl.TEXTURE_2D, resolveTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, resolveFbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, resolveTex, 0);
+    const resolveComplete = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+    if (!multisampleComplete || !resolveComplete) {
+      gl.deleteRenderbuffer(color);
+      gl.deleteFramebuffer(fbo);
+      gl.deleteTexture(resolveTex);
+      gl.deleteFramebuffer(resolveFbo);
+      return null;
+    }
+    this.sceneTarget = { tex: resolveTex, fbo, color, resolveFbo, samples, width, height };
+    return this.sceneTarget;
+  }
+
+  /** 把多采样场景解析（resolve）到单采样纹理，供最终合成采样 */
+  private resolveScene(scene: SceneTarget): void {
+    const gl = this.gl;
+    const width = this.canvas.width;
+    const height = this.canvas.height;
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, scene.fbo);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, scene.resolveFbo);
+    gl.blitFramebuffer(0, 0, width, height, 0, 0, width, height, gl.COLOR_BUFFER_BIT, gl.NEAREST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  private disposeSceneTarget(): void {
+    const scene = this.sceneTarget;
+    if (!scene) return;
+    const gl = this.gl;
+    gl.deleteFramebuffer(scene.fbo);
+    gl.deleteFramebuffer(scene.resolveFbo);
+    gl.deleteRenderbuffer(scene.color);
+    gl.deleteTexture(scene.tex);
+    this.sceneTarget = null;
   }
 
   /**
@@ -1304,14 +1389,15 @@ class ShaderLottiePlayer implements LottieBackendInstance {
     // 先按图层 pass（模糊 / 蒙版 / 混合模式）做离屏合成，最后整帧拷贝到默认帧缓冲
     this.targetLease = 0;
     this.blendDepth = 0;
-    const scene = this.leaseTarget();
+    const scene = this.ensureSceneTarget();
     if (scene) {
       this.bindTarget(scene);
       gl.clear(gl.COLOR_BUFFER_BIT);
       this.restoreMain();
       this.renderRange(plan, 0, batches.length, scene, PASS_NONE);
       gl.bindVertexArray(null);
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      // 多采样结果先解析到单采样纹理，再按预乘 alpha 合成到画布
+      this.resolveScene(scene);
       gl.viewport(0, 0, width, height);
       gl.clear(gl.COLOR_BUFFER_BIT);
       this.composite(scene, null, 0, null);
@@ -1391,6 +1477,7 @@ class ShaderLottiePlayer implements LottieBackendInstance {
     }
     const gl = this.gl;
     this.disposeTargets();
+    this.disposeSceneTarget();
     for (const texture of this.textures) {
       if (texture) gl.deleteTexture(texture);
     }
