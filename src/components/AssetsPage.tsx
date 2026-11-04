@@ -68,6 +68,7 @@ type Dialog =
   | { type: 'newFolder'; parentId: string | null }
   | { type: 'renameFolder'; folder: AssetFolder }
   | { type: 'renameAsset'; asset: AssetMeta }
+  | { type: 'renameAssets'; ids: string[] }
   | { type: 'moveAssets'; ids: string[] }
   | { type: 'deleteFolder'; folder: AssetFolder }
   | { type: 'trashAssets'; ids: string[] }
@@ -101,6 +102,26 @@ function kindIcon(kind: AssetKind): 'image' | 'video' | 'audio' | 'model' | 'tex
   if (kind === 'audio') return 'audio';
   if (kind === 'model') return 'model';
   return 'text';
+}
+
+/**
+ * 计算批量改名后的单个名称。
+ *
+ * 规则：保留原文件后缀（名称里没有后缀时用元数据里的 ext 补回），
+ * 前缀后追加两位序号（-01、-02…），整体不超过存储层 60 字的名称上限。
+ *
+ * @param name 原名称（可能包含后缀）
+ * @param ext 元数据中的小写后缀（不含点）
+ * @param base 用户输入的名称前缀
+ * @param index 在选中列表中的序号（从 1 开始）
+ */
+function bulkRenameName(name: string, ext: string, base: string, index: number): string {
+  const dot = name.lastIndexOf('.');
+  const suffix = dot > 0 && dot < name.length - 1 ? name.slice(dot) : ext ? `.${ext}` : '';
+  const serial = `-${String(index).padStart(2, '0')}`;
+  // 前缀优先让位于序号与后缀，避免末尾编号被截断
+  const room = Math.max(1, 60 - serial.length - suffix.length);
+  return `${base.slice(0, room)}${serial}${suffix}`;
 }
 
 /**
@@ -627,6 +648,12 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
     [visible, currentPage],
   );
 
+  // 批量改名的目标：按当前列表顺序排列（选中集始终是可见列表的子集）。
+  const renameTargets = useMemo(
+    () => (dialog?.type === 'renameAssets' ? visible.filter((asset) => dialog.ids.includes(asset.id)) : []),
+    [dialog, visible],
+  );
+
   useEffect(() => {
     setPage(1);
   }, [trashMode, folderId, kind, query]);
@@ -722,6 +749,17 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
       } else if (dialog.type === 'renameAsset') {
         await updateAssetMeta(dialog.asset.id, { name: name.slice(0, 60), updatedAt: Date.now() });
         toast('资源已重命名', 'success');
+      } else if (dialog.type === 'renameAssets') {
+        // 批量改名：保留各自后缀，按当前列表顺序追加序号
+        const targets = visible.filter((asset) => dialog.ids.includes(asset.id));
+        for (const [index, asset] of targets.entries()) {
+          await updateAssetMeta(asset.id, {
+            name: bulkRenameName(asset.name, asset.ext, name, index + 1),
+            updatedAt: Date.now(),
+          });
+        }
+        setSelectedIds([]);
+        toast(`已重命名 ${targets.length} 个资源`, 'success');
       }
       setDialog(null);
       await reload();
@@ -982,6 +1020,15 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
               <>
                 <button
                   className="btn btn-light btn-sm"
+                  onClick={() => {
+                    setDraft('');
+                    setDialog({ type: 'renameAssets', ids: selectedIds });
+                  }}
+                >
+                  <Icon name="edit" size={14} /> 批量改名
+                </button>
+                <button
+                  className="btn btn-light btn-sm"
                   onClick={() => setDialog({ type: 'moveAssets', ids: selectedIds })}
                 >
                   <Icon name="folder" size={14} /> 移动到…
@@ -1178,6 +1225,57 @@ export function AssetBrowser({ mode, kinds, onPick }: AssetBrowserProps) {
           onCancel={() => setDialog(null)}
           onConfirm={() => void submitPrompt()}
         />
+      )}
+
+      {dialog?.type === 'renameAssets' && (
+        <Modal
+          title="批量改名"
+          eyebrow={`已选 ${renameTargets.length} 项`}
+          width={520}
+          onClose={() => setDialog(null)}
+          footer={
+            <>
+              <button className="btn btn-ghost" onClick={() => setDialog(null)}>
+                取消
+              </button>
+              <button className="btn btn-primary" onClick={() => void submitPrompt()}>
+                重命名
+              </button>
+            </>
+          }
+        >
+          <label className="field-block">
+            <span className="field-label">名称前缀</span>
+            <input
+              className="text-input"
+              autoFocus
+              maxLength={60}
+              placeholder="例如：宣传图"
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') void submitPrompt();
+              }}
+            />
+          </label>
+          <p className="bulk-rename-tip">按当前列表顺序编号，并保留各自的文件后缀，例如「宣传图-01.png」。</p>
+          {renameTargets.length > 0 && (
+            <ul className="bulk-rename-list">
+              {renameTargets.slice(0, 5).map((asset, index) => (
+                <li key={asset.id}>
+                  <span className="old">{asset.name}</span>
+                  <span className="arrow">→</span>
+                  <span className="new">
+                    {draft.trim() ? bulkRenameName(asset.name, asset.ext, draft.trim(), index + 1) : '等待输入前缀'}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {renameTargets.length > 5 && (
+            <p className="bulk-rename-tip">另有 {renameTargets.length - 5} 项将按同样规则一并改名。</p>
+          )}
+        </Modal>
       )}
 
       {dialog?.type === 'moveAssets' && (
