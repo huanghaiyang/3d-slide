@@ -10,7 +10,7 @@
  * - 管理员接口：用户列表与删除（级联清理数据与对象存储）；
  * - 构建产物存在时顺带托管 dist/，可用单进程部署（前端使用 hash 路由）。
  *
- * 启动：`npm run server`（默认端口 8787，可用 PORT 覆盖；数据目录用 SLIDE_DATA_DIR 覆盖）。
+ * 启动：`npm run server`（默认端口 8786，可用 PORT 覆盖；数据目录用 SLIDE_DATA_DIR 覆盖）。
  * 启动时会自动检测 MinIO，未运行则执行 `docker compose up -d minio`；
  * 如需关闭自动启动，设置环境变量 MINIO_AUTO_START=false。
  * 开发时 Vite 会把 `/api` 代理到本服务。
@@ -82,7 +82,7 @@ import {
 import { ensureMinioWithApp } from './minio-bootstrap.mjs';
 
 /** 服务端口。 */
-const PORT = Number(process.env.PORT ?? 8787);
+const PORT = Number(process.env.PORT ?? 8786);
 /** 单文件上传上限：与前端 LIMITS.projectBytes（200 MB）保持一致。 */
 const MAX_BYTES = 200 * 1024 * 1024;
 /** 服务端自身的根目录与构建产物目录。 */

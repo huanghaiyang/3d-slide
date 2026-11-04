@@ -8,8 +8,8 @@
 | --- | --- | --- | --- |
 | MinIO API | 9000 | S3 接口，后端用它上传 / 下载对象 | `npm run minio` |
 | MinIO Console | 9001 | 网页控制台，查看桶与对象 | 随容器启动 |
-| 后端 API | 8787 | 账号、数据隔离、文件服务；启动时自动拉起 MinIO | `npm run server` |
-| Vite 开发服务器 | 5176 | 前端，`/api` 代理到 8787 | `npm run dev` |
+| 后端 API | 8786 | 账号、数据隔离、文件服务；启动时自动拉起 MinIO | `npm run server` |
+| Vite 开发服务器 | 5176 | 前端，`/api` 代理到 8786 | `npm run dev` |
 
 > Vite 默认只监听 `localhost`（即 `::1`）。请用 `http://localhost:5176` 访问，`127.0.0.1:5176` 可能连不上。
 
@@ -55,7 +55,7 @@ docker compose ps    # 应看到 3d-slide-minio 处于 running
 
 ```bash
 curl http://127.0.0.1:9000/minio/health/live   # 200 即健康
-curl http://127.0.0.1:8787/api/health          # 返回体中 minio.ok 应为 true
+curl http://127.0.0.1:8786/api/health          # 返回体中 minio.ok 应为 true
 ```
 
 后端首次连接时会自动创建 `3d-slide` 桶，无需手动建桶。
@@ -80,7 +80,7 @@ docker compose stop minio        # 停止容器，保留容器与数据
 docker compose down              # 删除容器与网络，数据仍在 ./data/minio
 ```
 
-> `npm run restart` 会读取 `.run/dev.json` 中的 PID 结束上一轮服务，再兜底清理 8787 / 5176 端口。Ctrl+C 只停应用服务，MinIO 容器会继续运行（`restart: unless-stopped`）。
+> `npm run restart` 会读取 `.run/dev.json` 中的 PID 结束上一轮服务，再兜底清理 8786 / 5176 端口。Ctrl+C 只停应用服务，MinIO 容器会继续运行（`restart: unless-stopped`）。
 
 ## 4. 数据持久化
 
@@ -131,7 +131,7 @@ docker compose down
 Get-NetTCPConnection -LocalPort 9000,9001 -State Listen
 ```
 
-**EADDRINUSE（8787 或 5176）**
+**EADDRINUSE（8786 或 5176）**
 
 已有另一轮服务在运行，执行 `npm run restart` 让脚本接管：结束旧进程、释放端口、重新启动全部服务。
 

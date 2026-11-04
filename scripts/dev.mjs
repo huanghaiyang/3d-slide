@@ -124,4 +124,4 @@ console.log('启动全部服务：后端 + Vite（MinIO 会随后端自动拉起
 startService('server', join(ROOT, 'server', 'index.mjs'));
 startService('web', join(ROOT, 'node_modules', 'vite', 'bin', 'vite.js'));
 await writePidFile();
-console.log('全部服务已启动：前端 http://localhost:5176 ，后端 http://127.0.0.1:8787');
+console.log('全部服务已启动：前端 http://localhost:5176 ，后端 http://127.0.0.1:8786');

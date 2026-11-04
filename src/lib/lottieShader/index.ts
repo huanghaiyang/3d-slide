@@ -29,10 +29,21 @@ import wasmUrl from './lottie2shader.wasm?url';
 import type { LottieBackend, LottieBackendCreateOptions, LottieBackendInstance } from '../lottieBackends';
 import type { LottieDocument } from '../lottie';
 
-/** 批次头固定字数，必须与 Rust 侧 BATCH_WORDS 保持一致 */
-const BATCH_WORDS = 64;
 /** 渐变色标上限，与 Rust 和着色器 uniform 数组长度一致 */
-const MAX_STOPS = 8;
+const MAX_STOPS = 16;
+/** 批次头固定字数 = 13 个字头 + 色标 + 9 个字尾，必须与 Rust 侧 BATCH_WORDS 保持一致 */
+const BATCH_WORDS = 13 + MAX_STOPS * 5 + 11;
+/** 批次头里各字段的字偏移（随 MAX_STOPS 变化，避免与 Rust 布局漂移） */
+const WORD_STOP_COUNT = 12;
+const WORD_UV_FIRST = 13 + MAX_STOPS * 5;
+const WORD_GROUP = WORD_UV_FIRST + 1;
+const WORD_MATTE = WORD_UV_FIRST + 2;
+const WORD_ROLE = WORD_UV_FIRST + 3;
+const WORD_IMAGE = WORD_UV_FIRST + 4;
+const WORD_PASS = WORD_UV_FIRST + 5;
+const WORD_BLEND = WORD_UV_FIRST + 6;
+const WORD_LAYER = WORD_UV_FIRST + 7;
+const WORD_PARENT = WORD_UV_FIRST + 8;
 /** 图片批次类型，与 Rust 侧一致 */
 const KIND_IMAGE = 3;
 /** 蒙版覆盖几何 */
@@ -314,6 +325,8 @@ interface DrawBatch {
   uvFirst: number;
   /** 轨道遮罩分组 id，0 表示普通批次 */
   group: number;
+  /** 外层轨道遮罩分组 id（嵌套遮罩），0 表示没有外层分组 */
+  parentGroup: number;
   /** 轨道遮罩类型 tt：1 alpha-in、2 alpha-out、3 亮度-in、4 亮度-out */
   matteMode: number;
   /** 遮罩角色：0 普通、1 遮罩源、2 被遮罩 */
@@ -340,6 +353,8 @@ interface LayerPass {
   /** 图层蒙版在 masks 数组中的区间 */
   maskFirst: number;
   maskCount: number;
+  /** 该 pass 所在图层的轨道遮罩分组（0 表示不在分组内） */
+  group: number;
 }
 
 /** 一条图层蒙版 */
@@ -362,6 +377,8 @@ interface RenderPlan {
   /** 模糊 / 蒙版图层（按渲染顺序） */
   passes: LayerPass[];
   masks: LayerMask[];
+  /** 轨道遮罩分组 id -> 外层分组 id，用于识别嵌套分组 */
+  groupParents: Map<number, number>;
 }
 
 /**
@@ -378,12 +395,12 @@ function parsePlan(ints: Uint32Array, floats: Float32Array): RenderPlan {
   for (let i = 0; i < count; i += 1) {
     const base = 3 + i * BATCH_WORDS;
     const stops: [number, number, number, number, number][] = [];
-    const stopCount = ints[base + 12] ?? 0;
+    const stopCount = ints[base + WORD_STOP_COUNT] ?? 0;
     for (let s = 0; s < Math.min(MAX_STOPS, stopCount); s += 1) {
       const off = base + 13 + s * 5;
       stops.push([floats[off], floats[off + 1], floats[off + 2], floats[off + 3], floats[off + 4]]);
     }
-    const imageWord = ints[base + 57] ?? 0xffffffff;
+    const imageWord = ints[base + WORD_IMAGE] ?? 0xffffffff;
     batches.push({
       kind: ints[base] ?? 0,
       first: ints[base + 1] ?? 0,
@@ -393,14 +410,15 @@ function parsePlan(ints: Uint32Array, floats: Float32Array): RenderPlan {
       p0: [floats[base + 8], floats[base + 9]],
       p1: [floats[base + 10], floats[base + 11]],
       stops,
-      uvFirst: ints[base + 53] ?? 0,
-      group: ints[base + 54] ?? 0,
-      matteMode: ints[base + 55] ?? 0,
-      role: ints[base + 56] ?? 0,
+      uvFirst: ints[base + WORD_UV_FIRST] ?? 0,
+      group: ints[base + WORD_GROUP] ?? 0,
+      parentGroup: ints[base + WORD_PARENT] ?? 0,
+      matteMode: ints[base + WORD_MATTE] ?? 0,
+      role: ints[base + WORD_ROLE] ?? 0,
       imageIndex: imageWord === 0xffffffff ? -1 : imageWord,
-      passId: ints[base + 58] ?? 0xffffffff,
-      blend: ints[base + 59] ?? 0,
-      layer: ints[base + 60] ?? 0,
+      passId: ints[base + WORD_PASS] ?? 0xffffffff,
+      blend: ints[base + WORD_BLEND] ?? 0,
+      layer: ints[base + WORD_LAYER] ?? 0,
     });
   }
   // 尾部：pass 与蒙版记录
@@ -418,6 +436,7 @@ function parsePlan(ints: Uint32Array, floats: Float32Array): RenderPlan {
       sigmaY: floats[o + 5],
       maskFirst: ints[o + 7] ?? 0xffffffff,
       maskCount: ints[o + 8] ?? 0,
+      group: ints[o + 6] ?? 0,
     });
   }
   const maskCount = ints[afterBatches + 1 + passCount * 10] ?? 0;
@@ -434,7 +453,33 @@ function parsePlan(ints: Uint32Array, floats: Float32Array): RenderPlan {
       quad: quad === 0xffffffff ? -1 : quad,
     });
   }
-  return { batches, vertexCount, uvCount, passes, masks };
+  return { batches, vertexCount, uvCount, passes, masks, groupParents: buildGroupParents(batches) };
+}
+
+/**
+ * 收集嵌套轨道遮罩的父子关系。
+ *
+ * 分组可能出现「外层分组的内容里再嵌入一组内层遮罩」，此时外层分组的批次
+ * 在内层分组前后被截断。记录父分组后即可判断某个批次是否仍属于外层分组，
+ * 从而在遍历时取到完整的外层区间。
+ */
+function buildGroupParents(batches: DrawBatch[]): Map<number, number> {
+  const parents = new Map<number, number>();
+  for (const batch of batches) {
+    if (batch.group !== 0) parents.set(batch.group, batch.parentGroup);
+  }
+  return parents;
+}
+
+/** 判断分组 group 是否嵌套在 ancestor 分组内部（含相等） */
+function groupInside(parents: Map<number, number>, group: number, ancestor: number): boolean {
+  let current = group;
+  // 分组深度有限，额外加计数上限防止脏数据造成死循环
+  for (let depth = 0; depth < 32 && current !== 0; depth += 1) {
+    if (current === ancestor) return true;
+    current = parents.get(current) ?? 0;
+  }
+  return false;
 }
 
 /** 主着色器 uniform 位置集合（同一上下文内的所有播放器共享） */
@@ -694,6 +739,8 @@ class ShaderLottiePlayer implements LottieBackendInstance {
   private disposed = false;
   private readonly offsetBuf = new Float32Array(MAX_STOPS);
   private readonly colorBuf = new Float32Array(MAX_STOPS * 4);
+  /** 展开后的 UV 缓冲（按全局顶点序号索引），按需扩容并复用，避免逐帧分配 */
+  private uvScratchBuf = new Float32Array(0);
 
   constructor(canvas: HTMLCanvasElement, instance: WebAssembly.Instance) {
     this.canvas = canvas;
@@ -971,9 +1018,6 @@ class ShaderLottiePlayer implements LottieBackendInstance {
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, texture);
       gl.uniform1i(this.uniforms.tex, 0);
-      // 图片批次共用一张 UV 缓冲，按 uvFirst 调整属性偏移
-      gl.bindBuffer(gl.ARRAY_BUFFER, this.uvbo);
-      gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 0, batch.uvFirst * 8);
     }
     gl.drawArrays(gl.TRIANGLES, batch.first, batch.count);
   }
@@ -1151,7 +1195,7 @@ class ShaderLottiePlayer implements LottieBackendInstance {
     this.restoreMain();
     // 预合成图层本身若属于某个轨道遮罩分组，该分组由外层统一处理，
     // 这里的子批次不要再次按分组分发（否则组内没有遮罩源，内容会被整组丢弃）。
-    const contentGroup = plan.batches[from]?.group ?? 0;
+    const contentGroup = pass.group;
     this.renderRange(plan, from, to, content, pass.id, false, contentGroup);
     let src = content;
     if (pass.sigmaX > 0.4) {
@@ -1186,6 +1230,9 @@ class ShaderLottiePlayer implements LottieBackendInstance {
   /**
    * 绘制一个轨道遮罩分组：遮罩源画到离屏目标作为 alpha / 亮度蒙版，
    * 被遮罩内容画到另一个目标后与蒙版相乘，再合成到父目标。
+   *
+   * @param group 本分组的 id。内容区间内可能还嵌有其他分组（嵌套遮罩），
+   *   这些批次不能按本分组一起平铺，而要交给 renderRange 递归合成。
    */
   private renderMatteGroup(
     plan: RenderPlan,
@@ -1193,9 +1240,10 @@ class ShaderLottiePlayer implements LottieBackendInstance {
     end: number,
     target: { tex: WebGLTexture; fbo: WebGLFramebuffer } | null,
     ownerPass: number,
+    group: number,
   ): void {
     let split = start;
-    while (split < end && plan.batches[split].role === 1) split += 1;
+    while (split < end && plan.batches[split].role === 1 && plan.batches[split].group === group) split += 1;
     if (split >= end) {
       // 没有可见的被遮罩图层
       return;
@@ -1206,7 +1254,7 @@ class ShaderLottiePlayer implements LottieBackendInstance {
       // 反向遮罩（tt=2 / tt=4）等价于蒙版处处不透明，内容照常绘制。
       const tt = plan.batches[split]?.matteMode || 1;
       if (tt === 2 || tt === 4) {
-        this.renderRange(plan, split, end, target, ownerPass, true);
+        this.renderRange(plan, split, end, target, ownerPass, false, group);
       }
       return;
     }
@@ -1221,11 +1269,11 @@ class ShaderLottiePlayer implements LottieBackendInstance {
     this.bindTarget(matte);
     this.gl.clear(this.gl.COLOR_BUFFER_BIT);
     this.restoreMain();
-    this.renderRange(plan, start, split, matte, ownerPass, true);
+    this.renderRange(plan, start, split, matte, ownerPass, false, group);
     this.bindTarget(temp);
     this.gl.clear(this.gl.COLOR_BUFFER_BIT);
     this.restoreMain();
-    this.renderRange(plan, split, end, temp, ownerPass, true);
+    this.renderRange(plan, split, end, temp, ownerPass, false, group);
     // Rust 写入的是 lottie 的 tt 原值，这里翻译成合成程序的模式：
     // 1 alpha-in、2 alpha-out、3 亮度-in、4 亮度-out
     const tt = plan.batches[split]?.matteMode || 1;
@@ -1281,9 +1329,16 @@ class ShaderLottiePlayer implements LottieBackendInstance {
         continue;
       }
       if (!skipGroups && batch.group !== 0 && batch.group !== skipGroup) {
-        let next = index;
-        while (next < end && plan.batches[next].group === batch.group) next += 1;
-        this.renderMatteGroup(plan, index, next, target, ownerPass);
+        const group = batch.group;
+        // 分组区间可能被嵌套的遮罩分组截断，需要把内层分组也算进外层区间
+        let next = index + 1;
+        while (next < end) {
+          const nextGroup = plan.batches[next].group;
+          if (nextGroup === 0) break;
+          if (nextGroup !== group && !groupInside(plan.groupParents, nextGroup, group)) break;
+          next += 1;
+        }
+        this.renderMatteGroup(plan, index, next, target, ownerPass, group);
         index = next;
         continue;
       }
@@ -1333,6 +1388,15 @@ class ShaderLottiePlayer implements LottieBackendInstance {
     }
   }
 
+  /** 取一块全 0、长度为 vertexCount * 2 的 UV 缓冲（不足时扩容） */
+  private uvScratch(vertexCount: number): Float32Array {
+    const need = vertexCount * 2;
+    if (this.uvScratchBuf.length < need) this.uvScratchBuf = new Float32Array(need);
+    const view = this.uvScratchBuf.subarray(0, need);
+    view.fill(0);
+    return view;
+  }
+
   /** 生成一帧并绘制到画布；帧号未变化时跳过重绘 */
   private drawFrame(frame: number): void {
     if (this.disposed) return;
@@ -1372,15 +1436,26 @@ class ShaderLottiePlayer implements LottieBackendInstance {
     gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.DYNAMIC_DRAW);
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.uvbo);
-    gl.bufferData(gl.ARRAY_BUFFER, uvs ?? new Float32Array(0), gl.DYNAMIC_DRAW);
-    // 无 UV（无图片批次）时禁用属性 1：缓冲长度为 0 时若仍启用，
-    // 整次 drawArrays 会因数组越界触发 INVALID_OPERATION 而丢弃绘制
-    if (uvCount > 0) {
-      gl.enableVertexAttribArray(1);
-      gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 0, 0);
-    } else {
-      gl.disableVertexAttribArray(1);
+    // Rust 输出的 UV 只覆盖图片批次（紧凑排列），而顶点属性按全局顶点序号取值：
+    // 必须按顶点序号展开成 vertexCount 对，否则图片批次的属性索引远大于 UV 缓冲长度，
+    // WebGL 会以数组越界为由丢弃整次 drawArrays（整帧空白）。
+    const expandedUvs = this.uvScratch(vertexCount);
+    if (uvs) {
+      const uvPairs = uvs.length / 2;
+      for (const batch of batches) {
+        if (batch.kind !== KIND_IMAGE || batch.count <= 0) continue;
+        // 图片批次的 UV 与顶点一一对应；越界时按可用数量截断，而非整批丢弃
+        const pairs = Math.min(batch.count, uvPairs - batch.uvFirst, vertexCount - batch.first);
+        if (pairs <= 0) continue;
+        const from = batch.uvFirst * 2;
+        const to = batch.first * 2;
+        expandedUvs.set(uvs.subarray(from, from + pairs * 2), to);
+      }
     }
+    gl.bufferData(gl.ARRAY_BUFFER, expandedUvs, gl.DYNAMIC_DRAW);
+    // 属性 1 始终启用并指向展开后的完整缓冲：非图片批次取到的是填充的 0
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 0, 0);
     gl.uniform2f(this.uniforms.size, this.canvas.width, this.canvas.height);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.blankTex);

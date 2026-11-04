@@ -4,7 +4,7 @@
  * 使用：`npm run restart`
  * 流程：
  * 1. 读取 `.run/dev.json`，结束上一次 `npm run dev` 的监督进程与子进程；
- * 2. 兜底清理监听 8787（后端）与 5176（Vite）的残留进程（例如手动启动的服务）；
+ * 2. 兜底清理监听 8786（后端）与 5176（Vite）的残留进程（例如手动启动的服务）；
  * 3. 等待端口释放后，启动 scripts/dev.mjs，并接管其输出。
  */
 
@@ -20,7 +20,7 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const PID_FILE = join(ROOT, '.run', 'dev.json');
 
 /** 需要释放的端口：后端（可用 PORT 覆盖）与 Vite 固定端口。 */
-const PORTS = [Number(process.env.PORT ?? 8787), Number(process.env.SLIDE_DEV_PORT ?? 5176)];
+const PORTS = [Number(process.env.PORT ?? 8786), Number(process.env.SLIDE_DEV_PORT ?? 5176)];
 /** 等待端口释放的最长时间。 */
 const FREE_TIMEOUT = 10_000;
 
