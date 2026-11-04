@@ -16,6 +16,41 @@ import type { AssetFolder, AssetMeta } from './assets';
 /** API 根路径（与 Vite 代理、后端路由保持一致）。 */
 const BASE = '/api';
 
+/** 登录用户信息（服务端已过滤掉密码哈希等敏感字段）。 */
+export interface SessionUser {
+  id: string;
+  username: string;
+  role: 'admin' | 'user';
+  createdAt: number;
+}
+
+/** 带 HTTP 状态码的请求错误，便于调用方区分 401 / 403 等场景。 */
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
+/** 会话失效（401）时的全局回调，由 App 注册以切回登录页。 */
+let unauthorizedHandler: (() => void) | null = null;
+
+/**
+ * 注册 401 全局处理。
+ * @param handler 传 null 取消注册
+ */
+export function setUnauthorizedHandler(handler: (() => void) | null) {
+  unauthorizedHandler = handler;
+}
+
+/** fetch 配置扩展：登录 / 注册接口自身返回 401 时不触发全局登出。 */
+interface ApiOptions extends RequestInit {
+  skipAuthHandler?: boolean;
+}
+
 /** 封面记录的线上结构，与 storage.ts 导出的 DeckCover 完全一致。 */
 export interface CoverRecord {
   /** 对应作品 id。 */
@@ -33,22 +68,26 @@ export type AssetRecord = AssetMeta;
 
 /**
  * 发起请求，并把网络层失败转成统一提示。
+ * 401 会触发全局回调（登录失效时自动回到登录页）。
  * @param path 以 `/` 开头的接口路径
  * @param init fetch 配置
  */
-async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
+async function apiFetch(path: string, init?: ApiOptions): Promise<Response> {
+  let response: Response;
   try {
-    return await fetch(`${BASE}${path}`, init);
+    response = await fetch(`${BASE}${path}`, { credentials: 'same-origin', ...init });
   } catch {
     throw new Error('无法连接后端服务，请先在项目目录运行 npm run server');
   }
+  if (response.status === 401 && !init?.skipAuthHandler) unauthorizedHandler?.();
+  return response;
 }
 
 /**
  * 从非 2xx 响应里提取错误文案。
  * @param response fetch 响应
  */
-async function errorOf(response: Response): Promise<Error> {
+async function errorOf(response: Response): Promise<ApiError> {
   let message = `请求失败（${response.status}）`;
   try {
     const data = (await response.json()) as { error?: unknown };
@@ -56,7 +95,7 @@ async function errorOf(response: Response): Promise<Error> {
   } catch {
     // 响应不是 JSON 时保留状态码文案
   }
-  return new Error(message);
+  return new ApiError(message, response.status);
 }
 
 /**
@@ -65,7 +104,7 @@ async function errorOf(response: Response): Promise<Error> {
  * @param init fetch 配置
  * @returns 解析后的响应体；HTTP 204 时返回 null
  */
-async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
+async function requestJson<T>(path: string, init?: ApiOptions): Promise<T> {
   const response = await apiFetch(path, init);
   if (!response.ok) throw await errorOf(response);
   if (response.status === 204) return null as T;
@@ -90,6 +129,58 @@ function jsonInit(method: string, body: unknown): RequestInit {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   };
+}
+
+/* -------------------------------- 账号 -------------------------------- */
+
+/** 读取当前登录用户；未登录时抛出 status=401 的 ApiError。 */
+export async function fetchMe(): Promise<SessionUser> {
+  const data = await requestJson<{ user: SessionUser }>('/auth/me');
+  return data.user;
+}
+
+/**
+ * 登录。
+ * @param username 用户名
+ * @param password 密码
+ */
+export async function login(username: string, password: string): Promise<SessionUser> {
+  const data = await requestJson<{ user: SessionUser }>('/auth/login', {
+    ...jsonInit('POST', { username, password }),
+    // 登录失败返回 401 属于正常业务结果，不触发全局登出
+    skipAuthHandler: true,
+  });
+  return data.user;
+}
+
+/**
+ * 注册（首个注册账号自动成为管理员）。
+ * @param username 用户名
+ * @param password 密码
+ */
+export async function register(username: string, password: string): Promise<SessionUser> {
+  const data = await requestJson<{ user: SessionUser }>('/auth/register', {
+    ...jsonInit('POST', { username, password }),
+    skipAuthHandler: true,
+  });
+  return data.user;
+}
+
+/** 退出登录（清除服务端会话与 Cookie）。 */
+export async function logout(): Promise<void> {
+  await requestJson('/auth/logout', { method: 'POST' });
+}
+
+/* ------------------------------ 管理员 ------------------------------- */
+
+/** 读取全部账号（仅管理员可调用）。 */
+export function fetchUsers(): Promise<SessionUser[]> {
+  return requestJson<SessionUser[]>('/admin/users');
+}
+
+/** 删除账号及其全部数据（仅管理员可调用）。 */
+export async function deleteUser(id: string): Promise<void> {
+  await requestJson(`/admin/users/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
 /* -------------------------------- 作品 -------------------------------- */

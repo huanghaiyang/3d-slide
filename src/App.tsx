@@ -1,10 +1,14 @@
 /**
- * App.tsx —— 应用根组件与 hash 路由装配
+ * App.tsx —— 应用根组件、登录守卫与 hash 路由装配
  *
- * 本项目没有引入路由库，而是用 URL hash 实现三个页面级的轻量路由：
- * - `#/`（或无 hash）：首页作品列表；
- * - `#/assets`：素材 / 资源管理页；
- * - `#/deck/<id>`：指定作品的 3D 编辑器。
+ * 职责：
+ * - 启动时请求 `/api/auth/me` 恢复登录态；未登录则展示登录 / 注册页；
+ * - 登录后提供四个页面级路由（用 URL hash 实现，无路由库）：
+ *   - `#/`（或无 hash）：首页作品列表；
+ *   - `#/assets`：素材 / 资源管理页；
+ *   - `#/deck/<id>`：指定作品的 3D 编辑器；
+ *   - `#/users`：管理员用户管理页（非管理员访问时回退首页）；
+ * - 注册全局 401 处理：会话失效时自动退回登录页。
  *
  * 数据流：
  * 1. 首次渲染时由 readRoute 解析当前 hash 得到初始路由；
@@ -16,15 +20,23 @@
 
 import { useEffect, useState } from 'react';
 import { AssetsPage } from './components/AssetsPage';
+import { AuthPage } from './components/AuthPage';
 import { Editor } from './components/Editor';
 import { Home } from './components/Home';
+import { UsersPage } from './components/UsersPage';
 import { ToastHost } from './components/ui';
+import {
+  fetchMe,
+  logout as logoutRequest,
+  setUnauthorizedHandler,
+  type SessionUser,
+} from './lib/api';
 
 /**
- * 路由状态：用可辨识联合表示三个页面，
+ * 路由状态：用可辨识联合表示页面，
  * editor 分支携带作品 id，便于直接作为 Editor 的 deckId 与 key。
  */
-type Route = { name: 'home' } | { name: 'assets' } | { name: 'editor'; id: string };
+type Route = { name: 'home' } | { name: 'assets' } | { name: 'users' } | { name: 'editor'; id: string };
 
 /**
  * 从当前 URL hash 解析路由。
@@ -38,6 +50,7 @@ function readRoute(): Route {
   const match = window.location.hash.match(/^#\/deck\/([\w-]+)/);
   if (match) return { name: 'editor', id: match[1] };
   if (/^#\/assets/.test(window.location.hash)) return { name: 'assets' };
+  if (/^#\/users/.test(window.location.hash)) return { name: 'users' };
   return { name: 'home' };
 }
 
@@ -55,14 +68,34 @@ function navigate(hash: string) {
 }
 
 /**
- * 应用根组件：根据 hash 路由渲染对应页面，并挂载全局 Toast 容器。
+ * 应用根组件：登录守卫 + 路由渲染 + 全局 Toast 容器。
  *
- * 副作用：组件挂载时注册 hashchange 监听，卸载时移除。
- *
- * @returns 当前路由对应的页面组件
+ * @returns 登录页、加载态或当前路由对应的页面
  */
 export default function App() {
   const [route, setRoute] = useState<Route>(readRoute);
+  // undefined = 正在恢复登录态；null = 未登录；对象 = 已登录
+  const [user, setUser] = useState<SessionUser | null | undefined>(undefined);
+
+  useEffect(() => {
+    // 任意接口返回 401（会话过期 / 被删除）时退回登录页
+    setUnauthorizedHandler(() => setUser(null));
+    return () => setUnauthorizedHandler(null);
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+    fetchMe()
+      .then((me) => {
+        if (alive) setUser(me);
+      })
+      .catch(() => {
+        if (alive) setUser(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   useEffect(() => {
     const onHash = () => setRoute(readRoute());
@@ -71,15 +104,65 @@ export default function App() {
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
+  /** 登录 / 注册成功：回到首页。 */
+  const onAuthed = (next: SessionUser) => {
+    setUser(next);
+    navigate('#/');
+  };
+
+  /** 退出登录：清除服务端会话后再回到登录页。 */
+  const onLogout = async () => {
+    try {
+      await logoutRequest();
+    } catch {
+      // 服务端不可达时依然允许本地退出，刷新后以 Cookie 状态为准
+    }
+    setUser(null);
+    navigate('#/');
+  };
+
+  if (user === undefined) {
+    return (
+      <>
+        <div className="auth-loading">
+          <span className="brand-mark" aria-hidden="true">
+            <i />
+            <i />
+            <i />
+          </span>
+          <p>正在载入工作区…</p>
+        </div>
+        <ToastHost />
+      </>
+    );
+  }
+
+  if (user === null) {
+    return (
+      <>
+        <AuthPage onAuthed={onAuthed} />
+        <ToastHost />
+      </>
+    );
+  }
+
   return (
     <>
-      {route.name === 'home' ? (
-        <Home onOpen={(id) => navigate(`#/deck/${id}`)} onOpenAssets={() => navigate('#/assets')} />
-      ) : route.name === 'assets' ? (
+      {route.name === 'assets' ? (
         <AssetsPage onBack={() => navigate('#/')} />
-      ) : (
+      ) : route.name === 'users' && user.role === 'admin' ? (
+        <UsersPage current={user} onBack={() => navigate('#/')} />
+      ) : route.name === 'editor' ? (
         // key 绑定作品 id：切换作品时强制重建 Editor，清空上一部作品的场景与状态
         <Editor key={route.id} deckId={route.id} onBack={() => navigate('#/')} />
+      ) : (
+        <Home
+          user={user}
+          onOpen={(id) => navigate(`#/deck/${id}`)}
+          onOpenAssets={() => navigate('#/assets')}
+          onOpenUsers={() => navigate('#/users')}
+          onLogout={() => void onLogout()}
+        />
       )}
       {/* 全局 Toast 容器，放在路由之外，切换页面时提示不会被卸载 */}
       <ToastHost />

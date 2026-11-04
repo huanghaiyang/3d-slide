@@ -1,27 +1,28 @@
 /**
- * store.mjs —— 后端本地数据存储
+ * store.mjs —— 后端本地数据存储（按用户隔离）
  *
  * 职责：
- * - 在 `data/` 目录下维护作品、封面、资源元数据、文件夹与文件二进制；
+ * - 在 `data/users/<userId>/` 下维护该用户的作品、封面、资源元数据、文件夹与文件元数据；
  * - 提供 JSON 原子写入（临时文件 + rename）与串行写队列，避免并发请求互相覆盖；
- * - 提供文件 blob 的落盘 / 删除与安全路径计算（id 白名单，杜绝路径穿越）。
+ * - 提供安全路径计算（id 白名单，杜绝路径穿越），资源与文件的二进制内容不落本地，
+ *   统一存放在 MinIO（见 server/minio.mjs）。
  *
  * 目录布局（默认 data/，可用 SLIDE_DATA_DIR 环境变量改写）：
- * - decks/<id>.json    完整 Deck JSON
- * - covers/<id>.json   首页封面 { id, dataUrl, deckUpdatedAt, at }
- * - assets/<id>.json   资源元数据 AssetMeta（不含二进制）
- * - assets/blobs/<id>  资源二进制内容
- * - files/<id>.json    通用文件元数据 { id, name, mime, size, createdAt }
- * - files/blobs/<id>   通用文件二进制内容
- * - folders.json       资源文件夹数组
- * - tmp/               multer 上传中转目录
+ * - accounts/<userId>.json       账号记录（由 server/users.mjs 维护）
+ * - users/<userId>/decks/<id>.json    完整 Deck JSON
+ * - users/<userId>/covers/<id>.json   首页封面 { id, dataUrl, deckUpdatedAt, at }
+ * - users/<userId>/assets/<id>.json   资源元数据 AssetMeta（不含二进制）
+ * - users/<userId>/files/<id>.json    通用文件元数据 { id, name, mime, size, createdAt }
+ * - users/<userId>/folders.json       资源文件夹数组
+ * - sessions.json                登录会话（由 server/auth.mjs 维护）
+ * - tmp/                         上传中转目录
  *
- * 设计取舍：本服务面向单机单用户，JSON 记录按 id 分文件存放，
- * 单条写入不会重写整库；所有写操作进入同一串行队列，保证请求顺序一致。
+ * 所有读写函数都要求显式传入 userId，调用方（路由层）只能使用当前登录用户 id，
+ * 从结构上杜绝跨用户读取。
  */
 
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -34,14 +35,10 @@ export const DATA_DIR = process.env.SLIDE_DATA_DIR
   : resolve(ROOT, 'data');
 
 /** 各类记录与二进制所在的子目录 / 文件路径。 */
-const DECKS_DIR = join(DATA_DIR, 'decks');
-const COVERS_DIR = join(DATA_DIR, 'covers');
-const ASSETS_DIR = join(DATA_DIR, 'assets');
-const ASSET_BLOBS_DIR = join(ASSETS_DIR, 'blobs');
-const FILES_DIR = join(DATA_DIR, 'files');
-const FILE_BLOBS_DIR = join(FILES_DIR, 'blobs');
-const FOLDERS_FILE = join(DATA_DIR, 'folders.json');
+const USERS_DIR = join(DATA_DIR, 'users');
+export const ACCOUNTS_DIR = join(DATA_DIR, 'accounts');
 export const TMP_DIR = join(DATA_DIR, 'tmp');
+export const SESSIONS_FILE = join(DATA_DIR, 'sessions.json');
 
 /** id 只允许字母、数字、下划线与短横线，且长度受限，避免拼接出越界路径。 */
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
@@ -77,22 +74,41 @@ export function httpError(status, message) {
   return error;
 }
 
+/** 用户数据根目录。 */
+export function userDir(userId) {
+  return join(USERS_DIR, assertId(userId));
+}
+
+/** 账号记录文件的路径。 */
+export function accountPath(id) {
+  return join(ACCOUNTS_DIR, `${assertId(id)}.json`);
+}
+
+/** 确保账号目录存在（users.mjs 写账号前调用）。 */
+export function ensureAccountsDir() {
+  return mkdir(ACCOUNTS_DIR, { recursive: true });
+}
+
 /**
- * 确保所有数据目录存在（服务启动时调用一次）。
+ * 确保全部基础目录存在（服务启动时调用一次）。
  */
 export async function ensureDataDirs() {
-  for (const dir of [
-    DATA_DIR,
-    DECKS_DIR,
-    COVERS_DIR,
-    ASSETS_DIR,
-    ASSET_BLOBS_DIR,
-    FILES_DIR,
-    FILE_BLOBS_DIR,
-    TMP_DIR,
-  ]) {
+  for (const dir of [DATA_DIR, USERS_DIR, ACCOUNTS_DIR, TMP_DIR]) {
     await mkdir(dir, { recursive: true });
   }
+}
+
+/** 确保指定用户的全部数据子目录存在（注册账号时调用）。 */
+export async function ensureUserDirs(userId) {
+  const base = userDir(userId);
+  for (const dir of [base, join(base, 'decks'), join(base, 'covers'), join(base, 'assets'), join(base, 'files')]) {
+    await mkdir(dir, { recursive: true });
+  }
+}
+
+/** 删除某个用户的全部本地数据（账号删除时级联调用）。 */
+export async function removeUserData(userId) {
+  await rm(userDir(userId), { recursive: true, force: true });
 }
 
 /**
@@ -100,7 +116,7 @@ export async function ensureDataDirs() {
  * @param {string} file 绝对路径
  * @param {*} fallback 兜底值
  */
-async function readJson(file, fallback) {
+export async function readJson(file, fallback) {
   try {
     return JSON.parse(await readFile(file, 'utf8'));
   } catch (error) {
@@ -117,7 +133,7 @@ async function readJson(file, fallback) {
  * @param {string} file 绝对路径
  * @param {*} value 可被 JSON 序列化的值
  */
-async function writeJson(file, value) {
+export async function writeJson(file, value) {
   const tmp = `${file}.${randomUUID()}.tmp`;
   await writeFile(tmp, JSON.stringify(value), 'utf8');
   await rename(tmp, file);
@@ -171,118 +187,111 @@ function recordPath(dir, id) {
   return join(dir, `${assertId(id)}.json`);
 }
 
-/** 把上传中转文件移动到最终位置（同一磁盘上 rename 是原子操作）。 */
-export async function moveIntoPlace(from, to) {
-  await rename(from, to);
+/** 用户数据下的某个子目录。 */
+function userSubDir(userId, name) {
+  return join(userDir(userId), name);
 }
 
 /* -------------------------------- 作品 -------------------------------- */
 
-/** 列出全部作品原始 JSON（顺序由文件系统决定，前端自行排序）。 */
-export function listDecks() {
-  return listRecords(DECKS_DIR);
+/** 列出当前用户全部作品原始 JSON（顺序由文件系统决定，前端自行排序）。 */
+export function listDecks(userId) {
+  return listRecords(userSubDir(userId, 'decks'));
 }
 
-/** 读取单个作品；不存在返回 null。 */
-export function getDeck(id) {
-  return readJson(recordPath(DECKS_DIR, id), null);
+/** 读取当前用户的单个作品；不存在返回 null。 */
+export function getDeck(userId, id) {
+  return readJson(recordPath(userSubDir(userId, 'decks'), id), null);
 }
 
-/** 覆盖写入作品。 */
-export function saveDeck(deck) {
-  return exclusive(() => writeJson(recordPath(DECKS_DIR, deck.id), deck));
+/** 覆盖写入当前用户的作品。 */
+export function saveDeck(userId, deck) {
+  return exclusive(() => writeJson(recordPath(userSubDir(userId, 'decks'), deck.id), deck));
 }
 
 /**
  * 删除作品，并级联删除其首页封面。
+ * @param {string} userId
  * @param {string} id
  */
-export async function removeDeck(id) {
+export async function removeDeck(userId, id) {
+  const base = userDir(userId);
   await exclusive(async () => {
-    await removeFile(recordPath(DECKS_DIR, id));
-    await removeFile(recordPath(COVERS_DIR, id));
+    await removeFile(recordPath(join(base, 'decks'), id));
+    await removeFile(recordPath(join(base, 'covers'), id));
   });
 }
 
 /* ------------------------------ 首页封面 ------------------------------ */
 
-/** 列出全部封面记录。 */
-export function listCovers() {
-  return listRecords(COVERS_DIR);
+/** 列出当前用户全部封面记录。 */
+export function listCovers(userId) {
+  return listRecords(userSubDir(userId, 'covers'));
 }
 
-/** 读取单个作品封面；不存在返回 null。 */
-export function getCover(id) {
-  return readJson(recordPath(COVERS_DIR, id), null);
+/** 读取当前用户的单个作品封面；不存在返回 null。 */
+export function getCover(userId, id) {
+  return readJson(recordPath(userSubDir(userId, 'covers'), id), null);
 }
 
 /** 写入（覆盖）封面记录。 */
-export function saveCover(cover) {
-  return exclusive(() => writeJson(recordPath(COVERS_DIR, cover.id), cover));
+export function saveCover(userId, cover) {
+  return exclusive(() => writeJson(recordPath(userSubDir(userId, 'covers'), cover.id), cover));
 }
 
 /** 删除封面记录。 */
-export async function removeCover(id) {
-  await exclusive(() => removeFile(recordPath(COVERS_DIR, id)));
+export async function removeCover(userId, id) {
+  await exclusive(() => removeFile(recordPath(userSubDir(userId, 'covers'), id)));
 }
 
 /* -------------------------------- 资源 -------------------------------- */
 
 /** 资源元数据文件路径。 */
-function assetMetaPath(id) {
-  return recordPath(ASSETS_DIR, id);
+function assetMetaPath(userId, id) {
+  return recordPath(userSubDir(userId, 'assets'), id);
 }
 
-/** 资源二进制路径（与元数据同 id，无后缀；Content-Type 由元数据决定）。 */
-export function assetBlobPath(id) {
-  return join(ASSET_BLOBS_DIR, assertId(id));
+/** 列出当前用户全部资源元数据。 */
+export function listAssets(userId) {
+  return listRecords(userSubDir(userId, 'assets'));
 }
 
-/** 列出全部资源元数据。 */
-export function listAssets() {
-  return listRecords(ASSETS_DIR);
-}
-
-/** 读取单个资源元数据；不存在返回 null。 */
-export function getAsset(id) {
-  return readJson(assetMetaPath(id), null);
+/** 读取当前用户的单个资源元数据；不存在返回 null。 */
+export function getAsset(userId, id) {
+  return readJson(assetMetaPath(userId, id), null);
 }
 
 /**
- * 保存资源元数据与二进制（调用方需先把二进制放到 assetBlobPath）。
- * 元数据写入失败时回滚已落盘的二进制，避免产生无主文件。
+ * 保存资源元数据。
+ * @param {string} userId
  * @param {object} meta
  */
-export async function saveAsset(meta) {
-  try {
-    await exclusive(() => writeJson(assetMetaPath(meta.id), meta));
-  } catch (error) {
-    await removeFile(assetBlobPath(meta.id)).catch(() => {});
-    throw error;
-  }
+export function saveAsset(userId, meta) {
+  return exclusive(() => writeJson(assetMetaPath(userId, meta.id), meta));
 }
 
 /** 仅更新资源元数据（覆盖写入）。 */
-export function saveAssetMeta(meta) {
-  return exclusive(() => writeJson(assetMetaPath(meta.id), meta));
+export function saveAssetMeta(userId, meta) {
+  return exclusive(() => writeJson(assetMetaPath(userId, meta.id), meta));
 }
 
 /**
- * 在串行队列中批量更新资源元数据。
+ * 在串行队列中批量更新当前用户的资源元数据。
+ * @param {string} userId
  * @param {string[]} ids
  * @param {(meta: object, now: number) => object | null} patch 返回新元数据或 null（跳过）
  * @returns {Promise<number>} 实际更新数量
  */
-export function patchAssets(ids, patch) {
+export function patchAssets(userId, ids, patch) {
   return exclusive(async () => {
     let changed = 0;
     const now = Date.now();
     for (const id of ids) {
-      const meta = await getAsset(id);
+      const meta = await getAsset(userId, id);
       if (!meta) continue;
       const next = patch(meta, now);
       if (!next) continue;
-      await writeJson(assetMetaPath(id), { ...next, id });
+      await writeJson(assetMetaPath(userId, id), { ...next, id });
       changed += 1;
     }
     return changed;
@@ -290,103 +299,85 @@ export function patchAssets(ids, patch) {
 }
 
 /**
- * 永久删除资源：元数据 + 二进制。
+ * 永久删除当前用户的资源元数据（二进制由路由层同步从 MinIO 删除）。
+ * @param {string} userId
  * @param {string[]} ids
  * @returns {Promise<number>} 实际删除数量
  */
-export function purgeAssets(ids) {
+export function purgeAssets(userId, ids) {
   return exclusive(async () => {
     let removed = 0;
     for (const id of ids) {
-      const meta = await getAsset(id);
+      const meta = await getAsset(userId, id);
       if (!meta) continue;
-      await removeFile(assetMetaPath(id));
-      await removeFile(assetBlobPath(id));
+      await removeFile(assetMetaPath(userId, id));
       removed += 1;
     }
     return removed;
   });
 }
 
-/** 清空回收站：删除所有 deletedAt 非空的资源。 */
-export async function emptyAssetTrash() {
-  const metas = await listAssets();
-  const ids = metas.filter((meta) => meta.deletedAt).map((meta) => String(meta.id));
-  return purgeAssets(ids);
-}
-
 /* ------------------------------ 通用文件 ------------------------------ */
 
-function fileMetaPath(id) {
-  return recordPath(FILES_DIR, id);
+function fileMetaPath(userId, id) {
+  return recordPath(userSubDir(userId, 'files'), id);
 }
 
-/** 通用文件二进制路径。 */
-export function fileBlobPath(id) {
-  return join(FILE_BLOBS_DIR, assertId(id));
+/** 列出当前用户全部通用文件元数据。 */
+export function listFiles(userId) {
+  return listRecords(userSubDir(userId, 'files'));
 }
 
-/** 列出全部通用文件元数据。 */
-export function listFiles() {
-  return listRecords(FILES_DIR);
-}
-
-/** 读取单个通用文件元数据。 */
-export function getFile(id) {
-  return readJson(fileMetaPath(id), null);
+/** 读取当前用户的单个通用文件元数据。 */
+export function getFile(userId, id) {
+  return readJson(fileMetaPath(userId, id), null);
 }
 
 /** 保存通用文件元数据。 */
-export function saveFile(meta) {
-  return exclusive(() => writeJson(fileMetaPath(meta.id), meta));
+export function saveFile(userId, meta) {
+  return exclusive(() => writeJson(fileMetaPath(userId, meta.id), meta));
 }
 
-/** 删除通用文件（元数据 + 二进制）。 */
-export async function removeFileRecord(id) {
-  await exclusive(async () => {
-    await removeFile(fileMetaPath(id));
-    await removeFile(fileBlobPath(id));
-  });
+/** 删除通用文件元数据（二进制由路由层同步从 MinIO 删除）。 */
+export async function removeFileRecord(userId, id) {
+  await exclusive(() => removeFile(fileMetaPath(userId, id)));
 }
 
 /* ------------------------------- 文件夹 ------------------------------- */
 
-/** 读取全部资源文件夹（旧数据缺字段时由前端补齐）。 */
-export function listFolders() {
-  return readJson(FOLDERS_FILE, []).then((value) => (Array.isArray(value) ? value : []));
+/** 当前用户的文件夹记录文件。 */
+function foldersFile(userId) {
+  return join(userDir(userId), 'folders.json');
+}
+
+/** 读取当前用户全部资源文件夹（旧数据缺字段时由前端补齐）。 */
+export function listFolders(userId) {
+  return readJson(foldersFile(userId), []).then((value) => (Array.isArray(value) ? value : []));
 }
 
 /**
  * 写入（覆盖）一个文件夹。
+ * @param {string} userId
  * @param {object} folder
  */
-export function saveFolder(folder) {
+export function saveFolder(userId, folder) {
   return exclusive(async () => {
-    const folders = await readJson(FOLDERS_FILE, []);
+    const folders = await readJson(foldersFile(userId), []);
     const list = Array.isArray(folders) ? folders.filter((item) => item.id !== folder.id) : [];
     list.push(folder);
-    await writeJson(FOLDERS_FILE, list);
+    await writeJson(foldersFile(userId), list);
   });
 }
 
 /**
  * 批量删除文件夹记录（不处理其中的资源，资源归属由调用方调整）。
+ * @param {string} userId
  * @param {string[]} ids
  */
-export function removeFolders(ids) {
+export function removeFolders(userId, ids) {
   return exclusive(async () => {
-    const folders = await readJson(FOLDERS_FILE, []);
+    const folders = await readJson(foldersFile(userId), []);
     const set = new Set(ids);
-    await writeJson(FOLDERS_FILE, (Array.isArray(folders) ? folders : []).filter((item) => !set.has(item.id)));
+    await writeJson(foldersFile(userId), (Array.isArray(folders) ? folders : []).filter((item) => !set.has(item.id)));
   });
-}
-
-/** 判断二进制文件是否存在（用于源地址存在性检查）。 */
-export async function blobExists(path) {
-  try {
-    const info = await stat(path);
-    return info.isFile();
-  } catch {
-    return false;
-  }
 }

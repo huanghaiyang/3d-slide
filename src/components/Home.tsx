@@ -36,6 +36,7 @@ import {
   type DeckSummary,
 } from '../lib/storage';
 import { parseSlideFile, uniqueTitle } from '../lib/validate';
+import type { SessionUser } from '../lib/api';
 import { DECK_TEMPLATES, buildTemplateDeck, type DeckTemplate } from '../lib/templates';
 import {
   ensurePluginSetup,
@@ -57,6 +58,12 @@ const PLUGIN_TEMPLATES = listPluginTemplates();
 interface HomeProps {
   onOpen: (id: string) => void;
   onOpenAssets: () => void;
+  /** 当前登录账号。 */
+  user: SessionUser;
+  /** 打开管理员用户管理页。 */
+  onOpenUsers: () => void;
+  /** 退出登录。 */
+  onLogout: () => void;
 }
 
 /**
@@ -195,8 +202,11 @@ function DeckThumb({ summary, cover }: { summary: DeckSummary; cover?: DeckCover
  *
  * @param onOpen 打开指定作品（跳转到编辑器）
  * @param onOpenAssets 打开资源库页面
+ * @param user 当前登录账号
+ * @param onOpenUsers 打开用户管理页（仅管理员可见入口）
+ * @param onLogout 退出登录
  */
-export function Home({ onOpen, onOpenAssets }: HomeProps) {
+export function Home({ onOpen, onOpenAssets, user, onOpenUsers, onLogout }: HomeProps) {
   const [decks, setDecks] = useState<DeckSummary[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [covers, setCovers] = useState<Record<string, DeckCover>>({});
@@ -450,6 +460,20 @@ export function Home({ onOpen, onOpenAssets }: HomeProps) {
             <Icon name="plus" size={16} />
             新建演示
           </button>
+          <div className="account-chip" title={`当前登录：${user.username}`}>
+            <span className="account-dot" aria-hidden="true" />
+            <span className="account-name">{user.username}</span>
+            <span className="account-role">{user.role === 'admin' ? '管理员' : '成员'}</span>
+          </div>
+          {user.role === 'admin' && (
+            <button className="btn btn-ghost" onClick={onOpenUsers}>
+              <Icon name="gear" size={16} />
+              用户
+            </button>
+          )}
+          <button className="btn btn-ghost" onClick={onLogout}>
+            退出
+          </button>
         </div>
       </header>
 
@@ -471,7 +495,7 @@ export function Home({ onOpen, onOpenAssets }: HomeProps) {
             <span>
               <b>{decks?.length ?? '—'}</b> 份本地作品
             </span>
-            <span>无需登录</span>
+            <span>账号数据隔离</span>
             <span>单文件 .slide 可离线带走</span>
           </div>
         </section>
@@ -648,7 +672,7 @@ export function Home({ onOpen, onOpenAssets }: HomeProps) {
 
       <footer className="home-foot">
         <span>3d-slide · P0 MVP</span>
-        <span>数据保存在当前浏览器 · 建议定期导出工程文件</span>
+        <span>数据保存在服务端 MinIO · 按账号隔离</span>
       </footer>
 
       {renameTarget && (

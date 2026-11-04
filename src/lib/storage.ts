@@ -7,17 +7,17 @@
  * - 资源库元数据（assets）、资源文件夹（folders）的读写与回收站操作；
  * - 跨标签页的「编辑锁」：用 localStorage + 心跳判断当前标签页是否拥有写入权。
  *
- * 数据布局（由 server/ 落盘到 data/ 目录）：
- * - decks/<id>.json   完整 Deck JSON（读取时统一交给 normalizeDeck 校验）
- * - covers/<id>.json  首页 16:9 封面截图（按作品 updatedAt 失效）
- * - assets/<id>.json  资源元数据 AssetMeta（不含二进制）
- * - assets/blobs/<id> 资源内容本体（通过 /api/assets/:id/content 读取）
- * - folders.json      资源文件夹数组
+ * 数据布局（由 server/ 落盘到 data/ 目录，按当前登录用户隔离）：
+ * - users/<userId>/decks/<id>.json   完整 Deck JSON（读取时统一交给 normalizeDeck 校验）
+ * - users/<userId>/covers/<id>.json  首页 16:9 封面截图（按作品 updatedAt 失效）
+ * - users/<userId>/assets/<id>.json  资源元数据 AssetMeta（不含二进制）
+ * - users/<userId>/folders.json      资源文件夹数组
+ * - MinIO 对象                        资源 / 文件的二进制内容
  *
  * 与旧实现的差异：
- * - 资源内容由后端文件服务保存为二进制（/api/assets/:id/content），不再与元数据一起
+ * - 资源内容由后端文件服务保存到 MinIO（/api/assets/:id/content），不再与元数据一起
  *   塞进 IndexedDB；读取时再按需下载为 dataURL，保持渲染层契约不变；
- * - 首次读取列表时会先执行 migrate.ts 的一次性旧数据迁移。
+ * - 所有请求都携带登录会话 Cookie，服务端按当前用户隔离数据。
  *
  * 异步与错误：请求失败时抛出可读错误（连不上后端 / 服务端校验失败等），
  * 由调用方（store / UI）决定如何提示；只有 localStorage 的锁操作会静默失败。
@@ -27,7 +27,6 @@ import type { Deck } from '../types';
 import type { AssetFolder, AssetMeta } from './assets';
 import type { CoverRecord } from './api';
 import * as api from './api';
-import { ensureLegacyMigration } from './migrate';
 import { normalizeDeck } from './validate';
 
 /**
@@ -62,13 +61,12 @@ export type DeckCover = CoverRecord;
  *
  * 先从后端读取原始作品 JSON，再逐条调用 normalizeDeck：校验通过的作品返回摘要；
  * 校验失败时若仍有可用 id，则以「无法读取的作品」形式返回并带上 broken 错误信息，
- * 保证首页不中断。首次调用会先完成旧 IndexedDB 数据迁移。
+ * 保证首页不中断。
  *
  * @returns 作品摘要数组（可能包含损坏条目）
- * @throws 后端不可用 / 迁移失败时抛出（列表整体不可用）
+ * @throws 后端不可用 / 未登录时抛出（列表整体不可用）
  */
 export async function listDecks(): Promise<DeckSummary[]> {
-  await ensureLegacyMigration();
   const rows = await api.fetchDecks();
   const result: DeckSummary[] = [];
   for (const raw of rows) {
@@ -180,7 +178,6 @@ export async function deleteDeckCover(id: string): Promise<void> {
  * @returns 资源元数据数组；是否过滤回收站由调用方决定
  */
 export async function listAssetMetas(): Promise<AssetMeta[]> {
-  await ensureLegacyMigration();
   const rows = await api.fetchAssets();
   return rows.map((row) => ({
     ...row,

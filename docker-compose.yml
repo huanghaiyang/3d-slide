@@ -1,0 +1,25 @@
+# 本地开发用的 MinIO 对象存储（开源 S3 兼容）
+#
+# 启动：npm run minio（等价于 docker compose up -d）
+# 控制台：http://127.0.0.1:9001
+# 默认账号 / 密码：minioadmin / minioadmin（仅限本地开发，请勿用于生产）
+# 数据持久化在 ./data/minio（已在 .gitignore 中忽略）
+#
+# 后端通过环境变量连接，默认值与此处一致：
+#   MINIO_ENDPOINT=127.0.0.1 MINIO_PORT=9000
+#   MINIO_ACCESS_KEY=minioadmin MINIO_SECRET_KEY=minioadmin
+#   MINIO_BUCKET=3d-slide
+services:
+  minio:
+    image: minio/minio:latest
+    container_name: 3d-slide-minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - ./data/minio:/data
+    restart: unless-stopped
