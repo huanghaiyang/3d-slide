@@ -62,7 +62,9 @@ interface HomeProps {
   user: SessionUser;
   /** 打开管理员用户管理页。 */
   onOpenUsers: () => void;
-  /** 退出登录。 */
+  /** 打开注册 / 登录页（访客与已登录用户都可切换账号）。 */
+  onOpenAuth: () => void;
+  /** 退出登录（会切换为新的临时访客会话）。 */
   onLogout: () => void;
 }
 
@@ -202,11 +204,12 @@ function DeckThumb({ summary, cover }: { summary: DeckSummary; cover?: DeckCover
  *
  * @param onOpen 打开指定作品（跳转到编辑器）
  * @param onOpenAssets 打开资源库页面
- * @param user 当前登录账号
+ * @param user 当前登录账号（可能是临时访客）
  * @param onOpenUsers 打开用户管理页（仅管理员可见入口）
+ * @param onOpenAuth 打开注册 / 登录页
  * @param onLogout 退出登录
  */
-export function Home({ onOpen, onOpenAssets, user, onOpenUsers, onLogout }: HomeProps) {
+export function Home({ onOpen, onOpenAssets, user, onOpenUsers, onOpenAuth, onLogout }: HomeProps) {
   const [decks, setDecks] = useState<DeckSummary[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [covers, setCovers] = useState<Record<string, DeckCover>>({});
@@ -460,20 +463,30 @@ export function Home({ onOpen, onOpenAssets, user, onOpenUsers, onLogout }: Home
             <Icon name="plus" size={16} />
             新建演示
           </button>
-          <div className="account-chip" title={`当前登录：${user.username}`}>
+          <div className={`account-chip ${user.isGuest ? 'is-guest' : ''}`} title={`当前登录：${user.username}`}>
             <span className="account-dot" aria-hidden="true" />
             <span className="account-name">{user.username}</span>
-            <span className="account-role">{user.role === 'admin' ? '管理员' : '成员'}</span>
+            <span className="account-role">
+              {user.isGuest ? '访客' : user.role === 'admin' ? '管理员' : '成员'}
+            </span>
           </div>
-          {user.role === 'admin' && (
-            <button className="btn btn-ghost" onClick={onOpenUsers}>
-              <Icon name="gear" size={16} />
-              用户
+          {user.isGuest ? (
+            <button className="btn btn-primary" onClick={onOpenAuth}>
+              注册 / 登录
             </button>
+          ) : (
+            <>
+              {user.role === 'admin' && (
+                <button className="btn btn-ghost" onClick={onOpenUsers}>
+                  <Icon name="gear" size={16} />
+                  用户
+                </button>
+              )}
+              <button className="btn btn-ghost" onClick={onLogout}>
+                退出
+              </button>
+            </>
           )}
-          <button className="btn btn-ghost" onClick={onLogout}>
-            退出
-          </button>
         </div>
       </header>
 
@@ -493,12 +506,23 @@ export function Home({ onOpen, onOpenAssets, user, onOpenUsers, onLogout }: Home
           </p>
           <div className="home-facts">
             <span>
-              <b>{decks?.length ?? '—'}</b> 份本地作品
+              <b>{decks?.length ?? '—'}</b> 份作品
             </span>
             <span>账号数据隔离</span>
             <span>单文件 .slide 可离线带走</span>
           </div>
         </section>
+
+        {user.isGuest && (
+          <div className="guest-banner">
+            <span>
+              当前是临时会话，作品会自动保存。注册账号后，这些内容会原地保留到你的账号中。
+            </span>
+            <button className="btn btn-ghost" onClick={onOpenAuth}>
+              注册保留数据
+            </button>
+          </div>
+        )}
 
         {decks !== null && !loadError && (
           <section className="deck-section template-section">
@@ -673,6 +697,7 @@ export function Home({ onOpen, onOpenAssets, user, onOpenUsers, onLogout }: Home
       <footer className="home-foot">
         <span>3d-slide · P0 MVP</span>
         <span>数据保存在服务端 MinIO · 按账号隔离</span>
+        <span>临时会话可直接体验</span>
       </footer>
 
       {renameTarget && (

@@ -1,6 +1,7 @@
 node_modules/
 dist/
 data/
+.run/
 .screenshots/
 .trae-html-share-packages/
 *.local

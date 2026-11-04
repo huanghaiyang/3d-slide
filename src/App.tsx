@@ -2,13 +2,14 @@
  * App.tsx —— 应用根组件、登录守卫与 hash 路由装配
  *
  * 职责：
- * - 启动时请求 `/api/auth/me` 恢复登录态；未登录则展示登录 / 注册页；
- * - 登录后提供四个页面级路由（用 URL hash 实现，无路由库）：
+ * - 启动时恢复登录态；没有会话时自动创建临时访客账号（系统不强制注册）；
+ * - 登录后提供页面级路由（用 URL hash 实现，无路由库）：
  *   - `#/`（或无 hash）：首页作品列表；
  *   - `#/assets`：素材 / 资源管理页；
  *   - `#/deck/<id>`：指定作品的 3D 编辑器；
+ *   - `#/auth`：访客注册 / 登录页（可随时返回首页）；
  *   - `#/users`：管理员用户管理页（非管理员访问时回退首页）；
- * - 注册全局 401 处理：会话失效时自动退回登录页。
+ * - 注册全局 401 处理：会话失效时回到登录 / 注册页，避免页面继续请求失败。
  *
  * 数据流：
  * 1. 首次渲染时由 readRoute 解析当前 hash 得到初始路由；
@@ -26,6 +27,7 @@ import { Home } from './components/Home';
 import { UsersPage } from './components/UsersPage';
 import { ToastHost } from './components/ui';
 import {
+  createGuest,
   fetchMe,
   logout as logoutRequest,
   setUnauthorizedHandler,
@@ -36,7 +38,12 @@ import {
  * 路由状态：用可辨识联合表示页面，
  * editor 分支携带作品 id，便于直接作为 Editor 的 deckId 与 key。
  */
-type Route = { name: 'home' } | { name: 'assets' } | { name: 'users' } | { name: 'editor'; id: string };
+type Route =
+  | { name: 'home' }
+  | { name: 'assets' }
+  | { name: 'auth' }
+  | { name: 'users' }
+  | { name: 'editor'; id: string };
 
 /**
  * 从当前 URL hash 解析路由。
@@ -50,6 +57,7 @@ function readRoute(): Route {
   const match = window.location.hash.match(/^#\/deck\/([\w-]+)/);
   if (match) return { name: 'editor', id: match[1] };
   if (/^#\/assets/.test(window.location.hash)) return { name: 'assets' };
+  if (/^#\/auth/.test(window.location.hash)) return { name: 'auth' };
   if (/^#\/users/.test(window.location.hash)) return { name: 'users' };
   return { name: 'home' };
 }
@@ -85,13 +93,24 @@ export default function App() {
 
   useEffect(() => {
     let alive = true;
-    fetchMe()
-      .then((me) => {
+    // 先尝试恢复已有会话；没有会话时自动创建临时访客，用户可直接开始使用
+    const boot = async () => {
+      try {
+        const me = await fetchMe();
         if (alive) setUser(me);
-      })
-      .catch(() => {
+        return;
+      } catch {
+        // 未登录或会话失效，继续创建访客会话
+      }
+      try {
+        const guest = await createGuest();
+        if (alive) setUser(guest);
+      } catch {
+        // 后端不可用时才退回登录页，由页面提示具体错误
         if (alive) setUser(null);
-      });
+      }
+    };
+    void boot();
     return () => {
       alive = false;
     };
@@ -110,7 +129,10 @@ export default function App() {
     navigate('#/');
   };
 
-  /** 退出登录：清除服务端会话后再回到登录页。 */
+  /**
+   * 退出登录：清除服务端会话后自动创建一个新的访客会话，
+   * 用户无需重新登录也能继续使用（原账号数据仍保留，可随时登录找回）。
+   */
   const onLogout = async () => {
     try {
       await logoutRequest();
@@ -119,6 +141,11 @@ export default function App() {
     }
     setUser(null);
     navigate('#/');
+    try {
+      setUser(await createGuest());
+    } catch {
+      // 访客创建失败时停在登录页
+    }
   };
 
   if (user === undefined) {
@@ -150,6 +177,8 @@ export default function App() {
     <>
       {route.name === 'assets' ? (
         <AssetsPage onBack={() => navigate('#/')} />
+      ) : route.name === 'auth' && user.isGuest ? (
+        <AuthPage defaultMode="register" onAuthed={onAuthed} onBack={() => navigate('#/')} />
       ) : route.name === 'users' && user.role === 'admin' ? (
         <UsersPage current={user} onBack={() => navigate('#/')} />
       ) : route.name === 'editor' ? (
@@ -160,6 +189,7 @@ export default function App() {
           user={user}
           onOpen={(id) => navigate(`#/deck/${id}`)}
           onOpenAssets={() => navigate('#/assets')}
+          onOpenAuth={() => navigate('#/auth')}
           onOpenUsers={() => navigate('#/users')}
           onLogout={() => void onLogout()}
         />

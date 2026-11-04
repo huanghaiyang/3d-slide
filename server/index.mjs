@@ -2,15 +2,18 @@
  * index.mjs —— 3d-slide 后端服务（Express）
  *
  * 职责：
- * - 账号体系：注册 / 登录 / 退出 / 当前用户，基于 HttpOnly Cookie 会话；
+ * - 账号体系：免注册访客、访客原地升级、注册 / 登录 / 退出 / 当前用户，
+ *   基于 HttpOnly Cookie 会话；
  * - 数据隔离：作品、封面、资源、文件夹、文件全部按 `req.user.id` 分区存储，
  *   任何跨用户按 id 访问都会被归属校验拦下；
  * - 文件存储：二进制内容统一放 MinIO（开源 S3 兼容），本地只存元数据；
  * - 管理员接口：用户列表与删除（级联清理数据与对象存储）；
  * - 构建产物存在时顺带托管 dist/，可用单进程部署（前端使用 hash 路由）。
  *
- * 启动：`npm run minio`（启动 MinIO）→ `npm run server`（默认端口 8787，可用 PORT 覆盖；
- * 数据目录用 SLIDE_DATA_DIR 覆盖）。开发时 Vite 会把 `/api` 代理到本服务。
+ * 启动：`npm run server`（默认端口 8787，可用 PORT 覆盖；数据目录用 SLIDE_DATA_DIR 覆盖）。
+ * 启动时会自动检测 MinIO，未运行则执行 `docker compose up -d minio`；
+ * 如需关闭自动启动，设置环境变量 MINIO_AUTO_START=false。
+ * 开发时 Vite 会把 `/api` 代理到本服务。
  */
 
 import express from 'express';
@@ -51,10 +54,12 @@ import {
 import {
   authenticate,
   createAccount,
+  createGuestAccount,
   deleteAccount,
   getAccount,
   listAccounts,
   publicAccount,
+  upgradeGuestAccount,
 } from './users.mjs';
 import {
   authUser,
@@ -67,7 +72,6 @@ import {
 } from './auth.mjs';
 import {
   assetObjectKey,
-  ensureBucket,
   fileObjectKey,
   minioStatus,
   putObjectFromFile,
@@ -75,6 +79,7 @@ import {
   removeUserObjects,
   serveObject,
 } from './minio.mjs';
+import { ensureMinioWithApp } from './minio-bootstrap.mjs';
 
 /** 服务端口。 */
 const PORT = Number(process.env.PORT ?? 8787);
@@ -131,13 +136,38 @@ async function purgeUserAssets(userId, ids) {
 
 /* -------------------------------- 账号 -------------------------------- */
 
+/**
+ * 创建临时访客会话。
+ *
+ * 已有会话（访客或正式账号）时直接返回该账号，保证刷新 / 重复调用不会重复建号。
+ * 未注册用户无需任何操作即可开始使用，后续可原地升级为正式账号。
+ */
+app.post(
+  '/api/auth/guest',
+  wrap(async (req, res) => {
+    const existing = await authUser(req);
+    if (existing) {
+      res.json({ user: publicAccount(existing) });
+      return;
+    }
+    const account = await createGuestAccount();
+    await createSession(res, account.id);
+    res.status(201).json({ user: publicAccount(account) });
+  }),
+);
+
 app.post(
   '/api/auth/register',
   wrap(async (req, res) => {
     const body = asRecord(req.body, '注册信息');
-    const account = await createAccount(body.username, body.password);
-    await createSession(res, account.id);
-    res.status(201).json({ user: publicAccount(account) });
+    const current = await authUser(req);
+    if (current && !current.isGuest) throw httpError(409, '当前账号已是注册用户，请直接登录');
+    // 访客注册时原地升级：账号 id 不变，已有作品 / 素材 / 文件全部保留
+    const account = current
+      ? await upgradeGuestAccount(current.id, body.username, body.password)
+      : await createAccount(body.username, body.password);
+    if (!current) await createSession(res, account.id);
+    res.status(current ? 200 : 201).json({ user: publicAccount(account) });
   }),
 );
 
@@ -177,7 +207,8 @@ app.get(
   requireAdmin,
   wrap(async (_req, res) => {
     const accounts = await listAccounts();
-    res.json(accounts.map(publicAccount));
+    // 管理员只管理正式账号，临时访客不占用列表
+    res.json(accounts.filter((account) => !account.isGuest).map(publicAccount));
   }),
 );
 
@@ -553,9 +584,11 @@ app.use((error, _req, res, next) => {
 await ensureDataDirs();
 await initAuth();
 const storage = await minioStatus();
-if (!storage.ok) {
-  console.warn(`[minio] ${storage.error}`);
-  console.warn('[minio] 请先运行 npm run minio 启动对象存储（docker compose up -d）');
+if (storage.ok) {
+  console.log(`[minio] 已连接：${storage.endpoint}/${storage.bucket}`);
+} else {
+  // 不阻塞 HTTP 服务启动：后台自动拉起 MinIO，成功后文件上传自动恢复
+  void ensureMinioWithApp();
 }
 
 app.listen(PORT, () => {

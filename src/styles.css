@@ -5040,6 +5040,43 @@ button:disabled {
   color: var(--teal);
 }
 
+.account-chip.is-guest {
+  border-style: dashed;
+}
+
+.auth-back {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: -8px 0 -4px;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  font-size: 12px;
+  color: var(--dim);
+  cursor: pointer;
+}
+
+.auth-back:hover {
+  color: var(--ink-2);
+}
+
+.guest-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 6px;
+  padding: 10px 14px;
+  border: 1px dashed rgba(15, 118, 110, 0.3);
+  border-radius: 10px;
+  background: var(--teal-soft);
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--teal);
+}
+
 .user-section {
   padding: 36px 0 40px;
 }
@@ -5126,6 +5163,11 @@ button:disabled {
 @media (max-width: 640px) {
   .account-chip {
     display: none;
+  }
+
+  .guest-banner {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .user-row {

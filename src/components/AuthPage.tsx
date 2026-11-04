@@ -2,9 +2,10 @@
  * AuthPage.tsx —— 登录 / 注册页
  *
  * 职责：
- * - 未登录时作为应用入口，提供「登录」「注册」两种模式；
+ * - 提供「登录」「注册」两种模式；
+ * - 访客从首页进入时可返回首页（不强制注册），注册会把当前临时会话原地升级；
  * - 调用后端 /api/auth/login|register，成功后把用户信息交给 App；
- * - 第一个注册的账号自动成为管理员（由服务端判定）。
+ * - 第一个正式注册的账号自动成为管理员（由服务端判定）。
  *
  * 说明：登录态使用 HttpOnly Cookie，前端无法也不需要在本地保存令牌。
  */
@@ -16,14 +17,20 @@ import { Icon } from './Icon';
 interface AuthPageProps {
   /** 登录 / 注册成功后的回调。 */
   onAuthed: (user: SessionUser) => void;
+  /** 返回首页（仅访客从首页进入时提供，未登录兜底页没有该入口）。 */
+  onBack?: () => void;
+  /** 初始模式，访客默认直接展示注册。 */
+  defaultMode?: 'login' | 'register';
 }
 
 /**
  * 登录注册页。
  * @param onAuthed 成功回调
+ * @param onBack 返回首页
+ * @param defaultMode 初始模式
  */
-export function AuthPage({ onAuthed }: AuthPageProps) {
-  const [mode, setMode] = useState<'login' | 'register'>('login');
+export function AuthPage({ onAuthed, onBack, defaultMode = 'login' }: AuthPageProps) {
+  const [mode, setMode] = useState<'login' | 'register'>(defaultMode);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
@@ -54,6 +61,12 @@ export function AuthPage({ onAuthed }: AuthPageProps) {
   return (
     <div className="auth-page">
       <form className="auth-card" onSubmit={(event) => void submit(event)}>
+        {onBack && (
+          <button className="auth-back" type="button" onClick={onBack}>
+            <Icon name="back" size={14} />
+            稍后再说，先继续体验
+          </button>
+        )}
         <div className="auth-brand">
           <span className="brand-mark" aria-hidden="true">
             <i />
@@ -121,11 +134,13 @@ export function AuthPage({ onAuthed }: AuthPageProps) {
         )}
 
         <button className="btn btn-primary btn-block auth-submit" type="submit" disabled={busy}>
-          {busy ? '处理中…' : mode === 'login' ? '登录' : '注册并进入'}
+          {busy ? '处理中…' : mode === 'login' ? '登录' : '注册并保留数据'}
         </button>
 
         <p className="auth-hint">
-          第一个注册的账号会自动成为管理员。作品、素材与文件均按账号隔离保存。
+          {mode === 'register'
+            ? '注册后当前临时会话的作品、素材与文件会原地保留，无需重新上传。第一个正式注册的账号会自动成为管理员。'
+            : '使用已有账号登录后，会切换到该账号的工作区；当前访客数据会留在临时会话中。'}
         </p>
       </form>
       <p className="auth-foot">3d-slide · P0 MVP</p>

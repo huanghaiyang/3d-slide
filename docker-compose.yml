@@ -1,6 +1,8 @@
 # 本地开发用的 MinIO 对象存储（开源 S3 兼容）
 #
-# 启动：npm run minio（等价于 docker compose up -d）
+# 启动方式：
+# - 后端 `npm run server` 启动时会自动检测并执行 docker compose up -d minio；
+# - 也可手动启动：npm run minio（等价于 docker compose up -d）
 # 控制台：http://127.0.0.1:9001
 # 默认账号 / 密码：minioadmin / minioadmin（仅限本地开发，请勿用于生产）
 # 数据持久化在 ./data/minio（已在 .gitignore 中忽略）

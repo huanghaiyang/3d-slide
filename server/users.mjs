@@ -3,7 +3,9 @@
  *
  * 职责：
  * - 账号记录落盘在 `data/accounts/<id>.json`，包含用户名、角色与 scrypt 密码哈希；
- * - 注册时校验用户名 / 密码格式、防止重名，并把首个注册账号设为管理员；
+ * - 支持免注册的临时访客账号（isGuest），以及访客原地升级为正式账号
+ *   （账号 id 不变，作品 / 素材 / 文件夹等数据无需迁移）；
+ * - 注册时校验用户名 / 密码格式、防止重名，并把首个正式账号设为管理员；
  * - 提供账号查询、列表与删除（删除时级联清理该用户的全部数据目录）。
  *
  * 密码哈希使用 Node 内置 scrypt（不引入 bcrypt 等原生依赖）：
@@ -38,6 +40,7 @@ export function publicAccount(account) {
     id: account.id,
     username: account.username,
     role: account.role,
+    isGuest: Boolean(account.isGuest),
     createdAt: account.createdAt,
   };
 }
@@ -98,16 +101,10 @@ export async function findAccountByUsername(username) {
 }
 
 /**
- * 注册账号。
- *
- * 首个注册的账号自动成为管理员；后续账号均为普通成员。
- * 列表与写入放在同一串行队列中，避免并发注册绕过重名检查或产生两个管理员。
- *
- * @param {unknown} rawUsername
- * @param {unknown} rawPassword
- * @returns {Promise<object>} 完整账号记录（路由层需用 publicAccount 过滤后再返回）
+ * 校验并归一化注册凭据。
+ * @returns {{ username: string, password: string }}
  */
-export function createAccount(rawUsername, rawPassword) {
+function readCredentials(rawUsername, rawPassword) {
   const username = typeof rawUsername === 'string' ? rawUsername.trim() : '';
   const password = typeof rawPassword === 'string' ? rawPassword : '';
   if (!USERNAME_PATTERN.test(username)) {
@@ -116,31 +113,117 @@ export function createAccount(rawUsername, rawPassword) {
   if (password.length < PASSWORD_MIN || password.length > PASSWORD_MAX) {
     throw httpError(400, `密码长度需为 ${PASSWORD_MIN}–${PASSWORD_MAX} 个字符`);
   }
-  return exclusiveCreate(username, password);
+  return { username, password };
 }
 
-/** 在写队列中完成「查重 → 哈希 → 落盘 → 建用户目录」。 */
-let createChain = Promise.resolve();
-function exclusiveCreate(username, password) {
-  const run = createChain.then(async () => {
+/** 用户名是否已被其他账号占用。 */
+function usernameTaken(accounts, username, exceptId) {
+  const target = username.toLowerCase();
+  return accounts.some(
+    (account) => account.id !== exceptId && String(account.username).toLowerCase() === target,
+  );
+}
+
+/**
+ * 注册账号。
+ *
+ * 首个正式（非访客）账号自动成为管理员；后续账号均为普通成员。
+ * 列表与写入放在同一串行队列中，避免并发注册绕过重名检查或产生两个管理员。
+ *
+ * @param {unknown} rawUsername
+ * @param {unknown} rawPassword
+ * @returns {Promise<object>} 完整账号记录（路由层需用 publicAccount 过滤后再返回）
+ */
+export function createAccount(rawUsername, rawPassword) {
+  const { username, password } = readCredentials(rawUsername, rawPassword);
+  return exclusiveAccount(async () => {
     await ensureAccountsDir();
     const accounts = await listAccounts();
-    if (accounts.some((account) => String(account.username).toLowerCase() === username.toLowerCase())) {
-      throw httpError(409, '用户名已被占用');
-    }
+    if (usernameTaken(accounts, username)) throw httpError(409, '用户名已被占用');
     const id = randomUUID();
     const account = {
       id,
       username,
-      role: accounts.length === 0 ? 'admin' : 'user',
+      // 访客账号不参与管理员判定：第一个正式注册的账号才是管理员
+      role: accounts.some((item) => !item.isGuest) ? 'user' : 'admin',
       passwordHash: await hashPassword(password),
+      isGuest: false,
       createdAt: Date.now(),
     };
     await writeJson(accountPath(id), account);
     await ensureUserDirs(id);
     return account;
   });
-  createChain = run.catch(() => {});
+}
+
+/**
+ * 创建临时访客账号（无需用户名密码，由服务端自动命名）。
+ */
+export function createGuestAccount() {
+  return exclusiveAccount(async () => {
+    await ensureAccountsDir();
+    const accounts = await listAccounts();
+    const id = randomUUID();
+    const account = {
+      id,
+      username: nextGuestName(accounts),
+      role: 'user',
+      passwordHash: null,
+      isGuest: true,
+      createdAt: Date.now(),
+    };
+    await writeJson(accountPath(id), account);
+    await ensureUserDirs(id);
+    return account;
+  });
+}
+
+/** 生成未被占用的访客昵称，如「访客-3F8A2C」。 */
+function nextGuestName(accounts) {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const username = `访客-${randomBytes(3).toString('hex').toUpperCase()}`;
+    if (!usernameTaken(accounts, username)) return username;
+  }
+  return `访客-${randomUUID().slice(0, 8)}`;
+}
+
+/**
+ * 把当前访客账号原地升级为正式账号。
+ *
+ * 账号 id 保持不变，因此该用户已有的作品、素材、文件夹与文件记录都自然保留，
+ * 不需要复制或迁移任何数据。
+ *
+ * @param {string} id 当前访客账号 id
+ * @param {unknown} rawUsername 新用户名
+ * @param {unknown} rawPassword 新密码
+ * @returns {Promise<object>} 升级后的账号记录
+ */
+export function upgradeGuestAccount(id, rawUsername, rawPassword) {
+  const { username, password } = readCredentials(rawUsername, rawPassword);
+  return exclusiveAccount(async () => {
+    const account = await getAccount(id);
+    if (!account) throw httpError(404, '账号不存在');
+    if (!account.isGuest) throw httpError(409, '当前账号已是注册用户');
+    const accounts = await listAccounts();
+    if (usernameTaken(accounts, username, id)) throw httpError(409, '用户名已被占用');
+    const next = {
+      ...account,
+      username,
+      passwordHash: await hashPassword(password),
+      isGuest: false,
+      // 若此前还没有任何正式账号，则本次升级产生第一个管理员
+      role: accounts.some((item) => !item.isGuest && item.id !== id) ? 'user' : 'admin',
+    };
+    await writeJson(accountPath(id), next);
+    return next;
+  });
+}
+
+/** 账号写队列：注册、访客创建与升级都串行执行，避免重名检查失效。 */
+let accountChain = Promise.resolve();
+function exclusiveAccount(task) {
+  const run = accountChain.then(task);
+  accountChain = run.catch(() => {});
   return run;
 }
 
@@ -153,7 +236,8 @@ export async function authenticate(rawUsername, rawPassword) {
   const password = typeof rawPassword === 'string' ? rawPassword : '';
   if (!username || !password) return null;
   const account = await findAccountByUsername(username);
-  if (!account) return null;
+  // 访客账号没有密码哈希，不能通过登录接口进入
+  if (!account || account.isGuest) return null;
   return (await verifyPassword(account.passwordHash, password)) ? account : null;
 }
 

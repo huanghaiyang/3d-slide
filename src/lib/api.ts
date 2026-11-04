@@ -21,6 +21,8 @@ export interface SessionUser {
   id: string;
   username: string;
   role: 'admin' | 'user';
+  /** 是否为免注册的临时访客账号。 */
+  isGuest: boolean;
   createdAt: number;
 }
 
@@ -136,6 +138,20 @@ function jsonInit(method: string, body: unknown): RequestInit {
 /** 读取当前登录用户；未登录时抛出 status=401 的 ApiError。 */
 export async function fetchMe(): Promise<SessionUser> {
   const data = await requestJson<{ user: SessionUser }>('/auth/me');
+  return data.user;
+}
+
+/**
+ * 创建（或复用）临时访客会话。
+ *
+ * 系统不强制注册：首次访问时由前端调用该接口，服务端自动创建一个访客账号；
+ * 已有会话时直接返回当前账号，不会重复建号。
+ */
+export async function createGuest(): Promise<SessionUser> {
+  const data = await requestJson<{ user: SessionUser }>('/auth/guest', {
+    method: 'POST',
+    skipAuthHandler: true,
+  });
   return data.user;
 }
 

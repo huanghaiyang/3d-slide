@@ -7,7 +7,10 @@
  * - 固定开发服务器端口 5176，避免端口漂移，便于联调与文档中给出的地址保持一致；
  * - 把 `/api` 请求代理到本地后端服务（server/index.mjs，默认 8787），前端因此只需请求同源接口。
  *
- * 运行方式：`npm run dev`（开发服务器）、`npm run server`（后端服务）、`npm run build`（先 tsc --noEmit 再 vite build）。
+ * 运行方式：
+ * - `npm run dev`：一键启动全部服务（scripts/dev.mjs 编排后端 + 本开发服务器）；
+ * - `npm run dev:web`：仅启动前端开发服务器（需自行 `npm run server`）；
+ * - `npm run restart`：停止旧进程并重启全部服务；`npm run build`：先 tsc --noEmit 再 vite build。
  * 构建输出使用 Vite 默认的 dist/ 目录（未显式配置 build.outDir）；
  * 未配置 resolve.alias，源码统一使用相对路径导入。
  */

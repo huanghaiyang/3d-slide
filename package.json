@@ -4,7 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "node scripts/dev.mjs",
+    "dev:web": "vite",
+    "restart": "node scripts/restart.mjs",
     "server": "node server/index.mjs",
     "minio": "docker compose up -d",
     "build": "tsc --noEmit && vite build",
