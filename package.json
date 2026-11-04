@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "server": "node server/index.mjs",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "mcp": "node mcp/server.mjs"
@@ -12,9 +13,11 @@
   "dependencies": {
     "@antv/g6": "^5.1.1",
     "@lottiefiles/dotlottie-web": "^0.82.1",
+    "express": "^4.22.3",
     "fflate": "^0.8.2",
     "idb": "^8.0.0",
     "lottie-web": "^5.12.2",
+    "multer": "^2.5.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "three": "^0.170.0",

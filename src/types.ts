@@ -7,7 +7,7 @@
  * 关键概念：
  * - ViewState：一次相机取景快照。作品最后一帧视角（Deck.lastView）与每个视点（Frame.view）。
  * - SlideObject：画布内容对象的可辨识联合（discriminated union），按 `type` 字段区分成员。
- * - Deck：可序列化的作品结构，整体写入 IndexedDB 的 decks 表。
+ * - Deck：可序列化的作品结构，整体由后端存储（server/）持久化。
  * - 标签常量：对象类型 / 3D 模型格式 / 形状 / 字体的中文显示名，仅用于 UI 展示。
  *
  * 数据流：

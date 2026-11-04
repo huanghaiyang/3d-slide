@@ -4,9 +4,10 @@
  * 职责：
  * - 注册 React 插件，让 .tsx / JSX 能够被编译，并在开发时提供 Fast Refresh；
  * - 构建结束后把 docs/ 下的静态 HTML 文档复制到 dist/docs，随产物一起发布；
- * - 固定开发服务器端口 5176，避免端口漂移，便于联调与文档中给出的地址保持一致。
+ * - 固定开发服务器端口 5176，避免端口漂移，便于联调与文档中给出的地址保持一致；
+ * - 把 `/api` 请求代理到本地后端服务（server/index.mjs，默认 8787），前端因此只需请求同源接口。
  *
- * 运行方式：`npm run dev`（开发服务器）、`npm run build`（先 tsc --noEmit 再 vite build）。
+ * 运行方式：`npm run dev`（开发服务器）、`npm run server`（后端服务）、`npm run build`（先 tsc --noEmit 再 vite build）。
  * 构建输出使用 Vite 默认的 dist/ 目录（未显式配置 build.outDir）；
  * 未配置 resolve.alias，源码统一使用相对路径导入。
  */
@@ -44,5 +45,12 @@ export default defineConfig({
   // 开发服务器配置：固定端口 5176；端口被占用时 Vite 默认会尝试下一个可用端口。
   server: {
     port: 5176,
+    proxy: {
+      // 后端默认监听 8787（可用 PORT 或 SLIDE_API_TARGET 改写），代理后前端无需处理跨域
+      '/api': {
+        target: process.env.SLIDE_API_TARGET ?? 'http://127.0.0.1:8787',
+        changeOrigin: true,
+      },
+    },
   },
 });

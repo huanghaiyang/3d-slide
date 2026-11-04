@@ -1,131 +1,34 @@
 /**
- * storage.ts —— 基于 IndexedDB 的本地持久化层
+ * storage.ts —— 持久化门面（后端 HTTP 存储）
  *
  * 职责：
- * - 打开 / 升级名为 `3d-slide` 的 IndexedDB（版本 3），并隔离打开失败与阻塞场景；
+ * - 对上层暴露与旧版 IndexedDB 实现完全一致的函数签名，组件无需关心数据存放位置；
  * - 作品的增删改查（decks）、首页封面（covers）的读写；
- * - 资源库元数据与二进制内容（assets / assetData）、资源文件夹（folders）的读写；
+ * - 资源库元数据（assets）、资源文件夹（folders）的读写与回收站操作；
  * - 跨标签页的「编辑锁」：用 localStorage + 心跳判断当前标签页是否拥有写入权。
  *
- * 数据布局：
- * - decks      { keyPath: 'id' }  完整 Deck JSON（读取时统一交给 normalizeDeck 校验）
- * - assets     { keyPath: 'id' }  资源元数据 AssetMeta（不含二进制）
- * - assetData  { keyPath: 'id' }  资源内容 { id, src }（src 为 dataURL / base64）
- * - folders    { keyPath: 'id' }  资源文件夹树（parentId 构成层级）
- * - covers     { keyPath: 'id' }  首页 16:9 封面截图（按作品 updatedAt 失效）
+ * 数据布局（由 server/ 落盘到 data/ 目录）：
+ * - decks/<id>.json   完整 Deck JSON（读取时统一交给 normalizeDeck 校验）
+ * - covers/<id>.json  首页 16:9 封面截图（按作品 updatedAt 失效）
+ * - assets/<id>.json  资源元数据 AssetMeta（不含二进制）
+ * - assets/blobs/<id> 资源内容本体（通过 /api/assets/:id/content 读取）
+ * - folders.json      资源文件夹数组
  *
- * 事务约定：涉及多张表的写入都放在同一个 readwrite 事务中，最后 await tx.done，
- * 保证要么全部成功、要么整体回滚；单表操作直接用 database.put/delete 的便捷 API。
+ * 与旧实现的差异：
+ * - 资源内容由后端文件服务保存为二进制（/api/assets/:id/content），不再与元数据一起
+ *   塞进 IndexedDB；读取时再按需下载为 dataURL，保持渲染层契约不变；
+ * - 首次读取列表时会先执行 migrate.ts 的一次性旧数据迁移。
  *
- * 异步与错误：本模块多数函数返回 Promise，失败时抛出原始错误（含配额不足等），
+ * 异步与错误：请求失败时抛出可读错误（连不上后端 / 服务端校验失败等），
  * 由调用方（store / UI）决定如何提示；只有 localStorage 的锁操作会静默失败。
  */
 
-import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
 import type { Deck } from '../types';
 import type { AssetFolder, AssetMeta } from './assets';
+import type { CoverRecord } from './api';
+import * as api from './api';
+import { ensureLegacyMigration } from './migrate';
 import { normalizeDeck } from './validate';
-
-/** 资源二进制内容记录：src 为 dataURL 字符串，与 assets 表通过 id 一对一关联。 */
-interface AssetDataRecord {
-  /** 与 assets 表同 id。 */
-  id: string;
-  /** 资源内容（dataURL），单独存表避免列表查询时读取大字段。 */
-  src: string;
-}
-
-/**
- * IndexedDB 数据库结构声明（idb 的 DBSchema）。
- * 每张表都以 id 为主键（keyPath: 'id'）。
- */
-interface SlideDB extends DBSchema {
-  decks: {
-    key: string;
-    value: unknown;
-  };
-  assets: {
-    key: string;
-    value: AssetMeta;
-  };
-  assetData: {
-    key: string;
-    value: AssetDataRecord;
-  };
-  folders: {
-    key: string;
-    value: AssetFolder;
-  };
-  covers: {
-    key: string;
-    value: DeckCover;
-  };
-}
-
-/** 数据库连接的懒加载单例；为 null 表示尚未打开或上次打开失败。 */
-let dbPromise: Promise<IDBPDatabase<SlideDB>> | null = null;
-
-/**
- * 获取数据库连接（首次调用时打开，之后复用同一个 Promise）。
- *
- * 打开过程中的三种异常都转成可读错误：
- * - blocked：更高版本或其他旧版页面占用了数据库，升级被阻塞；
- * - 超时：6 秒内仍未打开（常见于旧标签页未关闭）；
- * - 其他 IndexedDB 错误原样向上抛出。
- *
- * @returns 已打开的数据库连接
- * @throws 数据库被占用 / 打开超时 / 浏览器不支持 IndexedDB 等错误
- */
-function db(): Promise<IDBPDatabase<SlideDB>> {
-  if (!dbPromise) {
-    let rejectBlocked: ((reason: Error) => void) | null = null;
-    // 旧版本标签页仍占用数据库时，升级会一直挂起；这里让它快速失败并给出可读提示
-    const blocked = new Promise<never>((_, reject) => {
-      rejectBlocked = reject;
-    });
-    const opened = openDB<SlideDB>('3d-slide', 3, {
-      upgrade(database) {
-        if (!database.objectStoreNames.contains('decks')) {
-          database.createObjectStore('decks', { keyPath: 'id' });
-        }
-        if (!database.objectStoreNames.contains('assets')) {
-          database.createObjectStore('assets', { keyPath: 'id' });
-        }
-        if (!database.objectStoreNames.contains('assetData')) {
-          database.createObjectStore('assetData', { keyPath: 'id' });
-        }
-        if (!database.objectStoreNames.contains('folders')) {
-          database.createObjectStore('folders', { keyPath: 'id' });
-        }
-        if (!database.objectStoreNames.contains('covers')) {
-          database.createObjectStore('covers', { keyPath: 'id' });
-        }
-      },
-      blocking() {
-        // 其他标签页请求升级：主动关闭当前连接，避免阻塞对方
-        const pending = dbPromise;
-        dbPromise = null;
-        void pending?.then((database) => database.close()).catch(() => {});
-      },
-      blocked() {
-        dbPromise = null;
-        rejectBlocked?.(new Error('数据库正在被其他旧版页面占用，请关闭其他标签页后刷新'));
-        rejectBlocked = null;
-      },
-    });
-    dbPromise = Promise.race([
-      opened,
-      blocked,
-      new Promise<never>((_, reject) => {
-        window.setTimeout(() => reject(new Error('数据库打开超时，请关闭其他旧版页面后刷新重试')), 6000);
-      }),
-    ]);
-    dbPromise = dbPromise.catch((error: unknown) => {
-      dbPromise = null;
-      throw error;
-    });
-  }
-  return dbPromise;
-}
 
 /**
  * 首页 / 作品选择器使用的作品摘要。
@@ -152,29 +55,21 @@ export interface DeckSummary {
 }
 
 /** 首页封面：离屏渲染的 16:9 截图，按作品 updatedAt 失效 */
-export interface DeckCover {
-  /** 对应作品 id（与 decks 表同 key）。 */
-  id: string;
-  /** 封面图片（JPEG dataURL）。 */
-  dataUrl: string;
-  /** 生成封面时的作品 updatedAt，用于判断封面是否已过期。 */
-  deckUpdatedAt: number;
-  /** 封面生成本身的时间戳（毫秒）。 */
-  at: number;
-}
+export type DeckCover = CoverRecord;
 
 /**
  * 列出所有作品摘要，按最后修改时间倒序。
  *
- * 逐条调用 normalizeDeck：校验通过的作品返回摘要；校验失败时若仍有可用 id，
- * 则以「无法读取的作品」形式返回并带上 broken 错误信息，保证首页不中断。
+ * 先从后端读取原始作品 JSON，再逐条调用 normalizeDeck：校验通过的作品返回摘要；
+ * 校验失败时若仍有可用 id，则以「无法读取的作品」形式返回并带上 broken 错误信息，
+ * 保证首页不中断。首次调用会先完成旧 IndexedDB 数据迁移。
  *
  * @returns 作品摘要数组（可能包含损坏条目）
- * @throws 数据库打开失败时抛出（列表整体不可用）
+ * @throws 后端不可用 / 迁移失败时抛出（列表整体不可用）
  */
 export async function listDecks(): Promise<DeckSummary[]> {
-  const database = await db();
-  const rows = await database.getAll('decks');
+  await ensureLegacyMigration();
+  const rows = await api.fetchDecks();
   const result: DeckSummary[] = [];
   for (const raw of rows) {
     const base = raw as Record<string, unknown>;
@@ -215,8 +110,7 @@ export async function listDecks(): Promise<DeckSummary[]> {
  * @throws normalizeDeck 抛出的数据损坏错误（例如缺少标题 / 对象缺少 id）
  */
 export async function getDeck(id: string): Promise<Deck | null> {
-  const database = await db();
-  const raw = await database.get('decks', id);
+  const raw = await api.fetchDeck(id);
   if (!raw) return null;
   return normalizeDeck(raw);
 }
@@ -224,41 +118,30 @@ export async function getDeck(id: string): Promise<Deck | null> {
 /**
  * 写入（或覆盖）作品。
  *
- * @param deck 要保存的完整作品；原样存入 decks 表，不做额外校验
- * @throws 存储配额不足 / 数据库不可用时抛出，调用方需捕获并提示保存失败
- *
- * 注意：这里保存的是调用方传入的引用快照，之后若继续修改同一对象需自行保证不可变。
+ * @param deck 要保存的完整作品
+ * @throws 后端不可用 / 写入失败时抛出，调用方需捕获并提示保存失败
  */
 export async function putDeck(deck: Deck): Promise<void> {
-  const database = await db();
-  await database.put('decks', deck);
+  await api.putDeck(deck);
 }
 
 /**
- * 删除作品，并级联删除其首页封面。
- *
- * 使用一个同时覆盖 decks 与 covers 的 readwrite 事务，最后 await tx.done，
- * 保证作品与封面不会出现「只删掉一半」的状态。
+ * 删除作品，服务端会同时删除其首页封面。
  *
  * @param id 作品 id
  */
 export async function deleteDeck(id: string): Promise<void> {
-  const database = await db();
-  const tx = database.transaction(['decks', 'covers'], 'readwrite');
-  await tx.objectStore('decks').delete(id);
-  await tx.objectStore('covers').delete(id);
-  await tx.done;
+  await api.deleteDeck(id);
 }
 
 /* ------------------------------ 首页封面 ------------------------------ */
 
 /**
  * 读取全部首页封面。
- * @returns 封面数组（顺序由 IndexedDB 主键决定，调用方自行按 deck id 匹配）
+ * @returns 封面数组（调用方自行按 deck id 匹配）
  */
 export async function listDeckCovers(): Promise<DeckCover[]> {
-  const database = await db();
-  return database.getAll('covers');
+  return api.fetchCovers();
 }
 
 /**
@@ -267,17 +150,15 @@ export async function listDeckCovers(): Promise<DeckCover[]> {
  * @returns 封面；不存在时返回 null
  */
 export async function getDeckCover(id: string): Promise<DeckCover | null> {
-  const database = await db();
-  return (await database.get('covers', id)) ?? null;
+  return api.fetchCover(id);
 }
 
 /**
  * 写入（或覆盖）作品封面。以 cover.id（作品 id）为主键。
- * @throws 存储配额不足时抛出（封面为 dataURL，体积可能较大）
+ * @throws 后端不可用 / 写入失败时抛出
  */
 export async function putDeckCover(cover: DeckCover): Promise<void> {
-  const database = await db();
-  await database.put('covers', cover);
+  await api.putCover(cover);
 }
 
 /**
@@ -285,14 +166,13 @@ export async function putDeckCover(cover: DeckCover): Promise<void> {
  * @param id 作品 id
  */
 export async function deleteDeckCover(id: string): Promise<void> {
-  const database = await db();
-  await database.delete('covers', id);
+  await api.deleteCover(id);
 }
 
 /* ----------------------------- 资源库存储 ----------------------------- */
 
 /**
- * 读取资源库全部元数据（不读取 assetData，因此开销较小）。
+ * 读取资源库全部元数据（不读取资源内容，因此开销较小）。
  *
  * 对历史数据做兼容性补齐：thumb / deletedAt / folderId / duration / width / height
  * 缺失时填入空值，保证旧版本写入的资源仍能被新代码正常消费。
@@ -300,8 +180,8 @@ export async function deleteDeckCover(id: string): Promise<void> {
  * @returns 资源元数据数组；是否过滤回收站由调用方决定
  */
 export async function listAssetMetas(): Promise<AssetMeta[]> {
-  const database = await db();
-  const rows = await database.getAll('assets');
+  await ensureLegacyMigration();
+  const rows = await api.fetchAssets();
   return rows.map((row) => ({
     ...row,
     thumb: row.thumb ?? '',
@@ -317,106 +197,64 @@ export async function listAssetMetas(): Promise<AssetMeta[]> {
  * 读取资源内容。
  * @param id 资源 id
  * @returns dataURL 字符串；资源不存在时返回 null
+ *
+ * 内容本身由后端文件服务保存（二进制），这里按需下载并还原为 dataURL，
+ * 以保持对象 src、Lottie 解析与 3D 模型加载对 dataURL 的既有约定。
  */
 export async function getAssetSource(id: string): Promise<string | null> {
-  const database = await db();
-  const row = await database.get('assetData', id);
-  return row?.src ?? null;
+  return api.fetchAssetSource(id);
 }
 
 /**
- * 新增资源：元数据与二进制内容同时写入。
- *
- * 两张表放在同一个 readwrite 事务中，最后 await tx.done；任何一张写入失败都会整体回滚，
- * 避免出现「有元数据但取不到内容」的坏资源。
+ * 新增资源：元数据与二进制内容一起上传到后端。
  *
  * @param meta 资源元数据（id 由调用方预先分配）
- * @param src  资源内容（dataURL）
- * @throws 配额不足时抛出
+ * @param src  资源内容（dataURL，客户端解析文件时生成）
+ * @throws 后端不可用 / 上传失败时抛出
  */
 export async function putAssetMeta(meta: AssetMeta, src: string): Promise<void> {
-  const database = await db();
-  const tx = database.transaction(['assets', 'assetData'], 'readwrite');
-  await tx.objectStore('assets').put(meta);
-  await tx.objectStore('assetData').put({ id: meta.id, src });
-  await tx.done;
+  await api.uploadAsset(meta, src);
 }
 
 /**
- * 局部更新资源元数据（不改动 assetData）。
+ * 局部更新资源元数据（不改动资源内容）。
  *
- * 采用「读-改-写」：先读取现有行，合并 patch 后再写回，并强制保留原 id。
- * 资源不存在时静默返回（可能已被其他标签页删除）。
+ * 服务端读取现有记录后合并 patch，并强制保留原 id；资源不存在时返回 404。
  *
  * @param id    资源 id
  * @param patch 需要更新的字段
  */
 export async function updateAssetMeta(id: string, patch: Partial<AssetMeta>): Promise<void> {
-  const database = await db();
-  const existing = await database.get('assets', id);
-  if (!existing) return;
-  await database.put('assets', { ...existing, ...patch, id });
+  await api.updateAsset(id, patch);
 }
 
 /**
  * 把资源移入回收站（软删除）：只设置 deletedAt / updatedAt，不删除内容。
  *
- * 所有 id 在同一个事务内处理，避免部分成功；资源已不存在时跳过。
- * 内容仍保留在 assetData 中，等待 emptyAssetTrash 或永久删除。
- *
  * @param ids 要移入回收站的资源 id；空数组直接返回
  */
 export async function trashAssets(ids: string[]): Promise<void> {
-  if (ids.length === 0) return;
-  const database = await db();
-  const tx = database.transaction('assets', 'readwrite');
-  const now = Date.now();
-  for (const id of ids) {
-    const row = await tx.store.get(id);
-    if (row) tx.store.put({ ...row, deletedAt: now, updatedAt: now });
-  }
-  await tx.done;
+  await api.trashAssets(ids);
 }
 
 /**
  * 从回收站恢复资源。
  *
- * 恢复前先读取现有文件夹 id 集合：若资源原来所属文件夹已被删除，则把 folderId
- * 重置为 null（回到根目录），避免恢复后指向不存在的目录。
+ * 服务端会先检查原文件夹是否仍然存在：已被删除时把 folderId 重置为 null（回到根目录）。
  *
  * @param ids 要恢复的资源 id；空数组直接返回
  */
 export async function restoreAssets(ids: string[]): Promise<void> {
-  if (ids.length === 0) return;
-  const database = await db();
-  const folderIds = new Set((await database.getAll('folders')).map((folder) => folder.id));
-  const tx = database.transaction('assets', 'readwrite');
-  for (const id of ids) {
-    const row = await tx.store.get(id);
-    if (!row) continue;
-    // 原文件夹已不存在时回退到根目录
-    const folderId = row.folderId && folderIds.has(row.folderId) ? row.folderId : null;
-    tx.store.put({ ...row, deletedAt: null, folderId, updatedAt: Date.now() });
-  }
-  await tx.done;
+  await api.restoreAssets(ids);
 }
 
 /**
  * 永久删除资源：同时删除元数据与内容。
  *
- * 两张表的删除放在同一个事务中，最后 await tx.done，保证不会留下孤儿内容。
- *
  * @param ids 要删除的资源 id；空数组直接返回
  */
 export async function deleteAssetsPermanently(ids: string[]): Promise<void> {
-  if (ids.length === 0) return;
-  const database = await db();
-  const tx = database.transaction(['assets', 'assetData'], 'readwrite');
-  for (const id of ids) {
-    tx.objectStore('assets').delete(id);
-    tx.objectStore('assetData').delete(id);
-  }
-  await tx.done;
+  await api.purgeAssets(ids);
 }
 
 /**
@@ -425,11 +263,7 @@ export async function deleteAssetsPermanently(ids: string[]): Promise<void> {
  * @returns 被删除的资源数量（用于 UI 提示）
  */
 export async function emptyAssetTrash(): Promise<number> {
-  const database = await db();
-  const metas = await database.getAll('assets');
-  const ids = metas.filter((meta) => meta.deletedAt !== null).map((meta) => meta.id);
-  await deleteAssetsPermanently(ids);
-  return ids.length;
+  return api.emptyAssetTrash();
 }
 
 /**
@@ -437,8 +271,7 @@ export async function emptyAssetTrash(): Promise<number> {
  * 对旧数据把缺失的 parentId 补为 null（表示根目录）。
  */
 export async function listFolders(): Promise<AssetFolder[]> {
-  const database = await db();
-  const rows = await database.getAll('folders');
+  const rows = await api.fetchFolders();
   return rows.map((row) => ({ ...row, parentId: row.parentId ?? null }));
 }
 
@@ -447,8 +280,7 @@ export async function listFolders(): Promise<AssetFolder[]> {
  * @param folder 文件夹记录（id 由调用方生成）
  */
 export async function putFolder(folder: AssetFolder): Promise<void> {
-  const database = await db();
-  await database.put('folders', folder);
+  await api.putFolder(folder);
 }
 
 /**
@@ -457,11 +289,7 @@ export async function putFolder(folder: AssetFolder): Promise<void> {
  * @param ids 要删除的文件夹 id；空数组直接返回
  */
 export async function deleteFolderRecords(ids: string[]): Promise<void> {
-  if (ids.length === 0) return;
-  const database = await db();
-  const tx = database.transaction('folders', 'readwrite');
-  for (const id of ids) tx.store.delete(id);
-  await tx.done;
+  await api.deleteFolders(ids);
 }
 
 /* ---------------------------- 多标签只读锁 ---------------------------- */
