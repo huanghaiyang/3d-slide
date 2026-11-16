@@ -46,6 +46,14 @@ interface Contour {
   parent: number;
 }
 
+/** 世界坐标下的一个字形体：外轮廓 + 被挖掉的孔洞 */
+interface WorldShape {
+  /** 外轮廓（世界坐标，原点在文字中心） */
+  contour: THREE.Vector2[];
+  /** 孔洞轮廓，如「口」「日」的内部空腔 */
+  holes: THREE.Vector2[][];
+}
+
 /** alpha 采样画布的最大边长：超过则等比缩小，避免超大画布逐像素处理过慢 */
 const MASK_MAX = 1024;
 /** alpha 阈值（0 ~ 1）：大于该值视为字形内部，等值线即字形轮廓 */
@@ -72,56 +80,13 @@ export function buildTextExtrudeGeometry(
   options: { width: number; height: number; depth: number },
 ): THREE.ExtrudeGeometry | null {
   const { width, height, depth } = options;
-  // 大画布按比例缩小后再采样：轮廓检测只需要字形边界，不需要原始分辨率
-  const scale = Math.min(1, MASK_MAX / Math.max(canvas.width, canvas.height));
-  const mw = Math.max(2, Math.round(canvas.width * scale));
-  const mh = Math.max(2, Math.round(canvas.height * scale));
-  // 离屏遮罩画布：只用来读 alpha，不存在于 DOM，用完即被 GC 回收
-  const maskCanvas = document.createElement('canvas');
-  maskCanvas.width = mw;
-  maskCanvas.height = mh;
-  // willReadFrequently 提示浏览器保留 CPU 侧后备画布，避免 getImageData 反复回读显存
-  const ctx = maskCanvas.getContext('2d', { willReadFrequently: true });
-  if (!ctx) return null;
-  ctx.clearRect(0, 0, mw, mh);
-  ctx.drawImage(canvas, 0, 0, mw, mh);
-  const data = ctx.getImageData(0, 0, mw, mh).data;
-
-  // 只保留 alpha 通道并归一化到 0 ~ 1；文字画布是透明底，RGB 对轮廓没有意义
-  const values = new Float32Array(mw * mh);
-  for (let i = 0; i < values.length; i += 1) values[i] = data[i * 4 + 3] / 255;
-
-  // marching squares：逐格求 alpha 等值线，得到大量首尾可能相连的短线段
-  const segments = traceSegments(values, mw, mh);
-  if (segments.length === 0) return null;
-  // 把端点重合的线段串成闭环；未闭合的碎片会被丢弃
-  const loops = chainSegments(segments);
-  if (loops.length === 0) return null;
-
-  // 先简化再判层级：顶点更少，后续的点在多边形内判定也更快
-  const contours = classify(loops.map((loop) => simplifyClosed(loop, SIMPLIFY)));
-  // 只有最外层轮廓（parent < 0）会被挤出；顶点少于 3 个的退化轮廓直接忽略
-  const outers = contours.filter((contour) => contour.parent < 0 && contour.points.length >= 3);
-  if (outers.length === 0) return null;
-
-  // 采样像素坐标 -> 世界坐标：按比例缩放，并把画布原点（左上）平移到文字中心；
-  // 注意 Y 需要翻转（画布 Y 向下，几何 Y 向上），否则文字会上下颠倒
-  const toWorld = (point: Point) =>
-    new THREE.Vector2(point.x * width / mw - width / 2, height / 2 - point.y * height / mh);
-
-  const shapes: THREE.Shape[] = [];
-  for (const outer of outers) {
-    const shape = new THREE.Shape(outer.points.map(toWorld));
-    const index = contours.indexOf(outer);
-    // 把直接子轮廓作为孔洞挂到当前外轮廓上（如「口」字中间的空腔）
-    for (const contour of contours) {
-      if (contour.parent !== index) continue;
-      if (contour.points.length < 3) continue;
-      shape.holes.push(new THREE.Path(contour.points.map(toWorld)));
-    }
-    shapes.push(shape);
-  }
-  if (shapes.length === 0) return null;
+  const worldShapes = extractWorldShapes(canvas, width, height);
+  if (!worldShapes) return null;
+  const shapes = worldShapes.map((item) => {
+    const shape = new THREE.Shape(item.contour);
+    for (const hole of item.holes) shape.holes.push(new THREE.Path(hole));
+    return shape;
+  });
 
   // 倒角尺寸随挤出深度线性增加并夹在 1 ~ 2.5 之间：太薄没有立体感，太厚会吃掉笔画
   const bevel = Math.min(2.5, Math.max(1, depth * 0.08));
@@ -148,8 +113,380 @@ export function buildTextExtrudeGeometry(
 }
 
 /**
- * 挤出文字的 UV 生成器。
+ * 从文字画布提取世界坐标下的字形体（外轮廓 + 孔洞）。
  *
+ * 这是两条渲染路径（凹陷挤出 / 凸起闭合实体）的公共前置步骤：
+ * 1. 把画布缩放到 MASK_MAX 以内后读 alpha；
+ * 2. marching squares 求等值线并串成闭环；
+ * 3. 简化顶点并判定父子关系，外轮廓挤出、内轮廓挖孔；
+ * 4. 采样像素坐标换算成以文字中心为原点的世界坐标（Y 轴翻转）。
+ *
+ * @param canvas 已绘制好文字的透明底画布
+ * @param width  文字世界宽度
+ * @param height 文字世界高度
+ * @returns 字形列表；无法提取有效轮廓时返回 null
+ */
+function extractWorldShapes(canvas: HTMLCanvasElement, width: number, height: number): WorldShape[] | null {
+  // 大画布按比例缩小后再采样：轮廓检测只需要字形边界，不需要原始分辨率
+  const scale = Math.min(1, MASK_MAX / Math.max(canvas.width, canvas.height));
+  const mw = Math.max(2, Math.round(canvas.width * scale));
+  const mh = Math.max(2, Math.round(canvas.height * scale));
+  // 离屏遮罩画布：只用来读 alpha，不存在于 DOM，用完即被 GC 回收
+  const maskCanvas = document.createElement('canvas');
+  maskCanvas.width = mw;
+  maskCanvas.height = mh;
+  // willReadFrequently 提示浏览器保留 CPU 侧后备画布，避免 getImageData 反复回读显存
+  const ctx = maskCanvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return null;
+  ctx.clearRect(0, 0, mw, mh);
+  ctx.drawImage(canvas, 0, 0, mw, mh);
+  const data = ctx.getImageData(0, 0, mw, mh).data;
+
+  // 只保留 alpha 通道并归一化到 0 ~ 1；文字画布是透明底，RGB 对轮廓没有意义。
+  // 四周额外补一圈透明像素：左对齐时首字紧贴画布左缘，若没有「外部为空」的参照，
+  // marching squares 在画布边界没有 alpha transition，那个字的轮廓会开口而被丢弃。
+  const pw = mw + 2;
+  const ph = mh + 2;
+  const values = new Float32Array(pw * ph);
+  for (let y = 0; y < mh; y += 1) {
+    for (let x = 0; x < mw; x += 1) {
+      values[(y + 1) * pw + (x + 1)] = data[(y * mw + x) * 4 + 3] / 255;
+    }
+  }
+
+  // marching squares：逐格求 alpha 等值线，得到大量首尾可能相连的短线段
+  const segments = traceSegments(values, pw, ph);
+  if (segments.length === 0) return null;
+  // 把端点重合的线段串成闭环；未闭合的碎片会被丢弃
+  const loops = chainSegments(segments);
+  if (loops.length === 0) return null;
+
+  // 先简化再判层级：顶点更少，后续的点在多边形内判定也更快
+  const contours = classify(loops.map((loop) => simplifyClosed(loop, SIMPLIFY)));
+  // 只有最外层轮廓（parent < 0）会被挤出；顶点少于 3 个的退化轮廓直接忽略
+  const outers = contours.filter((contour) => contour.parent < 0 && contour.points.length >= 3);
+  if (outers.length === 0) return null;
+
+  // 采样像素坐标 -> 世界坐标：先扣掉补边（-1），再按比例缩放，
+  // 并把画布原点（左上）平移到文字中心；Y 需要翻转（画布 Y 向下，几何 Y 向上）
+  const toWorld = (point: Point) =>
+    new THREE.Vector2((point.x - 1) * width / mw - width / 2, height / 2 - (point.y - 1) * height / mh);
+
+  const shapes: WorldShape[] = [];
+  for (const outer of outers) {
+    const index = contours.indexOf(outer);
+    const holes: THREE.Vector2[][] = [];
+    // 把直接子轮廓作为孔洞挂到当前外轮廓上（如「口」字中间的空腔）
+    for (const contour of contours) {
+      if (contour.parent !== index) continue;
+      if (contour.points.length < 3) continue;
+      holes.push(contour.points.map(toWorld));
+    }
+    shapes.push({ contour: outer.points.map(toWorld), holes });
+  }
+  return shapes.length ? shapes : null;
+}
+
+/**
+ * 凸起闭合实体的构建参数。
+ * 与凹陷挤出共用同一套字形轮廓，区别在于「面朝哪里、体积是否闭合」。
+ */
+export interface TextSolidOptions {
+  /** 文字世界宽度 */
+  width: number;
+  /** 文字世界高度 */
+  height: number;
+  /** 挤出总厚度（世界单位） */
+  depth: number;
+  /** 正面倒角的 2D 收缩量；缺省按厚度推算 */
+  bevel?: number;
+}
+
+/**
+ * 用文字画布的 alpha 轮廓生成「凸起闭合」的真 3D 文字几何。
+ *
+ * 与 buildTextExtrudeGeometry 生成的凹陷体积不同，这里显式构造一个闭合实体：
+ * - 正面（贴文字纹理）位于 z = +depth/2，朝向观者；
+ * - 背面（同样贴文字纹理）位于 z = -depth/2，朝向另一侧；
+ * - 正面 / 背面各有一圈 45° 倒角，倒角外侧是沿字形轮廓的侧壁；
+ * - 顶点绕向严格按外法线构造，配合 FrontSide 材质，任意视角都只会看到「离观者最近」的那一层，
+ *   不会再出现背面压在正面之上导致的凹陷错觉。
+ *
+ * 材质分组：0 = 倒角与侧壁（实体色），1 = 正背面（贴图），与 SceneManager 的材质数组一一对应。
+ * 体积先于封面入列，透明封面才能正确盖住其后的侧壁。
+ *
+ * @param canvas  已绘制好文字（透明背景）的画布
+ * @param options 尺寸与倒角参数
+ * @returns 闭合几何体；无法提取有效轮廓时返回 null
+ */
+export function buildTextSolidGeometry(
+  canvas: HTMLCanvasElement,
+  options: TextSolidOptions,
+): THREE.BufferGeometry | null {
+  const width = Math.max(1, options.width);
+  const height = Math.max(1, options.height);
+  const depth = Math.max(0.2, options.depth);
+  const shapes = extractWorldShapes(canvas, width, height);
+  if (!shapes) return null;
+
+  // 倒角量：2D 内缩与 Z 向高度按近似 45° 匹配，受光时能勾出清晰的字边
+  const bevelSize = Math.min(4, Math.max(0.4, options.bevel ?? depth * 0.09));
+  const bevelZ = Math.min(depth * 0.28, bevelSize * 1.2);
+  const zFront = depth / 2;
+  const zBack = -depth / 2;
+  // 倒角存在时，侧壁夹在两条倒角之间；否则侧壁直接贯通整个厚度
+  const zFrontSide = bevelZ > 0.02 ? zFront - bevelZ : zFront;
+  const zBackSide = bevelZ > 0.02 ? zBack + bevelZ : zBack;
+
+  /** 准备后的单字形：外轮廓 / 孔洞，以及用于封面的内缩版本 */
+  interface PreparedShape {
+    contour: THREE.Vector2[];
+    holes: THREE.Vector2[][];
+    capContour: THREE.Vector2[];
+    capHoles: THREE.Vector2[][];
+  }
+
+  const prepared: PreparedShape[] = shapes.map((shape) => {
+    // 统一绕向：外轮廓逆时针、孔洞顺时针，这样「实体内部始终在行进方向左侧」，
+    // 侧壁法线可以直接用右法线推出
+    if (polygonArea(shape.contour) < 0) shape.contour.reverse();
+    for (const hole of shape.holes) if (polygonArea(hole) > 0) hole.reverse();
+    return {
+      contour: shape.contour,
+      holes: shape.holes,
+      capContour: insetWithGuard(shape.contour, bevelSize, false),
+      capHoles: shape.holes.map((hole) => insetWithGuard(hole, bevelSize, true)),
+    };
+  });
+
+  const positions: number[] = [];
+  const uvs: number[] = [];
+  // UV 参照：与 TextUvGenerator 完全一致，保证正面贴图逐像素对齐
+  const uvRef = { width, height };
+
+  // —— 第一遍：倒角与侧壁（材质组 0）——
+  // 先画体积、后画封面：文字材质是透明的（关闭了深度写入），
+  // 按这个顺序封面的字面才会盖住其后的侧壁，观感与真实实体一致
+  for (const shape of prepared) {
+    // rings 的顺序即绘制顺序：文字材质关闭了深度写入，所以必须按「由远及近」入列。
+    // 背面倒角在最后方、正面倒角最靠前，正面倒角最后绘制才能压住其后的背面倒角。
+    const rings: [THREE.Vector2[], number, THREE.Vector2[], number, number][] = [];
+    // 背面倒角：完整轮廓 -> 封面边界（内缩）
+    rings.push([shape.contour, zBackSide, shape.capContour, zBack, -1]);
+    // 侧壁：完整轮廓，从后往前
+    rings.push([shape.contour, zBackSide, shape.contour, zFrontSide, 0]);
+    // 正面前倒角：封面边界（内缩）-> 完整轮廓
+    rings.push([shape.capContour, zFront, shape.contour, zFrontSide, 1]);
+    shape.holes.forEach((hole, index) => {
+      const capHole = shape.capHoles[index] ?? hole;
+      rings.push([hole, zBackSide, capHole, zBack, -1]);
+      rings.push([hole, zBackSide, hole, zFrontSide, 0]);
+      rings.push([capHole, zFront, hole, zFrontSide, 1]);
+    });
+    for (const [from, zFrom, to, zTo, refZ] of rings) {
+      if (from.length !== to.length || from.length < 3) continue;
+      // 内缩失败（封面与轮廓重合）时倒角退化为零面积，跳过即可
+      if (zFrom === zTo && from === to) continue;
+      pushStrip(positions, uvs, from, zFrom, to, zTo, refZ);
+    }
+  }
+  const wallVertices = positions.length / 3;
+
+  // —— 第二遍：正背两个封面（材质组 1）——
+  for (const shape of prepared) {
+    pushCap(positions, uvs, shape.capContour, shape.capHoles, zFront, true, uvRef);
+    pushCap(positions, uvs, shape.capContour, shape.capHoles, zBack, false, uvRef);
+  }
+
+  if (positions.length === 0) return null;
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  // 材质 0 = 倒角与侧壁（实体色），材质 1 = 正背封面（文字纹理）
+  geometry.addGroup(0, wallVertices, 0);
+  geometry.addGroup(wallVertices, positions.length / 3 - wallVertices, 1);
+  geometry.computeVertexNormals();
+  geometry.computeBoundingSphere();
+  return geometry;
+}
+
+/** 多边形的有向面积（鞋带公式；Y 轴向上时逆时针为正） */
+function polygonArea(points: THREE.Vector2[]): number {
+  let sum = 0;
+  for (let i = 0; i < points.length; i += 1) {
+    const current = points[i];
+    const next = points[(i + 1) % points.length];
+    sum += current.x * next.y - next.x * current.y;
+  }
+  return sum / 2;
+}
+
+/**
+ * 沿「左法线」把多边形边界内缩指定距离（实体缩小、孔洞外扩）。
+ *
+ * 每个顶点取相邻两条边左法线的角平分线方向，按 1 / cos(θ/2) 补偿斜接长度，
+ * 并对尖锐拐角做上限截断，避免生成飞出的尖刺。
+ *
+ * @param points   多边形顶点（需已统一绕向：实体在行进方向左侧）
+ * @param distance 内缩距离
+ * @param growing  是否为孔洞（孔洞内缩等于自身变大，用于面积校验分支）
+ * @returns 内缩后的顶点；面积校验不通过时原样返回输入
+ */
+function insetWithGuard(points: THREE.Vector2[], distance: number, growing: boolean): THREE.Vector2[] {
+  if (points.length < 3 || distance <= 0) return points;
+  const before = Math.abs(polygonArea(points));
+  const candidate = insetPolygon(points, distance);
+  const after = Math.abs(polygonArea(candidate));
+  // 细笔画（如「口」的竖线只有几个世界单位）内缩过头会自交，面积变化过大时放弃倒角，
+  // 退回直角边，保证几何仍然可闭合
+  if (!Number.isFinite(after) || after <= 0) return points;
+  if (growing ? after < before * 0.99 || after > before * 2.2 : after < before * 0.45 || after > before * 1.01) {
+    return points;
+  }
+  return candidate;
+}
+
+/** 计算内缩顶点；只有几何计算，不含面积校验 */
+function insetPolygon(points: THREE.Vector2[], distance: number): THREE.Vector2[] {
+  const output: THREE.Vector2[] = [];
+  const count = points.length;
+  for (let i = 0; i < count; i += 1) {
+    const prev = points[(i + count - 1) % count];
+    const current = points[i];
+    const next = points[(i + 1) % count];
+    const inDir = new THREE.Vector2(current.x - prev.x, current.y - prev.y);
+    const outDir = new THREE.Vector2(next.x - current.x, next.y - current.y);
+    if (inDir.lengthSq() < 1e-9 || outDir.lengthSq() < 1e-9) {
+      output.push(current.clone());
+      continue;
+    }
+    inDir.normalize();
+    outDir.normalize();
+    // 左法线：把边旋转 +90°，指向实体内部
+    const n1 = new THREE.Vector2(-inDir.y, inDir.x);
+    const n2 = new THREE.Vector2(-outDir.y, outDir.x);
+    const bisector = new THREE.Vector2(n1.x + n2.x, n1.y + n2.y);
+    if (bisector.lengthSq() < 1e-9) {
+      // 180° 折返的尖点：沿上一条边的法线内缩
+      output.push(new THREE.Vector2(current.x + n1.x * distance, current.y + n1.y * distance));
+      continue;
+    }
+    bisector.normalize();
+    // 斜接长度 = distance / cos(θ/2)，θ 为两条法线的夹角
+    const cosHalf = Math.max(0.25, bisector.dot(n1));
+    output.push(new THREE.Vector2(
+      current.x + (bisector.x * distance) / cosHalf,
+      current.y + (bisector.y * distance) / cosHalf,
+    ));
+  }
+  return output;
+}
+
+/**
+ * 追加一个封面（正 / 背面）：用 earcut 三角化「内缩外轮廓 + 内缩孔洞」，
+ * 并按绕向保证法线朝向正确的一侧。
+ *
+ * @param front 为 true 时朝 +z（观者方向），否则朝 -z
+ */
+function pushCap(
+  positions: number[],
+  uvs: number[],
+  contour: THREE.Vector2[],
+  holes: THREE.Vector2[][],
+  z: number,
+  front: boolean,
+  uvRef: { width: number; height: number },
+) {
+  if (contour.length < 3) return;
+  // 三角化会就地删除重复的末点，这里传副本，避免污染后续倒角使用的顶点表
+  const contourCopy = contour.map((point) => point.clone());
+  const holeCopies = holes.filter((hole) => hole.length >= 3).map((hole) => hole.map((point) => point.clone()));
+  const faces = THREE.ShapeUtils.triangulateShape(contourCopy, holeCopies) as number[][];
+  const all: THREE.Vector2[] = contourCopy.concat(...holeCopies);
+  for (const face of faces) {
+    const p1 = all[face[0]];
+    const p2 = all[face[1]];
+    const p3 = all[face[2]];
+    if (!p1 || !p2 || !p3) continue;
+    // 参考法线：封面朝 z 方向；三角形绕向不对时由 pushTriangle 自动翻转
+    pushTriangle(positions, uvs, p1, p2, p3, new THREE.Vector3(0, 0, front ? 1 : -1), [z, z, z], uvRef);
+  }
+}
+
+/**
+ * 追加一条环带（倒角或侧壁）：把两圈顶点按顺序连成四边形带。
+ *
+ * @param from / zFrom 起点圈（世界坐标 + z）
+ * @param to   / zTo   终点圈
+ * @param refZ 参考法线的 z 分量：+1 朝观者、-1 朝背面、0 纯侧壁
+ */
+function pushStrip(
+  positions: number[],
+  uvs: number[],
+  from: THREE.Vector2[],
+  zFrom: number,
+  to: THREE.Vector2[],
+  zTo: number,
+  refZ: number,
+) {
+  const count = Math.min(from.length, to.length);
+  for (let i = 0; i < count; i += 1) {
+    const j = (i + 1) % count;
+    const a1 = from[i];
+    const a2 = from[j];
+    const b1 = to[i];
+    const b2 = to[j];
+    // 外法线的水平分量取边方向（from 圈）的右法线
+    const dx = a2.x - a1.x;
+    const dy = a2.y - a1.y;
+    const length = Math.hypot(dx, dy);
+    if (length < 1e-9) continue;
+    const ref = new THREE.Vector3(dy / length, -dx / length, refZ);
+    pushTriangle(positions, uvs, a1, b1, a2, ref, [zFrom, zTo, zFrom]);
+    pushTriangle(positions, uvs, a2, b1, b2, ref, [zFrom, zTo, zTo]);
+  }
+}
+
+/**
+ * 追加一个三角形，并按参考法线校正绕向（保证背面剔除与光照计算都正确）。
+ *
+ * @param zs    三个顶点各自的 z 值
+ * @param uvRef 提供时按顶点 xy 映射文字画布 UV，否则写固定 UV（侧壁不贴图）
+ */
+function pushTriangle(
+  positions: number[],
+  uvs: number[],
+  p1: THREE.Vector2,
+  p2: THREE.Vector2,
+  p3: THREE.Vector2,
+  ref: THREE.Vector3,
+  zs: [number, number, number],
+  uvRef?: { width: number; height: number },
+) {
+  const ab = new THREE.Vector3(p2.x - p1.x, p2.y - p1.y, zs[1] - zs[0]);
+  const ac = new THREE.Vector3(p3.x - p1.x, p3.y - p1.y, zs[2] - zs[0]);
+  const normal = new THREE.Vector3().crossVectors(ab, ac);
+  if (normal.lengthSq() < 1e-12) return;
+  let v2: THREE.Vector2 = p2;
+  let v3: THREE.Vector2 = p3;
+  let z2 = zs[1];
+  let z3 = zs[2];
+  if (normal.dot(ref) < 0) {
+    v2 = p3;
+    v3 = p2;
+    z2 = zs[2];
+    z3 = zs[1];
+  }
+  const points: [THREE.Vector2, number][] = [[p1, zs[0]], [v2, z2], [v3, z3]];
+  for (const [point, z] of points) {
+    positions.push(point.x, point.y, z);
+    if (uvRef) uvs.push(point.x / uvRef.width + 0.5, point.y / uvRef.height + 0.5);
+    else uvs.push(0.5, 0.5);
+  }
+}
+
+/**
+ * 挤出文字的 UV 生成器。
  * ExtrudeGeometry 默认会按世界包围盒生成 UV，那样正面贴图无法与原文字画布对齐；
  * 这里改用「几何坐标 -> 画布坐标」的线性映射，让顶面（正面 / 背面）直接采样原文字纹理。
  * width / height 为文字的世界单位尺寸，与挤出前的画布比例一致。

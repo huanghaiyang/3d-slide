@@ -36,6 +36,8 @@ import { ASPECT, DEFAULT_VIEW, FONT_STACKS } from '../lib/constants';
 import { fitDistance, formatZoom } from '../lib/camera';
 import { nextDepth } from '../lib/deck';
 import { smoothPathD } from '../lib/curve';
+import { htmlInCanvasSupported } from '../lib/htmlInCanvas';
+import { sanitizeRichHtml } from '../lib/richText';
 import { SceneManager } from '../three/SceneManager';
 import type { MediaPlaybackState, StageMode } from '../three/SceneManager';
 import { Icon } from './Icon';
@@ -110,8 +112,8 @@ interface StageProps {
   onAddFile?: (file: File, point?: { x: number; y: number }) => void;
   /** 空舞台快捷按钮：选择图片文件。 */
   onPickImage?: () => void;
-  /** 文本原地编辑提交回调。 */
-  onTextCommit?: (id: string, text: string) => void;
+  /** 文本原地编辑提交回调；html 仅在富文本编辑时提供（提交时清洗后的受控 HTML）。 */
+  onTextCommit?: (id: string, text: string, html?: string) => void;
   /** 画笔绘制完成回调：归一化点列、包围盒与线宽（px）。 */
   onDrawPath?: (points: number[], box: { x: number; y: number; width: number; height: number }, strokeWidth?: number) => void;
   /** 一次有效拖拽 / 缩放手势结束（用于关闭历史合并窗口）。 */
@@ -129,6 +131,13 @@ interface StageProps {
  */
 interface EditingState {
   id: string;
+  /**
+   * 编辑方式：
+   * - plain —— 普通 textarea，只编辑纯文本（提交时会清掉富文本样式）；
+   * - rich  —— contentEditable，直接编辑 HTML，粘贴与输入都能保留样式。
+   * 富文本 + HTML-in-Canvas 打开且浏览器支持时用 rich，否则用 plain。
+   */
+  kind: 'plain' | 'rich';
   draft: string;
   rect: { left: number; top: number; width: number; height: number; fontPx: number; lineHeightPx: number; paddingTop: number };
   object: TextObject;
@@ -270,6 +279,8 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
   const deckRef = useRef(deck);
   const selectedPropRef = useRef(selectedObjectId);
   const selectionRef = useRef(selectedObjectIds);
+  // 富文本原地编辑使用 contentEditable：DOM 内容由浏览器维护，提交时从这里读取 innerHTML
+  const richEditorRef = useRef<HTMLDivElement | null>(null);
 
   // 每次渲染都把最新值写入 ref，保证事件回调中读到的是当前值而非首次渲染的值。
   modeRef.current = mode;
@@ -284,6 +295,25 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
   penRef.current = penMode && mode === 'edit';
   lockRef.current = viewLocked;
   drawCallbackRef.current = onDrawPath;
+
+  /**
+   * 富文本编辑器挂载后接管焦点，并把光标放到文末。
+   * contentEditable 的 autoFocus 并不可靠，而点击双击进入编辑时光标落在开头会让用户误以为内容被替换。
+   */
+  useEffect(() => {
+    if (editing?.kind !== 'rich') return;
+    const element = richEditorRef.current;
+    if (!element) return;
+    element.focus();
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    range.collapse(false);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    // 只在进入富文本编辑时执行一次；内容变化由浏览器自己维护
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editing?.kind, editing?.id]);
 
   /**
    * 提交选中：优先使用多选回调；未提供时退化为单选回调（取数组第一项或 null）。
@@ -973,18 +1003,40 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
     const rect = manager.projectRect(id);
     if (!rect) return;
     onSelect?.(id);
-    setEditing({ id, draft: object.text, rect, object: object as TextObject });
+    const text = object as TextObject;
+    // 富文本且 HTML-in-Canvas 可用时进入 contentEditable 编辑，样式与画布上的渲染一致；
+    // 其他情况沿用 textarea 的纯文本编辑
+    const rich = Boolean(text.html) && text.htmlInCanvas !== false && htmlInCanvasSupported();
+    setEditing({ id, kind: rich ? 'rich' : 'plain', draft: text.text, rect, object: text });
   };
 
   /**
    * 提交文本编辑：只有内容确实变化时才写回 store；长度上限 5000 字与 LIMITS.textChars 对齐。
    * 失焦和 Ctrl / Cmd + Enter 都会走这里。
+   *
+   * 富文本路径读出 contentEditable 的 innerHTML 后重新清洗（浏览器粘贴进来的样式并不受控），
+   * 再把清洗结果与纯文本投影一起提交；内容为空时上层会删除该对象。
    */
   const commitEditing = () => {
     const state = editingRef.current;
     if (!state) return;
     editingRef.current = null;
     setEditing(null);
+    if (state.kind === 'rich') {
+      const element = richEditorRef.current;
+      richEditorRef.current = null;
+      const raw = element?.innerHTML ?? '';
+      const rich = sanitizeRichHtml(raw);
+      if (!rich) {
+        // 全部内容被删空：按空文本提交，让上层删除对象
+        if (state.object.text) onTextCommit?.(state.id, '');
+        return;
+      }
+      if (rich.html !== (state.object.html ?? '') || rich.text !== state.object.text) {
+        onTextCommit?.(state.id, rich.text, rich.html);
+      }
+      return;
+    }
     const text = state.draft.slice(0, 5000);
     if (text !== state.object.text) onTextCommit?.(state.id, text);
   };
@@ -1185,7 +1237,7 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
           </div>
         )}
 
-        {editing && (
+        {editing && editing.kind === 'plain' && (
           <textarea
             className="text-editor"
             autoFocus
@@ -1213,6 +1265,48 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
               const draft = event.target.value.slice(0, 5000);
               setEditing((value) => (value ? { ...value, draft } : value));
             }}
+            onBlur={commitEditing}
+            onKeyDown={(event) => {
+              event.stopPropagation();
+              if (event.key === 'Escape') {
+                event.preventDefault();
+                cancelEditing();
+              } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                event.preventDefault();
+                commitEditing();
+              }
+            }}
+          />
+        )}
+
+        {editing && editing.kind === 'rich' && (
+          <div
+            className="text-editor text-editor-rich"
+            ref={richEditorRef}
+            contentEditable
+            suppressContentEditableWarning
+            autoFocus
+            spellCheck={false}
+            // 初始内容只在挂载时注入一次，之后由浏览器维护 DOM，避免 React 重置光标；
+            // 粘贴走浏览器的原生富文本粘贴，样式原样进入 DOM，提交时再统一清洗。
+            dangerouslySetInnerHTML={{ __html: editing.object.html ?? '' }}
+            style={{
+              // 版面度量与纯文本编辑器一致，保证「原地编辑」的浮层与 3D 文本重合
+              left: editing.rect.left,
+              top: editing.rect.top,
+              width: Math.max(40, editing.rect.width),
+              height: Math.max(40, editing.rect.height),
+              fontFamily: FONT_STACKS[editing.object.font],
+              // 富文本内部字号是 em 相对值，这里的基准字号必须与画布渲染一致
+              fontSize: Math.max(8, editing.rect.fontPx),
+              lineHeight: Math.max(6, editing.rect.lineHeightPx) / Math.max(8, editing.rect.fontPx),
+              color: editing.object.color,
+              textAlign: editing.object.align,
+              fontWeight: editing.object.bold ? 700 : 400,
+              paddingTop: editing.rect.paddingTop,
+              background: deck.background,
+            }}
+            onPointerDown={(event) => event.stopPropagation()}
             onBlur={commitEditing}
             onKeyDown={(event) => {
               event.stopPropagation();

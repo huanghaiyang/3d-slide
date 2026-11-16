@@ -98,6 +98,10 @@ function objectSnapshot(object: SlideObject, includeText: boolean): Record<strin
         align: object.align,
         color: object.color,
         depth3d: object.depth3d ?? 0,
+        depth3dMode: object.depth3dMode ?? 'raised',
+        // 富文本只暴露「有没有样式」，内容本身同样受 includeText 策略保护
+        rich: Boolean(object.html),
+        htmlInCanvas: object.htmlInCanvas !== false,
       };
     case 'shape':
       return {

@@ -71,6 +71,12 @@ export type ShapeKind =
 export type FontPreset = 'sans' | 'serif' | 'round' | 'mono';
 /** 文本水平对齐方式。 */
 export type TextAlign = 'left' | 'center' | 'right';
+/**
+ * 文本 3D 效果：
+ * - raised —— 凸起闭合实体：正面贴近观者、侧面在正面之后，看起来是突出的真 3D 文字；
+ * - recessed —— 凹陷刻入：延续早期表现，字形像被压进平面里。
+ */
+export type Text3dMode = 'raised' | 'recessed';
 /** 图片等资源在对象框内的填充方式：contain 完整显示、cover 裁切铺满。 */
 export type ImageFit = 'contain' | 'cover';
 /** 可播放媒体类型：视频或音频。 */
@@ -127,6 +133,19 @@ export interface TextObject extends ObjectBase {
   lineHeight: number;
   /** 3D 挤出厚度（0 表示平面文本） */
   depth3d?: number;
+  /** 3D 挤出效果；缺省按 raised（凸起真 3D）处理 */
+  depth3dMode?: Text3dMode;
+  /**
+   * 富文本内容：经过 richText.sanitizeRichHtml 清洗的受控 HTML 子集
+   * （`<div>` 块 + `<br>` + 带内联样式的 `<span>`）。
+   * 存在时 text 是它的纯文本投影；渲染侧优先使用 html。
+   */
+  html?: string;
+  /**
+   * 是否启用 HTML-in-Canvas 渲染（浏览器排版引擎直接绘制 drawable 子树）。
+   * 缺省为 true；关闭后按纯文本走 Canvas 2D 手绘，富文本样式不再呈现。
+   */
+  htmlInCanvas?: boolean;
 }
 
 /** 图片对象：src 通常是 dataURL 或 blob URL，渲染为带材质的平面。 */

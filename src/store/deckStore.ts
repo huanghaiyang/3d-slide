@@ -143,6 +143,11 @@ interface DeckStore {
   // —— 新增对象（均返回新对象 id，失败或超限时返回 null）——
   /** 在当前视角中心新增文本对象。 */
   addText: () => string | null;
+  /**
+   * 用剪贴板内容新增文本对象（富文本粘贴）。
+   * html 存在时按富文本渲染；text 是纯文本投影；width 可指定初始宽度。
+   */
+  addRichText: (payload: { text: string; html?: string; width?: number }) => string | null;
   /** 新增指定形状对象。 */
   addShape: (shape: ShapeKind) => string | null;
   /** 新增 SVG 矢量对象，可指定落点坐标（世界坐标）。 */
@@ -418,6 +423,19 @@ function normalizeEditedObject(object: SlideObject, patch: ObjectPatch): SlideOb
     text.fontSize = clampNumber(text.fontSize, LIMITS.minFontSize, LIMITS.maxFontSize, 48);
     text.lineHeight = clampNumber(text.lineHeight, LIMITS.minLineHeight, LIMITS.maxLineHeight, 1.4);
     text.depth3d = clampNumber(text.depth3d ?? 0, 0, LIMITS.maxTextDepth, 0);
+    text.depth3dMode = text.depth3dMode === 'recessed' ? 'recessed' : 'raised';
+    // 只改纯文本（属性面板输入、AI 改写、画布内联编辑）意味着放弃富文本样式，
+    // 否则 html 会一直盖过新输入的 text，用户会觉得「改了没反应」
+    const textPatch = patch as Partial<TextObject>;
+    if (textPatch.text !== undefined && textPatch.html === undefined) delete text.html;
+    if (typeof text.html === 'string') {
+      const html = text.html.slice(0, LIMITS.textHtmlChars);
+      if (html.trim()) text.html = html;
+      else delete text.html;
+    } else if (text.html !== undefined) {
+      delete text.html;
+    }
+    if (text.htmlInCanvas !== undefined) text.htmlInCanvas = text.htmlInCanvas !== false;
     text.height = autoTextHeight(text);
   } else if (next.type === 'chart') {
     // 图表：数据必须交给对应插件重新规范化，防止孤立边 / 重复节点进入场景
@@ -778,6 +796,33 @@ export const useDeckStore = create<DeckStore>((set, get) => {
       const name = nameForObject(deckAtStart, 'text', '文本');
       const id = crypto.randomUUID();
       const object = createTextObject(id, name, state.view, z);
+      const applied = applyDeck((deck) => ({
+        ...deck,
+        objects: [...deck.objects, object],
+        counters: { ...deck.counters, text: count },
+      }));
+      if (!applied) return null;
+      set({ selectedObjectId: id, selectedIds: [id], selectedFrameId: null });
+      return id;
+    },
+
+    // 用剪贴板内容新增文本对象：html 存在时按富文本渲染，text 是它的纯文本投影
+    addRichText: (payload) => {
+      const state = get();
+      if (!state.deck) return null;
+      if (state.deck.objects.length >= LIMITS.objects) return null;
+      const deckAtStart = state.deck;
+      const z = nextDepth(deckAtStart.objects);
+      const count = (deckAtStart.counters.text ?? 0) + 1;
+      const name = nameForObject(deckAtStart, 'text', '文本');
+      const id = crypto.randomUUID();
+      const base = createTextObject(id, name, state.view, z);
+      const object: TextObject = { ...base, text: payload.text.slice(0, LIMITS.textChars) };
+      // 富文本宽度按内容量适当加宽，避免整段正文被挤成很窄的一条
+      if (payload.html && payload.width) object.width = payload.width;
+      if (payload.html) object.html = payload.html.slice(0, LIMITS.textHtmlChars);
+      // 高度必须按新的内容重算：paste 的内容通常比默认「新文本」长得多
+      object.height = autoTextHeight(object);
       const applied = applyDeck((deck) => ({
         ...deck,
         objects: [...deck.objects, object],

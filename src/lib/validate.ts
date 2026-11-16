@@ -37,6 +37,7 @@ import {
   LIMITS,
 } from './constants';
 import { layoutText } from './text';
+import { richTextHeight, sanitizeRichHtml } from './richText';
 import { getChartPlugin, getDefaultChartPlugin } from '../plugins/registry';
 
 /** .slide 工程文件格式版本号；导入时高于此版本的文件会被拒绝。 */
@@ -154,15 +155,27 @@ function normalizeObject(raw: unknown, warnings: string[]): SlideObject {
   const type = r.type;
   if (type === 'text') {
     const base = normalizeBase(r);
-    const text = str(r.text, '');
+    let text = str(r.text, '');
     const fontSize = clamp(num(r.fontSize, 48), LIMITS.minFontSize, LIMITS.maxFontSize);
     const lineHeight = clamp(num(r.lineHeight, 1.4), LIMITS.minLineHeight, LIMITS.maxLineHeight);
     const font = (['sans', 'serif', 'round', 'mono'].includes(String(r.font))
       ? r.font
       : 'sans') as TextObject['font'];
     const bold = bool(r.bold, false);
-    const layout = layoutText(text, base.width, fontSize, font, bold, lineHeight);
-    return {
+    // 富文本：来自存档的 HTML 一律重新清洗（防止旧数据或手工编辑的文件注入样式 / 脚本），
+    // 纯文本缺失时用清洗结果的投影兜底，保证两种渲染路径内容一致
+    let html: string | undefined;
+    if (typeof r.html === 'string' && r.html.trim()) {
+      const rich = sanitizeRichHtml(r.html);
+      if (rich) {
+        html = rich.html.slice(0, LIMITS.textHtmlChars);
+        if (!text.trim()) text = rich.text;
+      }
+    }
+    const height = html
+      ? richTextHeight(html, base.width, fontSize, font, bold, lineHeight)
+      : layoutText(text, base.width, fontSize, font, bold, lineHeight).height;
+    const object: TextObject = {
       ...base,
       type: 'text',
       text,
@@ -173,8 +186,13 @@ function normalizeObject(raw: unknown, warnings: string[]): SlideObject {
       color: str(r.color, DEFAULT_TEXT_COLOR),
       lineHeight,
       depth3d: clamp(num(r.depth3d, 0), 0, LIMITS.maxTextDepth),
-      height: layout.height,
+      depth3dMode: r.depth3dMode === 'recessed' ? 'recessed' : 'raised',
+      height: Math.max(LIMITS.minSize, height),
     };
+    if (html) object.html = html;
+    // 只有显式关闭才记录 false，缺省（undefined）表示启用 HTML-in-Canvas
+    if (r.htmlInCanvas === false) object.htmlInCanvas = false;
+    return object;
   }
   if (type === 'image') {
     const base = normalizeBase(r);

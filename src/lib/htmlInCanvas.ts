@@ -18,7 +18,10 @@ import { fontCss } from './text';
 
 /** 文本画布的样式参数；画布按 density 放大，DOM 仍按逻辑像素排版。 */
 export interface HtmlTextSpec {
+  /** 纯文本内容；没有 html 时直接作为文本节点绘制 */
   text: string;
+  /** 富文本内容（受控 HTML 子集）；存在时用 innerHTML 完整渲染，保留内联样式 */
+  html?: string;
   width: number;
   height: number;
   fontSize: number;
@@ -116,14 +119,23 @@ function applyTextStyle(div: HTMLDivElement, spec: HtmlTextSpec) {
   style.whiteSpace = 'pre-wrap';
   style.overflowWrap = 'break-word';
   style.wordBreak = 'normal';
+  // 富文本可能比文本框高（块内字号不一），超出部分直接裁掉，与 3D 挤出轮廓一致
+  style.overflow = 'hidden';
 }
 
-/** 取（必要时创建）离屏容器；容器必须留在文档里，子树才有排版与绘制 */
+/**
+ * 取（必要时创建）离屏容器；容器必须留在文档视口内，子树才有排版与绘制。
+ *
+ * 用 opacity: 0 隐藏而不是移到视口外：实测（Chrome 157）把容器放到
+ * left: -100000px 时浏览器不绘制 drawable 子树，drawElementImage 拿到的是一张空画布，
+ * 文字会整块消失；opacity:0 仍参与绘制，只是合成阶段不可见。
+ * pointer-events: none 保证这层不拦截任何交互，position: fixed 也不会产生滚动条。
+ */
 function ensureHost(): HTMLDivElement {
   if (!host) {
     host = document.createElement('div');
     host.setAttribute('aria-hidden', 'true');
-    host.style.cssText = 'position:fixed;left:-100000px;top:0;pointer-events:none;';
+    host.style.cssText = 'position:fixed;left:0;top:0;opacity:0;pointer-events:none;';
     document.body.appendChild(host);
   }
   return host;
@@ -159,7 +171,10 @@ export function createHtmlTextSurface(
 
   const div = document.createElement('div');
   div.setAttribute('drawable', '');
-  div.textContent = spec.text;
+  // 富文本用 innerHTML 完整渲染（内容已在 richText 侧清洗成受控子集），
+  // 纯文本走 textContent，避免用户输入的 & / < 被当成标记解析
+  if (spec.html) div.innerHTML = spec.html;
+  else div.textContent = spec.text;
   applyTextStyle(div, spec);
 
   canvas.appendChild(div);

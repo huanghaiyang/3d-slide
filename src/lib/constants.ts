@@ -55,6 +55,8 @@ export const LIMITS = {
   projectBytes: 200 * 1024 * 1024,
   /** 单个文本对象的字符上限。 */
   textChars: 5000,
+  /** 单个文本对象的富文本 HTML 长度上限（含标签，比纯文本宽松）。 */
+  textHtmlChars: 20000,
   /** 作品标题字符上限。 */
   titleChars: 80,
   /** 对象名称字符上限。 */

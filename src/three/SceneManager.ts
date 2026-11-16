@@ -61,7 +61,7 @@ import {
   type LottieBackendInstance,
 } from '../lib/lottieBackends';
 import { sampleBezierPath } from '../lib/curve';
-import { buildTextExtrudeGeometry } from './text3d';
+import { buildTextExtrudeGeometry, buildTextSolidGeometry } from './text3d';
 import { fontCss, layoutText } from '../lib/text';
 import { createHtmlTextSurface, type HtmlTextSurface } from '../lib/htmlInCanvas';
 
@@ -1181,6 +1181,8 @@ export class SceneManager {
       const t = object as TextObject;
       return [
         'text', t.text, t.width, t.height, t.fontSize, t.font, t.bold, t.align, t.color, t.lineHeight, t.depth3d ?? 0,
+        // 3D 效果、HTML 开关与富文本内容都影响渲染结果，必须参与脏检查
+        t.depth3dMode ?? 'raised', t.htmlInCanvas === false ? 'plain' : 'html', t.html ?? '',
       ].join('|');
     }
     if (object.type === 'image' || object.type === 'svg') {
@@ -1469,51 +1471,71 @@ export class SceneManager {
 
   /**
    * 构建文本内容。
-   * depth3d <= 0.5 时用平面贴图；否则用画布 alpha 提取轮廓并挤出成真正的 3D 文字，
-   * 正面仍贴文字纹理，侧壁使用压暗的独立材质；挤出失败时降级为平面。
+   *
+   * 三条分支：
+   * - depth3d <= 0.5：平面贴图；
+   * - depth3dMode = raised（缺省）：凸起闭合实体，封面朝观者、侧壁在封面之后；
+   * - depth3dMode = recessed：早期表现，用 ExtrudeGeometry 挤出后看起来像刻进平面里。
+   * 两条 3D 分支都优先使用凸起路径，几何提取失败时降级为平面，保证对象始终可见。
    */
   private buildText(group: THREE.Group, object: TextObject, node: ObjectNode) {
     const canvas = this.textCanvasFor(object, node);
     // 文字画布纹理由节点独占，随内容重建一起释放
     const texture = this.textureFromCanvas(canvas, node);
+    // 深度限制在 0 ~ 600 世界单位，避免极端参数把文字挤出到画面外
+    const depth = Math.max(0, Math.min(600, object.depth3d ?? 0));
+    // 缺省按凸起处理：早期存档没有这个字段，取新效果更符合「真 3D」的预期
+    const mode = object.depth3dMode === 'recessed' ? 'recessed' : 'raised';
     const frontMaterial = new THREE.MeshBasicMaterial({
       map: texture,
       transparent: true,
       depthWrite: false,
-      side: THREE.DoubleSide,
+      // 闭合实体的两个封面各自朝外，单面渲染即可（观者只会看到最近的一层）；
+      // 凹陷挤出体与平面需要双面，否则从背面看会消失
+      side: mode === 'raised' && depth > 0.5 ? THREE.FrontSide : THREE.DoubleSide,
     });
-    // 深度限制在 0 ~ 600 世界单位，避免极端参数把文字挤出到画面外
-    const depth = Math.max(0, Math.min(600, object.depth3d ?? 0));
+
+    /** 退化路径：贴一张平面，并保证双面可见 */
+    const fallbackPlane = () => {
+      frontMaterial.side = THREE.DoubleSide;
+      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(object.width, object.height), frontMaterial);
+      // 有厚度时把平面放到挤出体的背面，避免看起来整块浮到前面
+      mesh.position.z = depth > 0.5 ? -depth / 2 : 0;
+      group.add(mesh);
+      node.materials.push(frontMaterial);
+    };
+
     if (depth <= 0.5) {
       // 几乎无厚度：直接使用平面贴图，省去轮廓提取开销
+      frontMaterial.side = THREE.DoubleSide;
       const mesh = new THREE.Mesh(new THREE.PlaneGeometry(object.width, object.height), frontMaterial);
       group.add(mesh);
       node.materials.push(frontMaterial);
       return;
     }
-    const geometry = buildTextExtrudeGeometry(canvas, {
-      width: object.width,
-      height: object.height,
-      depth,
-    });
+
+    const geometry =
+      mode === 'raised'
+        ? buildTextSolidGeometry(canvas, { width: object.width, height: object.height, depth })
+        : buildTextExtrudeGeometry(canvas, { width: object.width, height: object.height, depth });
     if (!geometry) {
       // 轮廓提取失败（如全透明文字）时降级为平面，保证对象仍然可见
-      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(object.width, object.height), frontMaterial);
-      mesh.position.z = -depth / 2;
-      group.add(mesh);
-      node.materials.push(frontMaterial);
+      fallbackPlane();
       return;
     }
-    // 侧壁颜色取文字色的 42%，形成自然的明暗对比，避免侧壁比正面更亮
-    const sideColor = new THREE.Color(object.color || '#F3EEE4').multiplyScalar(0.42);
+    // 侧壁颜色取文字色的 42% ~ 55%：凹陷体更暗以强调内部阴影，凸起体稍亮以便受光
+    const sideColor = new THREE.Color(object.color || '#F3EEE4').multiplyScalar(mode === 'raised' ? 0.55 : 0.42);
     const sideMaterial = new THREE.MeshStandardMaterial({
       color: sideColor,
-      roughness: 0.62,
+      roughness: mode === 'raised' ? 0.55 : 0.62,
       metalness: 0.08,
-      side: THREE.DoubleSide,
+      side: mode === 'raised' ? THREE.FrontSide : THREE.DoubleSide,
     });
-    // ExtrudeGeometry 材质分组：0 = 正背文字面（贴文字纹理），1 = 挤出侧壁
-    const mesh = new THREE.Mesh(geometry, [frontMaterial, sideMaterial]);
+    // 几何体材质分组：凸起实体为「0 = 侧壁 / 1 = 封面」，凹陷挤出体为「0 = 封面 / 1 = 侧壁」
+    const mesh =
+      mode === 'raised'
+        ? new THREE.Mesh(geometry, [sideMaterial, frontMaterial])
+        : new THREE.Mesh(geometry, [frontMaterial, sideMaterial]);
     group.add(mesh);
     node.materials.push(frontMaterial, sideMaterial);
   }
@@ -1521,10 +1543,12 @@ export class SceneManager {
   /**
    * 取文本画布。
    *
-   * 支持 HTML-in-Canvas（Chrome 157+ 默认开启，147–156 可通过 flag 打开）时，
-   * 由浏览器排版引擎直接绘制真实 HTML 子树，折行 / 行高 / 字距与编辑器 textarea 完全一致；
+   * 渲染路径由对象的 HTML-in-Canvas 开关决定：
+   * - 开关打开（缺省）且浏览器支持时，由排版引擎直接绘制 drawable 子树：
+   *   普通文本用 textContent，富文本（object.html）用 innerHTML 完整渲染，样式全部保留；
+   * - 开关关闭或浏览器不支持时，走 Canvas 2D 手绘，只按对象的字体 / 字号 / 颜色
+   *   渲染纯文本（object.text），富文本样式不再呈现。
    * 首次 HTML 绘制是异步的，画布先带手绘内容，绘制完成后重建节点让纹理与挤出几何一起更新。
-   * 其余浏览器（Firefox / Safari / 旧版 Chromium）继续走 Canvas 2D 手绘，行为与之前一致。
    */
   private textCanvasFor(object: TextObject, node: ObjectNode): HTMLCanvasElement {
     const key = this.visualKey(object);
@@ -1533,12 +1557,15 @@ export class SceneManager {
     if (cached && cached.key === key) return cached.surface.canvas;
     cached?.surface.dispose();
     node.textSurface = null;
-    // 空文本没有可绘制内容，省掉一次排版与重建
-    if (!object.text.trim()) return this.renderTextCanvas(object);
+    // 空内容没有可绘制像素，省掉一次排版与重建
+    if (!object.text.trim() && !object.html) return this.renderTextCanvas(object);
+    // 开关关闭：明确按纯文本渲染，不进入 HTML-in-Canvas 路径
+    if (object.htmlInCanvas === false) return this.renderTextCanvas(object);
     const size = this.textCanvasSize(object);
     const surface = createHtmlTextSurface(
       {
         text: object.text,
+        html: object.html,
         width: object.width,
         height: object.height,
         fontSize: object.fontSize,

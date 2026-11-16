@@ -34,7 +34,9 @@ import type {
   VideoObject,
 } from '../types';
 import { LIMITS, DEFAULT_HOLD } from '../lib/constants';
+import { htmlInCanvasSupported } from '../lib/htmlInCanvas';
 import { formatDuration } from '../lib/media';
+import { readClipboardRich } from '../lib/richText';
 import { useDeckStore } from '../store/deckStore';
 import { FONT_LABELS, MODEL_FORMAT_LABELS, OBJECT_LABELS, SHAPE_LABELS } from '../types';
 // 图表属性面板由插件提供，核心只负责按对象上的 plugin 字段解析
@@ -218,10 +220,50 @@ function TextFields({ object }: { object: TextObject }) {
           onBlur={() => {
             if (!object.text.trim()) removeObject(object.id);
           }}
+          onPaste={(event) => {
+            // 从剪贴板粘贴 HTML：开关打开时保留样式（转成受控富文本），关闭时退回纯文本
+            if (object.htmlInCanvas === false) return;
+            const rich = readClipboardRich(event.clipboardData);
+            if (!rich) return;
+            event.preventDefault();
+            updateObject(object.id, { text: rich.text.slice(0, LIMITS.textChars), html: rich.html });
+          }}
         />
         <span className="field-hint">
-          {object.text.length}/{LIMITS.textChars} · 高度随行数自动增长
+          {object.text.length}/{LIMITS.textChars} · 高度随行数自动增长 · 支持粘贴富文本
         </span>
+        {object.html && (
+          <div className="prop-row">
+            <span className="field-label">样式</span>
+            <button
+              className="btn btn-light btn-sm"
+              onClick={() => updateObject(object.id, { html: undefined })}
+            >
+              <Icon name="reset" size={14} /> 清除富文本样式
+            </button>
+          </div>
+        )}
+        {object.html && (
+          <span className="field-hint">当前为富文本内容，直接在下方输入或修改会被视为放弃样式（按纯文本保存）。</span>
+        )}
+      </Section>
+      <Section title="HTML in Canvas">
+        <div className="prop-row">
+          <span className="field-label">启用</span>
+          <Switch
+            checked={object.htmlInCanvas !== false}
+            label="HTML in Canvas 渲染"
+            onChange={(checked) => updateObject(object.id, { htmlInCanvas: checked })}
+          />
+        </div>
+        <span className="field-hint">
+          {htmlInCanvasSupported()
+            ? '当前浏览器支持：开启后由排版引擎直接渲染，富文本样式（颜色、字号、粗斜体等）完整生效。'
+            : '当前浏览器不支持 HTML in Canvas：开启也会退回 Canvas 纯文本渲染，建议关闭以获得一致表现。'}
+        </span>
+        {object.html && object.htmlInCanvas !== false && (
+          <span className="field-hint">关闭开关后只渲染纯文本，富文本样式会暂时不显示（内容仍保留）。</span>
+        )}
       </Section>
       <Section title="字体">
         <div className="prop-row">
@@ -300,7 +342,23 @@ function TextFields({ object }: { object: TextObject }) {
           unit="px"
           onChange={(depth3d) => updateObject(object.id, { depth3d }, key('depth3d'))}
         />
-        <span className="field-hint">厚度大于 0 时文字生成实体侧面，配合绕 X / Y 轴倾斜获得立体效果。</span>
+        <div className="prop-row">
+          <span className="field-label">效果</span>
+          <Segmented
+            value={object.depth3dMode ?? 'raised'}
+            ariaLabel="3D 文字效果"
+            options={[
+              { value: 'raised', label: '凸起' },
+              { value: 'recessed', label: '凹陷' },
+            ]}
+            onChange={(depth3dMode) => updateObject(object.id, { depth3dMode })}
+          />
+        </div>
+        <span className="field-hint">
+          {object.depth3dMode === 'recessed'
+            ? '凹陷：字形像被刻进平面，侧壁在字面之前，延续早期表现。'
+            : '凸起：闭合实体，字面朝向观者、侧壁在字面之后，配合绕 X / Y 轴倾斜即为真正的 3D 文字。'}
+        </span>
       </Section>
     </>
   );

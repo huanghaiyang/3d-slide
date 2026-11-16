@@ -43,6 +43,7 @@ import {
 } from './constants';
 import { viewCenterAtZ } from './camera';
 import { layoutText } from './text';
+import { richTextHeight } from './richText';
 import { defaultImageObject } from './validate';
 
 /**
@@ -465,13 +466,20 @@ export function createSvgObject(
 /**
  * 按当前文本内容与排版参数计算对象高度。
  *
+ * 富文本按块内字号倍率逐块折行累加（标题等放大块会自然占更高），
+ * 纯文本退回 text.layoutText 的测量结果。
+ *
  * @param obj   文本对象
  * @param width 可选行宽，默认取对象自身宽度（用于计算换行后的总高度）
  * @returns 排版高度，且不小于 LIMITS.minSize，避免空文本产生零高度
  *
- * 纯计算、无副作用；字体度量依赖 text.layoutText 的测量实现。
+ * 纯计算、无副作用；字体度量依赖 text / richText 的测量实现。
  */
 export function autoTextHeight(obj: TextObject, width = obj.width): number {
+  if (obj.html) {
+    const height = richTextHeight(obj.html, width, obj.fontSize, obj.font, obj.bold, obj.lineHeight);
+    return Math.max(LIMITS.minSize, height);
+  }
   const layout = layoutText(obj.text, width, obj.fontSize, obj.font, obj.bold, obj.lineHeight);
   return Math.max(LIMITS.minSize, layout.height);
 }

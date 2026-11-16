@@ -251,6 +251,7 @@ function addText(args: Record<string, unknown>): AiToolOutcome {
   if (lineHeight !== undefined) patch.lineHeight = lineHeight;
   const depth3d = num(args.depth3d);
   if (depth3d !== undefined) patch.depth3d = depth3d;
+  if (args.depth3dMode === 'raised' || args.depth3dMode === 'recessed') patch.depth3dMode = args.depth3dMode;
   const width = clampSize(args.width);
   if (width !== undefined) patch.width = width;
   useDeckStore.getState().updateObject(id, patch as Partial<TextObject>, `ai-text-${id}`);
@@ -391,7 +392,7 @@ function updateObjects(args: Record<string, unknown>): AiToolOutcome {
   const allowed = [
     'name', 'x', 'y', 'z', 'width', 'height', 'rotation', 'rotationX', 'rotationY',
     'opacity', 'visible', 'text', 'fontSize', 'font', 'bold', 'align', 'color',
-    'lineHeight', 'depth3d', 'fill', 'stroke', 'strokeWidth', 'fit', 'loop',
+    'lineHeight', 'depth3d', 'depth3dMode', 'htmlInCanvas', 'fill', 'stroke', 'strokeWidth', 'fit', 'loop',
     'volume', 'muted', 'speed', 'autoRotate', 'rotateSpeed',
   ];
   const patch: Record<string, unknown> = {};
@@ -766,6 +767,11 @@ export const AI_TOOLS: AiToolDef[] = [
           color: { type: 'string', description: '十六进制颜色，例如 #F3EEE4' },
           lineHeight: { type: 'number', description: '行高倍率 0.8–3' },
           depth3d: { type: 'number', description: '3D 挤出厚度，0 表示平面文字' },
+          depth3dMode: {
+            type: 'string',
+            enum: ['raised', 'recessed'],
+            description: '3D 效果：raised 凸起闭合（默认），recessed 凹陷刻入',
+          },
           ...commonProps,
         },
         required: ['text'],
@@ -824,7 +830,7 @@ export const AI_TOOLS: AiToolDef[] = [
           ids: { type: 'array', items: { type: 'string' }, description: '对象 id 列表' },
           patch: {
             type: 'object',
-            description: '要修改的字段；可用 name/x/y/z/width/height/rotation/rotationX/rotationY/opacity/visible/text/fontSize/font/bold/align/color/lineHeight/depth3d/fill/stroke/strokeWidth/fit/loop/volume/muted/speed/autoRotate/rotateSpeed',
+            description: '要修改的字段；可用 name/x/y/z/width/height/rotation/rotationX/rotationY/opacity/visible/text/fontSize/font/bold/align/color/lineHeight/depth3d/depth3dMode/htmlInCanvas/fill/stroke/strokeWidth/fit/loop/volume/muted/speed/autoRotate/rotateSpeed',
             properties: {
               x: { type: 'number' },
               y: { type: 'number' },
@@ -839,6 +845,9 @@ export const AI_TOOLS: AiToolDef[] = [
               text: { type: 'string' },
               fontSize: { type: 'number' },
               color: { type: 'string' },
+              depth3d: { type: 'number' },
+              depth3dMode: { type: 'string', enum: ['raised', 'recessed'] },
+              htmlInCanvas: { type: 'boolean' },
               fill: { type: 'string' },
               stroke: { type: 'string' },
               strokeWidth: { type: 'number' },

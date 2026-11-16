@@ -34,6 +34,7 @@ import { formatBytes, isAcceptedImage, readImageFile } from '../lib/image';
 import { isLottieFile, readLottieFile, renderLottieThumbnail } from '../lib/lottie';
 import { mediaKindOf, readMediaFile } from '../lib/media';
 import { isModelFile, modelFormatOf, MODEL_ACCEPT } from '../lib/model3d';
+import { readClipboardText } from '../lib/richText';
 import { isSvgFile, readSvgFile } from '../lib/svg';
 import { flushDeckSave, useDeckStore } from '../store/deckStore';
 import { listChartPlugins } from '../plugins';
@@ -232,6 +233,38 @@ export function Editor({ deckId, onBack }: EditorProps) {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  /**
+   * 画布级粘贴：焦点不在输入控件上时，用剪贴板内容新建一个文本对象。
+   *
+   * 富文本（带样式或分段）保留 HTML 交给富文本渲染路径；纯文本则按普通文本对象创建。
+   * 图片等文件粘贴不处理，交由拖放 / 上传流程。
+   */
+  useEffect(() => {
+    const onPaste = (event: ClipboardEvent) => {
+      if (modalOpenRef.current) return;
+      const target = event.target as HTMLElement | null;
+      // 输入框、文本域、contentEditable（原地编辑中的文本）自己处理粘贴，避免重复建对象
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      const state = useDeckStore.getState();
+      if (state.readonly || !state.deck) return;
+      const payload = readClipboardText(event.clipboardData);
+      if (!payload) return;
+      event.preventDefault();
+      const id = state.addRichText({ text: payload.text, html: payload.html, width: payload.html ? 900 : 760 });
+      if (!id) toast('无法新建文本：已达到对象上限或作品只读', 'error');
+    };
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
   }, []);
 
   /** 返回首页：先尝试正常关闭（内部会先落盘），保存失败则弹出「是否仍要离开」。 */
@@ -742,9 +775,10 @@ export function Editor({ deckId, onBack }: EditorProps) {
               const id = useDeckStore.getState().addPath(points, box, strokeWidth);
               if (!id) toast('路径点太少，无法生成图形', 'error');
             }}
-            onTextCommit={(id, text) => {
-              if (!text.trim()) useDeckStore.getState().removeObject(id);
-              else useDeckStore.getState().updateObject(id, { text });
+            onTextCommit={(id, text, html) => {
+              if (!text.trim() && !html) useDeckStore.getState().removeObject(id);
+              // 富文本提交带 html（已清洗）重新写回，纯文本提交只带 text，由 store 丢弃旧样式
+              else useDeckStore.getState().updateObject(id, html ? { text, html } : { text });
             }}
           />
         </main>

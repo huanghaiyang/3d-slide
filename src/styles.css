@@ -1867,6 +1867,21 @@ button:disabled {
   caret-color: var(--teal-2);
 }
 
+/**
+ * 富文本原地编辑层（contentEditable）。
+ * 与 textarea 共用定位与外观，纵向可滚动；字体 / 颜色 / 对齐由组件内联 style 给出，
+ * 与画布上的渲染保持一致，块内的 div / span 样式由清洗逻辑自带，这里不覆盖。
+ */
+.text-editor-rich {
+  padding-left: 0;
+  padding-right: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  word-break: break-word;
+  overflow-wrap: break-word;
+  cursor: text;
+}
+
 /* -------------------------------- Right bar ---------------------------- */
 
 .rightbar {
