@@ -63,6 +63,7 @@ import {
 import { sampleBezierPath } from '../lib/curve';
 import { buildTextExtrudeGeometry } from './text3d';
 import { fontCss, layoutText } from '../lib/text';
+import { createHtmlTextSurface, type HtmlTextSurface } from '../lib/htmlInCanvas';
 
 /**
  * 图表离屏渲染分辨率。
@@ -269,6 +270,11 @@ interface ObjectNode {
   lottie: LottieRuntime | null;
   /** 图表运行时 */
   chart: ChartRuntime | null;
+  /**
+   * 文本的 HTML-in-Canvas 画布缓存；key 为 visualKey，内容变化时整体替换。
+   * 缓存在节点上而不是每次重建，首次 HTML 绘制完成后的重建才能直接命中已绘制画布。
+   */
+  textSurface: { key: string; surface: HtmlTextSurface } | null;
   /** 最近一次同步过来的对象数据快照（store 数据的只读投影） */
   data: SlideObject;
   /** 对象 id，与 nodes 的键保持一致 */
@@ -1269,6 +1275,7 @@ export class SceneManager {
       model: null,
       lottie: null,
       chart: null,
+      textSurface: null,
       data: object,
       objectId: object.id,
       pickRoot: null,
@@ -1466,7 +1473,7 @@ export class SceneManager {
    * 正面仍贴文字纹理，侧壁使用压暗的独立材质；挤出失败时降级为平面。
    */
   private buildText(group: THREE.Group, object: TextObject, node: ObjectNode) {
-    const canvas = this.renderTextCanvas(object);
+    const canvas = this.textCanvasFor(object, node);
     // 文字画布纹理由节点独占，随内容重建一起释放
     const texture = this.textureFromCanvas(canvas, node);
     const frontMaterial = new THREE.MeshBasicMaterial({
@@ -1512,21 +1519,98 @@ export class SceneManager {
   }
 
   /**
-   * 把文字渲染到离屏画布，作为文字纹理来源。
-   * 渲染密度最高 2 倍，并限制画布单边不超过 4096 像素，兼顾清晰度与显存。
+   * 取文本画布。
+   *
+   * 支持 HTML-in-Canvas（Chrome 157+ 默认开启，147–156 可通过 flag 打开）时，
+   * 由浏览器排版引擎直接绘制真实 HTML 子树，折行 / 行高 / 字距与编辑器 textarea 完全一致；
+   * 首次 HTML 绘制是异步的，画布先带手绘内容，绘制完成后重建节点让纹理与挤出几何一起更新。
+   * 其余浏览器（Firefox / Safari / 旧版 Chromium）继续走 Canvas 2D 手绘，行为与之前一致。
    */
-  private renderTextCanvas(object: TextObject): HTMLCanvasElement {
+  private textCanvasFor(object: TextObject, node: ObjectNode): HTMLCanvasElement {
+    const key = this.visualKey(object);
+    const cached = node.textSurface;
+    // 同一份内容复用已绘制画布；首次 HTML 绘制完成后的重建也走这里命中缓存
+    if (cached && cached.key === key) return cached.surface.canvas;
+    cached?.surface.dispose();
+    node.textSurface = null;
+    // 空文本没有可绘制内容，省掉一次排版与重建
+    if (!object.text.trim()) return this.renderTextCanvas(object);
+    const size = this.textCanvasSize(object);
+    const surface = createHtmlTextSurface(
+      {
+        text: object.text,
+        width: object.width,
+        height: object.height,
+        fontSize: object.fontSize,
+        font: object.font,
+        bold: object.bold,
+        align: object.align,
+        color: object.color,
+        lineHeight: object.lineHeight,
+        density: size.density,
+      },
+      (canvas) => this.paintTextCanvas(canvas, object),
+      () => this.onTextSurfacePainted(object, node, key),
+    );
+    if (!surface) return this.renderTextCanvas(object);
+    node.textSurface = { key, surface };
+    return surface.canvas;
+  }
+
+  /**
+   * HTML 文本画布首次绘制完成后的收尾。
+   *
+   * 纹理与挤出轮廓都取自画布像素，所以重建一次节点内容即可同时刷新两者；
+   * 重建时 visualKey 未变，会直接命中已绘制画布，不会再次触发异步绘制。
+   * 期间对象被删除或内容已变化时直接放弃。
+   */
+  private onTextSurfacePainted(object: TextObject, node: ObjectNode, key: string) {
+    if (this.disposed) return;
+    if (this.nodes.get(object.id) !== node) return;
+    if (node.textSurface?.key !== key) return;
+    if (this.visualKey(node.data) !== key) return;
+    this.rebuildContent(node);
+  }
+
+  /** 文本画布的像素尺寸与密度：最高 2 倍，并限制单边不超过 4096 像素 */
+  private textCanvasSize(object: TextObject): { width: number; height: number; density: number } {
     const density = Math.min(
       2,
       4096 / Math.max(1, object.width),
       4096 / Math.max(1, object.height),
     );
-    const canvasWidth = Math.max(1, Math.round(object.width * density));
-    const canvasHeight = Math.max(1, Math.round(object.height * density));
+    return {
+      width: Math.max(1, Math.round(object.width * density)),
+      height: Math.max(1, Math.round(object.height * density)),
+      density,
+    };
+  }
+
+  /**
+   * 把文字渲染到新建的离屏画布，作为文字纹理来源（不支持 HTML-in-Canvas 时的路径）。
+   */
+  private renderTextCanvas(object: TextObject): HTMLCanvasElement {
+    const size = this.textCanvasSize(object);
     const canvas = document.createElement('canvas');
-    canvas.width = canvasWidth;
-    canvas.height = canvasHeight;
-    const ctx = canvas.getContext('2d')!;
+    canvas.width = size.width;
+    canvas.height = size.height;
+    this.paintTextCanvas(canvas, object);
+    return canvas;
+  }
+
+  /**
+   * 用 Canvas 2D 手绘文字。
+   *
+   * 既是无 HTML-in-Canvas 时的正式路径，也是 HTML 绘制完成前的占位内容：
+   * 挤出轮廓需要立刻读到像素，因此不能等异步绘制。
+   * 画布尺寸决定像素密度，字号与留白按同一密度放大，排版结果与逻辑像素一致。
+   */
+  private paintTextCanvas(canvas: HTMLCanvasElement, object: TextObject) {
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const density = canvas.width / Math.max(1, object.width);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
     const layout = layoutText(object.text, object.width, object.fontSize, object.font, object.bold, object.lineHeight);
     const fontPx = object.fontSize * density;
     ctx.font = fontCss(object.font, object.fontSize, object.bold, density);
@@ -1535,11 +1619,10 @@ export class SceneManager {
     const lineHeightPx = fontPx * object.lineHeight;
     const paddingTop = fontPx * 0.3;
     ctx.textAlign = object.align === 'center' ? 'center' : object.align === 'right' ? 'right' : 'left';
-    const x = object.align === 'center' ? canvasWidth / 2 : object.align === 'right' ? canvasWidth : 0;
+    const x = object.align === 'center' ? canvas.width / 2 : object.align === 'right' ? canvas.width : 0;
     layout.lines.forEach((line, index) => {
       ctx.fillText(line, x, paddingTop + fontPx * 0.8 + index * lineHeightPx);
     });
-    return canvas;
   }
 
   /** 把画布包装为 CanvasTexture，并登记到节点独占纹理列表，随内容重建释放 */
@@ -3030,6 +3113,10 @@ export class SceneManager {
     this.disposeModel(node);
     this.disposeLottie(node);
     this.disposeChart(node);
+    if (node.textSurface) {
+      node.textSurface.surface.dispose();
+      node.textSurface = null;
+    }
     if (node.svgTexture) {
       node.svgTexture.dispose();
       node.svgTexture = null;
