@@ -17,6 +17,7 @@ import type { AnimationConfigWithData, AnimationItem } from 'lottie-web';
 import { LIMITS } from './constants';
 import { formatBytes } from './image';
 import { bakeLottieExpressions, hasLottieExpressions, type BakeReport } from './lottieExpressions';
+import { expandLottieText, type TextReport } from './lottieText';
 
 /**
  * 按文件名扩展名判断是否为 Lottie 文件。
@@ -131,8 +132,35 @@ export function parseLottieSource(src: string): LottieDocument | null {
  * 条数取小值：Lottie 文档本身可能带上内联图片，缓存过多会明显抬高内存。
  */
 const RENDER_CACHE_LIMIT = 3;
-/** src -> 解析结果与烘焙报告；报告只用于面板提示，可与文档一起缓存 */
-const renderDocumentCache = new Map<string, { document: LottieDocument; report: BakeReport | null }>();
+
+/** 一份参与渲染的解析结果。 */
+interface RenderEntry {
+  /** 原始 src，供报告查询按来源匹配（缓存 key 还带着后端类型） */
+  src: string;
+  document: LottieDocument;
+  report: BakeReport | null;
+  text: TextReport | null;
+  /** 是否按 GPU 后端口径展开过文本图层 */
+  expandText: boolean;
+}
+
+/** `后端类型 + src` -> 解析结果；同一个动画在 canvas / GPU 下得到的数据不同 */
+const renderDocumentCache = new Map<string, RenderEntry>();
+
+/** 生成缓存 key：canvas 保留原生文本，GPU 展开成形状。 */
+function renderCacheKey(src: string, expandText: boolean): string {
+  return `${expandText ? 'gpu' : 'canvas'}\u0000${src}`;
+}
+
+/** 按来源 src 找最近一次解析结果（优先 GPU 口径）。 */
+function findRenderEntry(src: string): RenderEntry | null {
+  let match: RenderEntry | null = null;
+  for (const entry of renderDocumentCache.values()) {
+    if (entry.src !== src) continue;
+    if (!match || (!match.expandText && entry.expandText)) match = entry;
+  }
+  return match;
+}
 
 /**
  * 读取某份 Lottie 的表达式烘焙报告。
@@ -141,7 +169,27 @@ const renderDocumentCache = new Map<string, { document: LottieDocument; report: 
  * 面板打开时通常已经存在。返回 null 表示这份动画还没被渲染过。
  */
 export function lottieBakeReport(src: string): BakeReport | null {
-  return renderDocumentCache.get(src)?.report ?? null;
+  return findRenderEntry(src)?.report ?? null;
+}
+
+/**
+ * 读取某份 Lottie 的文本展开报告（字形解析成形状图层的结果）。
+ *
+ * 与烘焙报告一样只查缓存；未渲染过时返回 null。
+ */
+export function lottieTextReport(src: string): TextReport | null {
+  return findRenderEntry(src)?.text ?? null;
+}
+
+/** 解析选项。 */
+export interface LottieRenderOptions {
+  /**
+   * 是否把文本图层展开成形状图层。
+   *
+   * GPU 后端没有文本能力，必须展开；canvas 后端由 lottie-web 原生渲染文本，
+   * 展开会改变字体来源（换成开源字体）并丢掉文本动画，因此默认不展开。
+   */
+  expandText?: boolean;
 }
 
 /**
@@ -156,15 +204,19 @@ export function lottieBakeReport(src: string): BakeReport | null {
  * 宁可少一条 GPU 路径，也不把可能算错的动画静默渲染出来。
  *
  * @param src data URL 或 JSON 文本
+ * @param options.expandText 是否展开文本图层（GPU 后端传 true）
  * @returns 烘焙后的文档（无可烘焙表达式时等同原文档）；解析失败返回 null
  */
-export function parseLottieForRender(src: string): LottieDocument | null {
-  const cached = renderDocumentCache.get(src);
+export function parseLottieForRender(src: string, options: LottieRenderOptions = {}): LottieDocument | null {
+  const expandText = options.expandText ?? true;
+  const key = renderCacheKey(src, expandText);
+  const cached = renderDocumentCache.get(key);
   if (cached) return cached.document;
   const document = parseLottieSource(src);
   if (!document) return null;
   let resolved = document;
   let report: BakeReport | null = null;
+  let text: TextReport | null = null;
   try {
     report = bakeLottieExpressions(document);
     if (report.changed && report.skipped === 0 && !hasLottieExpressions(report.document)) {
@@ -174,7 +226,18 @@ export function parseLottieForRender(src: string): LottieDocument | null {
     // 烘焙属于增强能力，异常不应阻止动画本身打开
     console.warn('Lottie 表达式烘焙失败，回退到原始数据', error);
   }
-  renderDocumentCache.set(src, { document: resolved, report });
+  if (expandText) {
+    try {
+      // 字体必须已由 prepareLottieFonts 预取进内存缓存；缺失时该图层保持 ty=5，
+      // 由 GPU 后端显式报错回退 canvas，不在这里硬改数据
+      text = expandLottieText(resolved);
+      if (text.changed) resolved = text.document;
+      if (text.skipped > 0) console.info('Lottie 文本图层跳过：', text.messages);
+    } catch (error) {
+      console.warn('Lottie 文本图层展开失败，保留原始图层', error);
+    }
+  }
+  renderDocumentCache.set(key, { src, document: resolved, report, text, expandText });
   if (renderDocumentCache.size > RENDER_CACHE_LIMIT) {
     const oldest = renderDocumentCache.keys().next().value;
     if (oldest) renderDocumentCache.delete(oldest);

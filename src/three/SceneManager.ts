@@ -54,6 +54,7 @@ import type { ChartHandle, ChartRenderer } from '../lib/chartRenderer';
 import { cameraPosition, clampPitch, lerpView } from '../lib/camera';
 import { disposeObject3D, loadModelGroup } from '../lib/model3d';
 import { parseLottieForRender, parseLottieSource } from '../lib/lottie';
+import { prepareLottieFonts } from '../lib/lottieText';
 import {
   LOTTIE_BACKEND_CANVAS,
   resolveLottieBackend,
@@ -2855,7 +2856,36 @@ export class SceneManager {
     // 三个后端统一走烘焙后的数据：lottie-web 开源版没有表达式引擎，
     // 喂原始数据时带 x 的动画在 canvas 后端会直接渲染不出来；
     // 烘焙成关键帧后 canvas 与 GPU 后端看到同一份数据，画面也一致。
-    const data = parseLottieForRender(object.src);
+    // 文本图层需要先下载字体（异步），因此解析放到 bootstrapLottie 里。
+    void this.bootstrapLottie(node, runtime, object, backend);
+  }
+
+  /**
+   * 预取文本字体后解析数据并启动后端。
+   *
+   * 字体下载失败只是让文本图层保持 ty=5（GPU 后端会显式报错回退 canvas），
+   * 不应阻塞动画本身的显示；期间若该对象被替换或销毁，直接放弃本次启动。
+   */
+  private async bootstrapLottie(
+    node: ObjectNode,
+    runtime: LottieRuntime,
+    object: LottieObject,
+    backend: LottieBackend,
+  ) {
+    // 两个后端都走「字形展开」：lottie-web 在字体不可用时会直接把文本画成空白，
+    // 而展开后的形状层两个后端都能渲染，画面也完全一致。
+    // 没有文本图层的动画不会发起任何字体请求，这里几乎不产生额外等待。
+    try {
+      const source = parseLottieSource(object.src);
+      if (source) {
+        const fonts = await prepareLottieFonts(source);
+        if (fonts.length) console.info('Lottie 文本字体：', fonts);
+      }
+    } catch (error) {
+      console.warn('Lottie 文本字体预取失败', error);
+    }
+    if (node.lottie !== runtime) return;
+    const data = parseLottieForRender(object.src, { expandText: true });
     runtime.data = data;
     if (!data) {
       runtime.status = 'error';
