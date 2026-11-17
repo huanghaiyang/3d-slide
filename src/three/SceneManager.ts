@@ -2852,10 +2852,10 @@ export class SceneManager {
       lastFrame: -1,
     };
     node.lottie = runtime;
-    // 表达式烘焙只服务于没有 JS 引擎的 GPU 后端：
-    // canvas 后端自带 lottie-web 表达式引擎，保持喂原始数据，避免烘焙插值改变既有画面。
-    const data =
-      backend.id === LOTTIE_BACKEND_CANVAS ? parseLottieSource(object.src) : parseLottieForRender(object.src);
+    // 三个后端统一走烘焙后的数据：lottie-web 开源版没有表达式引擎，
+    // 喂原始数据时带 x 的动画在 canvas 后端会直接渲染不出来；
+    // 烘焙成关键帧后 canvas 与 GPU 后端看到同一份数据，画面也一致。
+    const data = parseLottieForRender(object.src);
     runtime.data = data;
     if (!data) {
       runtime.status = 'error';

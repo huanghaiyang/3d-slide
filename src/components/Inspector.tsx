@@ -1315,7 +1315,8 @@ function LottieFields({
   const backends = listLottieBackends();
   const activeBackend = object.renderer ?? LOTTIE_BACKEND_CANVAS;
   const activeHint = backends.find((backend) => backend.id === activeBackend)?.hint ?? '';
-  // 表达式烘焙状态：GPU 后端没有 JS 引擎，只有「全部烘焙成功」的动画才能留在 GPU 管线
+  // 表达式烘焙状态：三个后端共用同一份烘焙结果，
+  // 只有「全部烘焙成功」的动画才会替换原文档留在 GPU 管线，否则整份交回 canvas 后端
   const bakeReport = lottieBakeReport(object.src);
   const bakeDone = Boolean(bakeReport && bakeReport.changed && bakeReport.skipped === 0);
   const bakePartial = Boolean(bakeReport && bakeReport.skipped > 0);
@@ -1380,12 +1381,12 @@ function LottieFields({
         <span className="field-hint">{activeHint}</span>
         {bakeDone && (
           <span className="field-hint">
-            GPU 后端就绪：{bakeReport?.baked} 个 After Effects 表达式属性已逐帧烘焙为关键帧。
+            表达式已就绪：{bakeReport?.baked} 个 After Effects 表达式属性已逐帧烘焙为关键帧，canvas 与 GPU 后端共用同一份数据。
           </span>
         )}
         {bakePartial && (
           <span className="field-hint">
-            GPU 后端会回退到 canvas：{bakeReport?.skipped} 个表达式属性无法烘焙
+            无法完整烘焙：{bakeReport?.skipped} 个表达式属性保持原样，该动画会回退到 canvas 后端渲染
             {bakeReport?.messages[0] ? `（${bakeReport.messages[0]}）` : ''}。
           </span>
         )}
