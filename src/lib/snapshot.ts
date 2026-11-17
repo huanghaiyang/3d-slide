@@ -86,6 +86,9 @@ function objectSnapshot(object: SlideObject, includeText: boolean): Record<strin
     rotationY: object.rotationY ?? 0,
     opacity: object.opacity,
     visible: object.visible,
+    // 锁定与编组是编辑态信息，AI 需要知道哪些对象不能动、哪些是同一组
+    locked: Boolean(object.locked),
+    group: object.group ?? null,
   };
   switch (object.type) {
     case 'text':
@@ -102,6 +105,29 @@ function objectSnapshot(object: SlideObject, includeText: boolean): Record<strin
         // 富文本只暴露「有没有样式」，内容本身同样受 includeText 策略保护
         rich: Boolean(object.html),
         htmlInCanvas: object.htmlInCanvas !== false,
+        // 排版与装饰摘要：让 AI 能读到当前效果，改字段时不会互相覆盖
+        typography: {
+          italic: Boolean(object.italic),
+          underline: Boolean(object.underline),
+          letterSpacing: object.letterSpacing ?? 0,
+          paragraphSpacing: object.paragraphSpacing ?? 0,
+          indent: object.indent ?? 0,
+          writingMode: object.writingMode ?? 'horizontal',
+          listType: object.listType ?? 'none',
+          listLevel: object.listLevel ?? 0,
+          padding: object.padding ?? 0,
+          autoFit: Boolean(object.autoFit),
+        },
+        decoration: {
+          outline: object.outlineColor ? `${object.outlineWidth ?? 0}px ${object.outlineColor}` : null,
+          shadow: object.shadowColor
+            ? `${object.shadowX ?? 0},${object.shadowY ?? 0},${object.shadowBlur ?? 0} ${object.shadowColor}`
+            : null,
+          gradient: object.gradientFrom && object.gradientTo
+            ? `${object.gradientAngle ?? 90}deg ${object.gradientFrom}→${object.gradientTo}`
+            : null,
+          background: object.background ?? null,
+        },
       };
     case 'shape':
       return {
@@ -120,6 +146,29 @@ function objectSnapshot(object: SlideObject, includeText: boolean): Record<strin
         naturalWidth: object.naturalWidth,
         naturalHeight: object.naturalHeight,
         src: '[资源内容已脱敏]',
+        // 图片效果摘要：裁剪 / 蒙版 / 调色 / 边框投影 / 变形
+        imageEffects:
+          object.type === 'image'
+            ? {
+                crop: object.crop ?? null,
+                mask: object.mask ?? 'none',
+                cornerRadius: object.cornerRadius ?? 0,
+                filters: {
+                  brightness: object.brightness ?? 0,
+                  contrast: object.contrast ?? 0,
+                  saturation: object.saturation ?? 0,
+                  grayscale: object.grayscale ?? 0,
+                  blur: object.blur ?? 0,
+                },
+                border: object.borderColor ? `${object.borderWidth ?? 0}px ${object.borderColor}` : null,
+                shadow: object.shadowColor
+                  ? `${object.shadowX ?? 0},${object.shadowY ?? 0},${object.shadowBlur ?? 0} ${object.shadowColor}`
+                  : null,
+                flipX: Boolean(object.flipX),
+                flipY: Boolean(object.flipY),
+                perspective: object.perspective ?? null,
+              }
+            : null,
       };
     case 'video':
       return {

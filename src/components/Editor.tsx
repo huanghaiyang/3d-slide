@@ -120,6 +120,8 @@ export function Editor({ deckId, onBack }: EditorProps) {
   // 避免每次开关弹窗都重新绑定 keydown 监听。
   const modalOpenRef = useRef(modalOpen);
   modalOpenRef.current = modalOpen;
+  // Ctrl+V 已经按「对象粘贴」处理时，紧随其后的 paste 事件不应再新建文本对象
+  const objectPasteHandledRef = useRef(false);
 
   /**
    * 读取当前舞台取景。
@@ -219,16 +221,74 @@ export function Editor({ deckId, onBack }: EditorProps) {
         state.selectObjects(state.deck?.objects.map((object) => object.id) ?? []);
         return;
       }
+      // 复制 / 粘贴：走内部对象剪贴板（图片、模型等素材对象无法用系统剪贴板传递）
+      if (mod && event.key.toLowerCase() === 'c' && !event.shiftKey) {
+        const ids = state.selectedIds.length > 0 ? state.selectedIds : state.selectedObjectId ? [state.selectedObjectId] : [];
+        if (ids.length > 0) {
+          event.preventDefault();
+          state.copyObjects(ids);
+          toast(`已复制 ${ids.length} 个对象`, 'success');
+        }
+        return;
+      }
+      if (mod && event.key.toLowerCase() === 'v' && !event.shiftKey) {
+        // 内部剪贴板有内容时粘贴对象；否则交给画布级粘贴处理文本
+        if (state.hasObjectClipboard()) {
+          event.preventDefault();
+          const ids = state.pasteClipboard();
+          if (ids.length === 0) toast('无法粘贴：已达到对象上限或作品只读', 'error');
+          else objectPasteHandledRef.current = true;
+        }
+        return;
+      }
+      // 再制：原地偏移复制，不改变内部剪贴板
+      if (mod && event.key.toLowerCase() === 'd') {
+        event.preventDefault();
+        const ids = state.selectedIds.length > 0 ? state.selectedIds : state.selectedObjectId ? [state.selectedObjectId] : [];
+        if (ids.length > 0) state.duplicateObjects(ids);
+        return;
+      }
+      // 编组 / 解组：Ctrl+G 智能切换（选中对象已同属一组时解组，否则编组），Ctrl+Shift+G 强制解组
+      if (mod && event.key.toLowerCase() === 'g') {
+        event.preventDefault();
+        const ids = state.selectedIds.length > 0 ? state.selectedIds : state.selectedObjectId ? [state.selectedObjectId] : [];
+        if (ids.length === 0) return;
+        const picked = (state.deck?.objects ?? []).filter((object) => ids.includes(object.id));
+        const groupId = picked[0]?.group;
+        const sameGroup = Boolean(groupId) && picked.every((object) => object.group === groupId);
+        if (event.shiftKey || sameGroup) state.ungroupObjects(ids);
+        else if (state.groupObjects(ids) === null) toast('编组至少需要两个对象', 'error');
+        return;
+      }
+      // 方向键微调：Shift 加速 10 倍；锁定对象不响应
+      if (event.key.startsWith('Arrow')) {
+        const ids = (state.selectedIds.length > 0 ? state.selectedIds : state.selectedObjectId ? [state.selectedObjectId] : [])
+          .filter((id) => state.deck?.objects.find((object) => object.id === id && !object.locked));
+        if (ids.length === 0) return;
+        event.preventDefault();
+        const step = event.shiftKey ? 10 : 1;
+        const dx = event.key === 'ArrowLeft' ? -step : event.key === 'ArrowRight' ? step : 0;
+        const dy = event.key === 'ArrowUp' ? -step : event.key === 'ArrowDown' ? step : 0;
+        state.nudgeObjects(ids, dx, dy);
+        return;
+      }
       // F：让相机聚焦到当前主选中对象
       if ((event.key === 'f' || event.key === 'F') && state.selectedObjectId) {
         event.preventDefault();
         state.requestFocus(state.selectedObjectId);
         return;
       }
-      // Esc：取消对象选择（帧的选中状态由 selectObject 一并清空）
-      if (event.key === 'Escape' && state.selectedObjectId) {
-        event.preventDefault();
-        state.selectObject(null);
+      // Esc：先退出裁剪 / 四角变形浮层，再取消对象选择
+      if (event.key === 'Escape') {
+        if (state.objectEditMode !== 'none') {
+          event.preventDefault();
+          state.setObjectEditMode('none');
+          return;
+        }
+        if (state.selectedObjectId) {
+          event.preventDefault();
+          state.selectObject(null);
+        }
       }
     };
     window.addEventListener('keydown', onKey);
@@ -257,6 +317,11 @@ export function Editor({ deckId, onBack }: EditorProps) {
       }
       const state = useDeckStore.getState();
       if (state.readonly || !state.deck) return;
+      // 本次 Ctrl+V 已按对象粘贴处理：跳过紧随其后的 paste 事件，避免多建一个文本对象
+      if (objectPasteHandledRef.current) {
+        objectPasteHandledRef.current = false;
+        return;
+      }
       const payload = readClipboardText(event.clipboardData);
       if (!payload) return;
       event.preventDefault();
@@ -739,6 +804,7 @@ export function Editor({ deckId, onBack }: EditorProps) {
           }}
           onRangeSelect={(ids) => useDeckStore.getState().selectObjects(ids)}
           onToggleVisible={(id, visible) => useDeckStore.getState().updateObject(id, { visible })}
+          onToggleLock={(id) => useDeckStore.getState().toggleLock([id])}
           onReorder={(source, target) => useDeckStore.getState().moveObjectLayer(source, target)}
           onAddText={() => useDeckStore.getState().addText()}
           onAddImage={() => pickImage()}

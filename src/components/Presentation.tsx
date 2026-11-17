@@ -184,7 +184,9 @@ export function Presentation({ deck, startIndex, entryView, fullscreenFailed, on
     }
     const frame = frames[target];
     setIndex(target);
-    void flyTo(frame.view, frame.duration);
+    // 翻页结束后重播图表动画：与 PPT 的「图表动画随页出现」一致，
+    // 观众在新一页稳定下来时看到布局展开与节点淡入，而不是一张早已画完的静止图。
+    void flyTo(frame.view, frame.duration).then(() => stageRef.current?.replayCharts());
   };
 
   /**
@@ -203,7 +205,8 @@ export function Presentation({ deck, startIndex, entryView, fullscreenFailed, on
     if (indexRef.current < 0 || indexRef.current >= deck.frames.length - 1) {
       const first = deck.frames[0];
       setIndex(0);
-      void flyTo(first.view, first.duration);
+      // 自动播放回到首帧同样算一次翻页，图表动画跟着重播
+      void flyTo(first.view, first.duration).then(() => stageRef.current?.replayCharts());
     }
     setPlaying(true);
   };
@@ -413,7 +416,9 @@ export function Presentation({ deck, startIndex, entryView, fullscreenFailed, on
 
   useEffect(() => {
     const first = deck.frames[startIndex]?.view ?? entryView;
-    void stageRef.current?.flyTo(first, 0.01);
+    // 首帧定位后重播一次图表动画：演示舞台是新建的，图表可能已经挂载完成并播完了
+    // 入场动画（甚至根本没赶上画面显示），这里补上，保证一进演示图表就是「活」的
+    void stageRef.current?.flyTo(first, 0.01).then(() => stageRef.current?.replayCharts());
     // 初始取景已由 Stage 的 initialView 提供，这里只做尺寸变化时的兜底
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

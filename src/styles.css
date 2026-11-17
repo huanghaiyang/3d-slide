@@ -5248,3 +5248,104 @@ button:disabled {
 
 
 
+
+
+/* ==================== 画布辅助浮层（吸附参考线 / 裁剪 / 四角变形） ==================== */
+
+/* 吸附参考线：1px 实线 + 高亮色，pointer-events:none 避免挡住画布交互 */
+.stage-guide {
+  position: absolute;
+  background: #ff5c8a;
+  box-shadow: 0 0 0 1px rgba(255, 92, 138, 0.35);
+  pointer-events: none;
+  z-index: 20;
+}
+
+/* 裁剪浮层：整层不接管指针，只有取景框与把手可交互 */
+.crop-overlay,
+.perspective-overlay {
+  position: absolute;
+  pointer-events: none;
+  z-index: 21;
+}
+
+.crop-frame {
+  position: absolute;
+  border: 1px solid rgba(255, 255, 255, 0.9);
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.45);
+  pointer-events: auto;
+  cursor: move;
+  touch-action: none;
+}
+
+.crop-grid {
+  position: absolute;
+  pointer-events: none;
+}
+
+.crop-grid span {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgba(255, 255, 255, 0.35);
+}
+
+.crop-grid span.is-h {
+  top: auto;
+  left: 0;
+  right: 0;
+  width: auto;
+  height: 1px;
+}
+
+.crop-handle,
+.perspective-handle {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.5);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.perspective-handle {
+  background: #ffd166;
+}
+
+.perspective-lines {
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: visible;
+}
+
+.perspective-lines polyline {
+  fill: none;
+  stroke: rgba(255, 209, 102, 0.85);
+  stroke-width: 1.5;
+}
+/* 内容列表的锁定按钮：与眼睛按钮同尺寸，锁定状态高亮 */
+.obj-lock {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  color: var(--text-dim, #8b94a5);
+  cursor: pointer;
+  flex: none;
+}
+
+.obj-lock:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text, #e8ecf3);
+}
+
+.obj-lock.is-locked {
+  color: #ffb454;
+}

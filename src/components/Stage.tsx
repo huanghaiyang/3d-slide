@@ -31,7 +31,7 @@ import {
   type DragEvent as ReactDragEvent,
   type MouseEvent as ReactMouseEvent,
 } from 'react';
-import type { CameraRequest, Deck, ShapeKind, TextObject, ViewState } from '../types';
+import type { CameraRequest, Deck, ImageCrop, ImageObject, ShapeKind, TextObject, ViewState } from '../types';
 import { ASPECT, DEFAULT_VIEW, FONT_STACKS } from '../lib/constants';
 import { fitDistance, formatZoom } from '../lib/camera';
 import { nextDepth } from '../lib/deck';
@@ -40,6 +40,7 @@ import { htmlInCanvasSupported } from '../lib/htmlInCanvas';
 import { sanitizeRichHtml } from '../lib/richText';
 import { SceneManager } from '../three/SceneManager';
 import type { MediaPlaybackState, StageMode } from '../three/SceneManager';
+import { useDeckStore } from '../store/deckStore';
 import { Icon } from './Icon';
 import { MediaPlayer } from './MediaPlayer';
 
@@ -57,6 +58,8 @@ export interface StageApi {
   flyTo: (view: ViewState, duration?: number) => Promise<void>;
   focus: (objectId: string) => Promise<void>;
   reset: () => Promise<void>;
+  /** 重播场景内所有图表的入场动画（演示翻页时调用）。 */
+  replayCharts: () => void;
   projectObject: (id: string) => { left: number; top: number; width: number; height: number } | null;
   roamStep: (forward: number, right: number, up: number, dt: number) => void;
   lookAlong: (axis: AxisDir) => void;
@@ -165,6 +168,14 @@ interface MarqueeRect {
   height: number;
 }
 
+/** 吸附参考线：axis 决定横竖，pos 是屏幕坐标，from / to 决定线段范围 */
+interface GuideLine {
+  axis: 'x' | 'y';
+  pos: number;
+  from: number;
+  to: number;
+}
+
 /** 媒体播放浮层的定位与播放状态快照。 */
 interface MediaPanelState {
   id: string;
@@ -258,6 +269,11 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
   const [viewLocked, setViewLocked] = useState(false);
   const [showAxes, setShowAxes] = useState(false);
   const [drawStroke, setDrawStroke] = useState<{ x: number; y: number }[] | null>(null);
+  // 吸附参考线：拖动对象时命中的对齐线，抬起即清空
+  const [guides, setGuides] = useState<GuideLine[]>([]);
+  // 可视化编辑模式（裁剪 / 四角变形）由 Inspector 切换，属于纯视图状态
+  const objectEditMode = useDeckStore((state) => state.objectEditMode);
+  const updateObject = useDeckStore((state) => state.updateObject);
   // dismissedMediaRef：记录用户手动关闭过媒体浮层的对象 id，避免重新选中时又弹出。
   const dismissedMediaRef = useRef<string | null>(null);
   // 以下 ref 保存最新的 props / 派生状态：事件监听器是命令式注册的（wheel、pointer），
@@ -579,6 +595,7 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
       },
       focus: focusObject,
       reset: resetView,
+      replayCharts: () => managerRef.current?.replayChartAnimations(),
       projectObject: (id) => managerRef.current?.projectRect(id) ?? null,
       roamStep: (forward, right, up, dt) => managerRef.current?.roamStep(forward, right, up, dt),
       lookAlong,
@@ -814,6 +831,88 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
   };
 
   /**
+   * 计算拖拽吸附。
+   *
+   * 判定在世界坐标里做（旋转对象按未旋转包围盒近似，与框选 / 对齐策略一致），
+   * 阈值用 6 个屏幕像素换算成世界单位，保证缩放到任何层级时手感一致；
+   * 参考线本身要用屏幕坐标，因此命中后按对方对象的投影矩形取线位置，
+   * 线段横跨「被拖对象 + 对齐对象」的范围，视觉上就像 PPT 的智能参考线。
+   *
+   * @param ids     本次拖拽的全部对象（参与吸附的对象自身要排除）
+   * @param centerX 主拖拽对象的候选中心 X（世界坐标）
+   * @param centerY 主拖拽对象的候选中心 Y（世界坐标）
+   * @param width   主拖拽对象宽度
+   * @param height  主拖拽对象高度
+   * @returns 需要追加的位移与要显示的参考线
+   */
+  const snapDrag = (
+    ids: string[],
+    centerX: number,
+    centerY: number,
+    width: number,
+    height: number,
+  ): { dx: number; dy: number; guides: GuideLine[] } => {
+    const manager = managerRef.current;
+    if (!manager) return { dx: 0, dy: 0, guides: [] };
+    const threshold = manager.pixelToWorld(6);
+    const self = new Set(ids);
+    // 拖拽对象的 3 条竖线（左 / 中 / 右）与 3 条横线（上 / 中 / 下）
+    const movingX = [centerX - width / 2, centerX, centerX + width / 2];
+    const movingY = [centerY - height / 2, centerY, centerY + height / 2];
+    const selfRect = manager.projectRect(ids[0] ?? '');
+    let bestX = Number.POSITIVE_INFINITY;
+    let bestY = Number.POSITIVE_INFINITY;
+    let dx = 0;
+    let dy = 0;
+    let lineX: GuideLine | null = null;
+    let lineY: GuideLine | null = null;
+    for (const other of deckRef.current.objects) {
+      if (self.has(other.id) || !other.visible) continue;
+      const rect = manager.projectRect(other.id);
+      if (!rect) continue;
+      const targetX = [other.x - other.width / 2, other.x, other.x + other.width / 2];
+      const targetY = [other.y - other.height / 2, other.y, other.y + other.height / 2];
+      for (let mi = 0; mi < 3; mi += 1) {
+        for (let ti = 0; ti < 3; ti += 1) {
+          const delta = targetX[ti] - movingX[mi];
+          if (Math.abs(delta) < bestX) {
+            bestX = Math.abs(delta);
+            dx = delta;
+            // 参考线的屏幕位置：对方矩形的左 / 中 / 右
+            const pos = ti === 0 ? rect.left : ti === 1 ? rect.left + rect.width / 2 : rect.left + rect.width;
+            const from = Math.min(rect.top, selfRect?.top ?? rect.top) - 12;
+            const to = Math.max(
+              rect.top + rect.height,
+              (selfRect?.top ?? rect.top) + (selfRect?.height ?? rect.height),
+            ) + 12;
+            lineX = { axis: 'x', pos, from, to };
+          }
+          const deltaY = targetY[ti] - movingY[mi];
+          if (Math.abs(deltaY) < bestY) {
+            bestY = Math.abs(deltaY);
+            dy = deltaY;
+            const pos = ti === 0 ? rect.top : ti === 1 ? rect.top + rect.height / 2 : rect.top + rect.height;
+            const from = Math.min(rect.left, selfRect?.left ?? rect.left) - 12;
+            const to = Math.max(
+              rect.left + rect.width,
+              (selfRect?.left ?? rect.left) + (selfRect?.width ?? rect.width),
+            ) + 12;
+            lineY = { axis: 'y', pos, from, to };
+          }
+        }
+      }
+    }
+    return {
+      dx: bestX <= threshold ? dx : 0,
+      dy: bestY <= threshold ? dy : 0,
+      guides: [
+        ...(bestX <= threshold && lineX ? [lineX] : []),
+        ...(bestY <= threshold && lineY ? [lineY] : []),
+      ],
+    };
+  };
+
+  /**
    * 指针移动：没有手势时负责手柄光标反馈；有手势时按类型更新视图或对象。
    * 所有增量位移都基于 lastX / lastY 的差值，避免长距离拖拽时坐标漂移。
    */
@@ -880,8 +979,23 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
         event.clientY,
         state.startObject?.z ?? state.startPositions[0]?.z ?? 0,
       );
-      const worldX = point.x - state.startWorld.x;
-      const worldY = point.y - state.startWorld.y;
+      let worldX = point.x - state.startWorld.x;
+      let worldY = point.y - state.startWorld.y;
+      // 吸附：按主拖拽对象的边缘 / 中心与其它对象的边缘 / 中心对齐
+      const primaryStart = state.startPositions.find((item) => item.id === state.objectId);
+      const primaryObject = deckRef.current.objects.find((item) => item.id === state.objectId);
+      if (primaryStart && primaryObject) {
+        const snap = snapDrag(
+          state.startPositions.map((item) => item.id),
+          primaryStart.x + worldX,
+          primaryStart.y + worldY,
+          primaryObject.width,
+          primaryObject.height,
+        );
+        worldX += snap.dx;
+        worldY += snap.dy;
+        setGuides(snap.guides);
+      }
       for (const start of state.startPositions) {
         onMoveObject?.(start.id, start.x + worldX, start.y + worldY);
       }
@@ -934,6 +1048,7 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
     if (!state) return;
     gesture.current = null;
     setMarquee(null);
+    setGuides([]);
     if (boxRef.current) boxRef.current.style.cursor = '';
     try {
       event.currentTarget.releasePointerCapture(state.pointerId);
@@ -1078,6 +1193,13 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
 
   // 聚焦按钮只在编辑模式且有选中对象时可用。
   const canFocus = mode === 'edit' && selectedObjectId && deck.objects.some((item) => item.id === selectedObjectId);
+  // 可视化编辑浮层只针对「当前选中的图片对象」；投影矩形随运镜更新
+  const overlayObject =
+    mode === 'edit' && selectedObjectId ? deck.objects.find((item) => item.id === selectedObjectId) : undefined;
+  const overlayRect =
+    overlayObject && overlayObject.type === 'image'
+      ? managerRef.current?.projectRect(overlayObject.id) ?? null
+      : null;
 
   return (
     <div className={`stage-host stage-${mode}`} ref={hostRef}>
@@ -1353,6 +1475,37 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
           />
         )}
 
+        {/* 吸附参考线：命中边缘 / 中心对齐时显示，拖动结束即清空 */}
+        {guides.map((guide, index) => (
+          <div
+            key={`guide-${guide.axis}-${index}`}
+            className="stage-guide"
+            style={
+              guide.axis === 'x'
+                ? { left: guide.pos, top: guide.from, width: 1, height: Math.max(0, guide.to - guide.from) }
+                : { left: guide.from, top: guide.pos, width: Math.max(0, guide.to - guide.from), height: 1 }
+            }
+          />
+        ))}
+
+        {/* 图片裁剪浮层：内部区域可整体拖动，八个把手调整取景框 */}
+        {overlayObject && overlayObject.type === 'image' && overlayRect && objectEditMode === 'crop' && (
+          <CropOverlay
+            object={overlayObject}
+            rect={overlayRect}
+            onChange={(crop) => updateObject(overlayObject.id, { crop }, `crop:${overlayObject.id}`)}
+          />
+        )}
+
+        {/* 四角变形浮层：拖动四个圆点把矩形拉成任意四边形 */}
+        {overlayObject && overlayObject.type === 'image' && overlayRect && objectEditMode === 'perspective' && (
+          <PerspectiveOverlay
+            object={overlayObject}
+            rect={overlayRect}
+            onChange={(perspective) => updateObject(overlayObject.id, { perspective }, `perspective:${overlayObject.id}`)}
+          />
+        )}
+
         {dragOver && <div className="stage-drop-hint">松开以放置素材</div>}
       </div>
 
@@ -1375,3 +1528,217 @@ export const Stage = forwardRef<StageApi, StageProps>(function Stage(props, ref)
     </div>
   );
 });
+
+/** 把归一化裁剪框夹到合法范围：宽高至少 2%，整体不越界 */
+function clampCrop(crop: ImageCrop): ImageCrop {
+  const width = Math.min(1, Math.max(0.02, crop.width));
+  const height = Math.min(1, Math.max(0.02, crop.height));
+  return {
+    x: Math.min(1 - width, Math.max(0, crop.x)),
+    y: Math.min(1 - height, Math.max(0, crop.y)),
+    width,
+    height,
+  };
+}
+
+/**
+ * 图片可视化裁剪浮层。
+ *
+ * 取景框按投影矩形定位：crop 是原图比例，乘以屏幕矩形即得到取景框的屏幕位置。
+ * 八个把手各自只改对应的边（角把手同时改两条边），框内区域整体平移取景。
+ * 遮罩用超大 box-shadow 实现，不需要额外遮罩层就能压暗框外内容。
+ */
+function CropOverlay({
+  object,
+  rect,
+  onChange,
+}: {
+  object: ImageObject;
+  rect: { left: number; top: number; width: number; height: number };
+  onChange: (crop: ImageCrop) => void;
+}) {
+  const crop = object.crop ?? { x: 0, y: 0, width: 1, height: 1 };
+  const drag = useRef<{ key: string; startX: number; startY: number; crop: ImageCrop } | null>(null);
+  const box = {
+    left: rect.left + crop.x * rect.width,
+    top: rect.top + crop.y * rect.height,
+    width: crop.width * rect.width,
+    height: crop.height * rect.height,
+  };
+  const handles: { key: string; left: number; top: number; cursor: string }[] = [
+    { key: 'nw', left: box.left, top: box.top, cursor: 'nwse-resize' },
+    { key: 'n', left: box.left + box.width / 2, top: box.top, cursor: 'ns-resize' },
+    { key: 'ne', left: box.left + box.width, top: box.top, cursor: 'nesw-resize' },
+    { key: 'e', left: box.left + box.width, top: box.top + box.height / 2, cursor: 'ew-resize' },
+    { key: 'se', left: box.left + box.width, top: box.top + box.height, cursor: 'nwse-resize' },
+    { key: 's', left: box.left + box.width / 2, top: box.top + box.height, cursor: 'ns-resize' },
+    { key: 'sw', left: box.left, top: box.top + box.height, cursor: 'nesw-resize' },
+    { key: 'w', left: box.left, top: box.top + box.height / 2, cursor: 'ew-resize' },
+  ];
+
+  const begin = (key: string) => (event: ReactPointerEvent<HTMLDivElement>) => {
+    // 阻止冒泡：否则舞台会把拖拽当成「移动对象」
+    event.stopPropagation();
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    drag.current = { key, startX: event.clientX, startY: event.clientY, crop: { ...crop } };
+  };
+
+  const move = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const state = drag.current;
+    if (!state) return;
+    event.stopPropagation();
+    const dx = rect.width > 0 ? (event.clientX - state.startX) / rect.width : 0;
+    const dy = rect.height > 0 ? (event.clientY - state.startY) / rect.height : 0;
+    let left = state.crop.x;
+    let top = state.crop.y;
+    let right = state.crop.x + state.crop.width;
+    let bottom = state.crop.y + state.crop.height;
+    if (state.key === 'move') {
+      // 整体平移：保持宽高，只移动左上角
+      left = Math.min(1 - state.crop.width, Math.max(0, left + dx));
+      top = Math.min(1 - state.crop.height, Math.max(0, top + dy));
+      right = left + state.crop.width;
+      bottom = top + state.crop.height;
+    } else {
+      if (state.key.includes('w')) left = Math.min(right - 0.02, Math.max(0, left + dx));
+      if (state.key.includes('e')) right = Math.max(left + 0.02, Math.min(1, right + dx));
+      if (state.key.includes('n')) top = Math.min(bottom - 0.02, Math.max(0, top + dy));
+      if (state.key.includes('s')) bottom = Math.max(top + 0.02, Math.min(1, bottom + dy));
+    }
+    onChange(clampCrop({ x: left, y: top, width: right - left, height: bottom - top }));
+  };
+
+  const end = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.stopPropagation();
+    drag.current = null;
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {
+      // 指针可能已被浏览器释放，忽略重复释放
+    }
+  };
+
+  return (
+    <div className="crop-overlay" style={{ left: rect.left, top: rect.top, width: rect.width, height: rect.height }}>
+      <div
+        className="crop-frame"
+        style={{ left: box.left - rect.left, top: box.top - rect.top, width: box.width, height: box.height }}
+        onPointerDown={begin('move')}
+        onPointerMove={move}
+        onPointerUp={end}
+        onPointerCancel={end}
+      />
+      <div
+        className="crop-grid"
+        style={{ left: box.left - rect.left, top: box.top - rect.top, width: box.width, height: box.height }}
+      >
+        {/* 三分构图辅助线，帮助判断取景比例 */}
+        <span style={{ left: '33.33%' }} />
+        <span style={{ left: '66.66%' }} />
+        <span className="is-h" style={{ top: '33.33%' }} />
+        <span className="is-h" style={{ top: '66.66%' }} />
+      </div>
+      {handles.map((handle) => (
+        <div
+          key={handle.key}
+          className="crop-handle"
+          // 把手定位在浮层内部坐标：减去浮层自身的 left/top，避免二次偏移
+          style={{ left: handle.left - rect.left - 6, top: handle.top - rect.top - 6, cursor: handle.cursor }}
+          onPointerDown={begin(handle.key)}
+          onPointerMove={move}
+          onPointerUp={end}
+          onPointerCancel={end}
+        />
+      ))}
+    </div>
+  );
+}
+
+/**
+ * 四角自由变形浮层。
+ *
+ * 角点用归一化坐标存（0–1，相对对象框），拖动时换算回屏幕位置，
+ * 松手立即写回 perspective，Three.js 侧按四角双线性插值重建几何。
+ */
+function PerspectiveOverlay({
+  object,
+  rect,
+  onChange,
+}: {
+  object: ImageObject;
+  rect: { left: number; top: number; width: number; height: number };
+  onChange: (perspective: NonNullable<ImageObject['perspective']>) => void;
+}) {
+  const corners = object.perspective ?? {
+    tl: { x: 0, y: 0 },
+    tr: { x: 1, y: 0 },
+    br: { x: 1, y: 1 },
+    bl: { x: 0, y: 1 },
+  };
+  const drag = useRef<{ key: 'tl' | 'tr' | 'br' | 'bl'; startX: number; startY: number; start: typeof corners } | null>(
+    null,
+  );
+  const screen = (point: { x: number; y: number }) => ({
+    left: rect.left + point.x * rect.width,
+    top: rect.top + point.y * rect.height,
+  });
+
+  const begin = (key: 'tl' | 'tr' | 'br' | 'bl') => (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.stopPropagation();
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    drag.current = { key, startX: event.clientX, startY: event.clientY, start: corners };
+  };
+
+  const move = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const state = drag.current;
+    if (!state) return;
+    event.stopPropagation();
+    const nx = rect.width > 0 ? (event.clientX - rect.left) / rect.width : 0;
+    const ny = rect.height > 0 ? (event.clientY - rect.top) / rect.height : 0;
+    onChange({
+      ...state.start,
+      [state.key]: { x: Math.min(1, Math.max(0, nx)), y: Math.min(1, Math.max(0, ny)) },
+    });
+  };
+
+  const end = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.stopPropagation();
+    drag.current = null;
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {
+      // ignore
+    }
+  };
+
+  const list = (
+    [
+      ['tl', corners.tl],
+      ['tr', corners.tr],
+      ['br', corners.br],
+      ['bl', corners.bl],
+    ] as const
+  ).map(([key, point]) => ({ key, ...screen(point) }));
+  const polyline = list.map((item) => `${item.left - rect.left},${item.top - rect.top}`).join(' ');
+
+  return (
+    <div className="perspective-overlay" style={{ left: rect.left, top: rect.top, width: rect.width, height: rect.height }}>
+      <svg className="perspective-lines" width={rect.width} height={rect.height} aria-hidden="true">
+        <polyline points={polyline} />
+      </svg>
+      {list.map((item) => (
+        <div
+          key={item.key}
+          className="perspective-handle"
+          style={{ left: item.left - rect.left - 7, top: item.top - rect.top - 7 }}
+          onPointerDown={begin(item.key)}
+          onPointerMove={move}
+          onPointerUp={end}
+          onPointerCancel={end}
+        />
+      ))}
+    </div>
+  );
+}

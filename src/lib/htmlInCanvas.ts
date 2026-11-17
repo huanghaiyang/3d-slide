@@ -12,7 +12,7 @@
  * 不支持的浏览器（Firefox / Safari / 旧版 Chromium）返回 null，调用方继续走原有 Canvas 2D 手绘。
  */
 
-import type { FontPreset, TextAlign } from '../types';
+import type { FontPreset, ListType, TextAlign, WritingMode } from '../types';
 import { FONT_STACKS } from './constants';
 import { fontCss } from './text';
 
@@ -31,6 +31,46 @@ export interface HtmlTextSpec {
   color: string;
   lineHeight: number;
   density: number;
+
+  // —— 进阶排版（与 textLayout 的度量保持同一批数值）——
+  /** 斜体 */
+  italic?: boolean;
+  /** 下划线 */
+  underline?: boolean;
+  /** 字间距（逻辑像素） */
+  letterSpacing?: number;
+  /** 段间距（逻辑像素） */
+  paragraphSpacing?: number;
+  /** 首行缩进（逻辑像素） */
+  indent?: number;
+  /** 竖排 */
+  writingMode?: WritingMode;
+  /** 列表装饰 */
+  listType?: ListType;
+  /** 列表层级 */
+  listLevel?: number;
+  /** 内边距（逻辑像素）：背景色块与文字之间 */
+  padding?: number;
+
+  // —— 装饰 ——
+  /** 文字描边颜色 */
+  outlineColor?: string;
+  /** 文字描边宽度（逻辑像素） */
+  outlineWidth?: number;
+  /** 投影颜色 */
+  shadowColor?: string;
+  /** 投影模糊半径 */
+  shadowBlur?: number;
+  /** 投影水平 / 垂直偏移 */
+  shadowX?: number;
+  shadowY?: number;
+  /** 渐变填充 */
+  gradientFrom?: string;
+  gradientTo?: string;
+  /** 渐变角度（度） */
+  gradientAngle?: number;
+  /** 背景色块 */
+  background?: string;
 }
 
 /** 一张内嵌可绘制子树、可随时取用的文本画布。 */
@@ -104,14 +144,19 @@ function firstLinePadding(spec: HtmlTextSpec): number {
 /** 把子元素样式写进 drawable 子树：字体、行高、对齐、折行规则与编辑器 textarea 保持一致 */
 function applyTextStyle(div: HTMLDivElement, spec: HtmlTextSpec) {
   const style = div.style;
+  const pad = Math.max(0, spec.padding ?? 0);
   style.boxSizing = 'border-box';
   style.width = `${spec.width}px`;
   style.height = `${spec.height}px`;
-  style.paddingTop = `${firstLinePadding(spec)}px`;
+  // 首行留白 + 用户内边距（背景色块与文字之间的间距）
+  style.paddingTop = `${firstLinePadding(spec) + pad}px`;
+  style.paddingLeft = `${pad}px`;
+  style.paddingRight = `${pad}px`;
   style.margin = '0';
   style.fontFamily = FONT_STACKS[spec.font] ?? FONT_STACKS.sans;
   style.fontSize = `${spec.fontSize}px`;
   style.fontWeight = spec.bold ? '700' : '400';
+  style.fontStyle = spec.italic ? 'italic' : 'normal';
   style.lineHeight = `${spec.fontSize * spec.lineHeight}px`;
   style.color = spec.color;
   style.textAlign = spec.align;
@@ -121,6 +166,64 @@ function applyTextStyle(div: HTMLDivElement, spec: HtmlTextSpec) {
   style.wordBreak = 'normal';
   // 富文本可能比文本框高（块内字号不一），超出部分直接裁掉，与 3D 挤出轮廓一致
   style.overflow = 'hidden';
+  if (spec.underline) style.textDecoration = 'underline';
+  if (spec.letterSpacing) style.letterSpacing = `${spec.letterSpacing}px`;
+  if (spec.indent) style.textIndent = `${spec.indent}px`;
+  if (spec.background) style.background = spec.background;
+  if (spec.writingMode === 'vertical') {
+    // 竖排：从上到下、分列从右向左；CJK 天然直立，拉丁字符保持旋转
+    style.writingMode = 'vertical-rl';
+  }
+  // 描边用 Chromium 的 -webkit-text-stroke；带渐变时描边仍独立生效
+  if (spec.outlineColor && (spec.outlineWidth ?? 0) > 0) {
+    style.setProperty('-webkit-text-stroke', `${spec.outlineWidth}px ${spec.outlineColor}`);
+  }
+  if (spec.shadowColor && (spec.shadowBlur ?? 0) + Math.abs(spec.shadowX ?? 0) + Math.abs(spec.shadowY ?? 0) > 0) {
+    style.textShadow = `${spec.shadowX ?? 0}px ${spec.shadowY ?? 0}px ${spec.shadowBlur ?? 0}px ${spec.shadowColor}`;
+  }
+  if (spec.gradientFrom && spec.gradientTo) {
+    // 渐变文字：背景裁到字形，文字本体透明；角度换算成 CSS 的渐变方向
+    const angle = spec.gradientAngle ?? 90;
+    style.backgroundImage = `linear-gradient(${angle}deg, ${spec.gradientFrom}, ${spec.gradientTo})`;
+    style.setProperty('-webkit-background-clip', 'text');
+    style.setProperty('background-clip', 'text');
+    style.setProperty('-webkit-text-fill-color', 'transparent');
+  }
+}
+
+/**
+ * 为列表装饰生成作用域样式表。
+ *
+ * 富文本块都是裸 `<div>`，无法逐块写内联样式，因此用「唯一类名 + 生成规则」的方式：
+ * - 项目符号 / 编号用 `::before` 画在悬挂缩进区；
+ * - 编号用 CSS 计数器逐块自增，空块不计号与排版引擎的行为一致；
+ * - 段间距落在块的下外边距上。
+ *
+ * @param className 作用域类名
+ * @param spec      文本样式参数
+ * @returns 可直接插入 head 的样式文本；无列表与段间距时返回空串
+ */
+function listRules(className: string, spec: HtmlTextSpec): string {
+  const rules: string[] = [];
+  const gap = Math.max(0, spec.paragraphSpacing ?? 0);
+  const level = Math.max(0, Math.min(3, Math.round(spec.listLevel ?? 0)));
+  const levelIndent = level * spec.fontSize * 0.9;
+  const base = `.${className} > div`;
+  if (gap > 0) rules.push(`${base}:not(:last-child){margin-bottom:${gap}px;}`);
+  if (!spec.listType || spec.listType === 'none') return rules.join('');
+  const markerWidth = spec.fontSize * 1.4;
+  const padLeft = markerWidth + levelIndent;
+  rules.push(`${base}{padding-left:${padLeft}px;text-indent:-${markerWidth}px;}`);
+  if (spec.listType === 'bullet') {
+    const glyph = ['•', '○', '▪', '–'][level];
+    rules.push(`${base}::before{content:"${glyph}";display:inline-block;width:${markerWidth}px;}`);
+  } else {
+    const style = level === 0 ? 'counter(n) ". "' : level === 1 ? 'counter(n) ") "' : level === 2 ? '"(" counter(n) ") "' : 'counter(n) "- "';
+    rules.push(`.${className}{counter-reset:n;}`);
+    rules.push(`${base}{counter-increment:n;}`);
+    rules.push(`${base}::before{content:${style};display:inline-block;width:${markerWidth}px;}`);
+  }
+  return rules.join('');
 }
 
 /**
@@ -176,6 +279,17 @@ export function createHtmlTextSurface(
   if (spec.html) div.innerHTML = spec.html;
   else div.textContent = spec.text;
   applyTextStyle(div, spec);
+
+  // 列表 / 段间距需要作用到内部块元素，只能靠作用域样式表；类名保证互不干扰
+  const scopeClass = `tcs-${Math.random().toString(36).slice(2, 9)}`;
+  div.classList.add(scopeClass);
+  const styleText = listRules(scopeClass, spec);
+  let styleEl: HTMLStyleElement | null = null;
+  if (styleText) {
+    styleEl = document.createElement('style');
+    styleEl.textContent = styleText;
+    document.head.appendChild(styleEl);
+  }
 
   canvas.appendChild(div);
   ensureHost().appendChild(canvas);
@@ -244,6 +358,7 @@ export function createHtmlTextSurface(
       canvas.removeEventListener('paint', onPaintEvent);
       div.remove();
       canvas.remove();
+      styleEl?.remove();
     },
   };
 }

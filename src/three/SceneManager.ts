@@ -48,12 +48,12 @@ import type {
   VideoObject,
   ViewState,
 } from '../types';
-import { ACCENT, ASPECT, FOV } from '../lib/constants';
+import { ACCENT, ASPECT, FONT_STACKS, FOV } from '../lib/constants';
 import { resolveChartPlugin } from '../plugins/registry';
-import type { ChartHandle } from '../lib/chartRenderer';
+import type { ChartHandle, ChartRenderer } from '../lib/chartRenderer';
 import { cameraPosition, clampPitch, lerpView } from '../lib/camera';
 import { disposeObject3D, loadModelGroup } from '../lib/model3d';
-import { parseLottieSource } from '../lib/lottie';
+import { parseLottieForRender, parseLottieSource } from '../lib/lottie';
 import {
   LOTTIE_BACKEND_CANVAS,
   resolveLottieBackend,
@@ -62,8 +62,13 @@ import {
 } from '../lib/lottieBackends';
 import { sampleBezierPath } from '../lib/curve';
 import { buildTextExtrudeGeometry, buildTextSolidGeometry } from './text3d';
-import { fontCss, layoutText } from '../lib/text';
+import { layoutTextBox, type TextLayoutResult } from '../lib/textLayout';
 import { createHtmlTextSurface, type HtmlTextSurface } from '../lib/htmlInCanvas';
+
+/** 保留两位小数：visualKey 里做归一化，避免浮点尾数造成无意义的脏检查 */
+function round2(value: number): number {
+  return Math.round(value * 100) / 100;
+}
 
 /**
  * 图表离屏渲染分辨率。
@@ -180,7 +185,7 @@ interface LottieRuntime {
   /** 渲染后端句柄，负责播放控制、帧号与尺寸调整 */
   engine: LottieBackendInstance | null;
   /** 解析后的动画数据，回退后端时需要复用，避免重复解析 */
-  data: ReturnType<typeof parseLottieSource>;
+  data: ReturnType<typeof parseLottieForRender>;
   /** 提示文案 / 失败原因 */
   error?: string;
   /** 画布长边像素，用于判断是否需要按当前缩放重新栅格化 */
@@ -1164,6 +1169,13 @@ export class SceneManager {
       this.applyNodeAppearance(node);
     });
     this.gridDirty();
+    // 从编辑 / 其他模式第一次进入播放（演示或只读查看）时，图表需要重新播放入场动画：
+    // 编辑阶段的动画早已结束，不显式重播的话观众看到的是静止画面。
+    const enteringPlayback =
+      (mode === 'present' || mode === 'view') &&
+      previousMode !== 'present' &&
+      previousMode !== 'view';
+    if (enteringPlayback) this.replayChartAnimations();
     this.handleModeMedia(previousMode, mode);
     // 进入作品或对象变化后，等画面稳定再按实际缩放重绘 SVG / Lottie
     if (deck.objects.some((object) => object.type === 'svg' || object.type === 'lottie')) {
@@ -1183,11 +1195,36 @@ export class SceneManager {
         'text', t.text, t.width, t.height, t.fontSize, t.font, t.bold, t.align, t.color, t.lineHeight, t.depth3d ?? 0,
         // 3D 效果、HTML 开关与富文本内容都影响渲染结果，必须参与脏检查
         t.depth3dMode ?? 'raised', t.htmlInCanvas === false ? 'plain' : 'html', t.html ?? '',
+        // 排版与装饰：任一项变化都要重绘文字画布并重建挤出几何
+        t.italic ? 1 : 0, t.underline ? 1 : 0, t.letterSpacing ?? 0, t.paragraphSpacing ?? 0,
+        t.indent ?? 0, t.writingMode ?? 'h', t.listType ?? 'none', t.listLevel ?? 0,
+        t.outlineColor ?? '', t.outlineWidth ?? 0,
+        t.shadowColor ?? '', t.shadowBlur ?? 0, t.shadowX ?? 0, t.shadowY ?? 0,
+        t.gradientFrom ?? '', t.gradientTo ?? '', t.gradientAngle ?? 0,
+        t.background ?? '', t.padding ?? 0, t.autoFit ? 1 : 0,
       ].join('|');
     }
     if (object.type === 'image' || object.type === 'svg') {
       const image = object as ImageObject | SvgObject;
-      return [object.type, image.src, image.width, image.height, image.fit].join('|');
+      if (object.type === 'svg') {
+        return [object.type, image.src, image.width, image.height, image.fit].join('|');
+      }
+      const img = object as ImageObject;
+      // 图片的裁剪 / 调色 / 蒙版 / 边框投影 / 翻转 / 四角变形都会改变合成结果
+      const crop = img.crop ? `${img.crop.x},${img.crop.y},${img.crop.width},${img.crop.height}` : 'full';
+      const perspective = img.perspective
+        ? ([img.perspective.tl, img.perspective.tr, img.perspective.br, img.perspective.bl]
+            .map((p) => `${round2(p.x)},${round2(p.y)}`)
+            .join(';'))
+        : 'flat';
+      return [
+        object.type, image.src, image.width, image.height, image.fit, crop,
+        img.mask ?? 'none', img.cornerRadius ?? 0,
+        img.brightness ?? 0, img.contrast ?? 0, img.saturation ?? 0, img.grayscale ?? 0, img.blur ?? 0,
+        img.borderColor ?? '', img.borderWidth ?? 0,
+        img.shadowColor ?? '', img.shadowBlur ?? 0, img.shadowX ?? 0, img.shadowY ?? 0,
+        img.flipX ? 1 : 0, img.flipY ? 1 : 0, perspective,
+      ].join('|');
     }
     if (object.type === 'video') {
       const video = object as VideoObject;
@@ -1562,19 +1599,40 @@ export class SceneManager {
     // 开关关闭：明确按纯文本渲染，不进入 HTML-in-Canvas 路径
     if (object.htmlInCanvas === false) return this.renderTextCanvas(object);
     const size = this.textCanvasSize(object);
+    // HTML 路径同样走进阶排版：字号取收缩后的结果，其余数值直接映射成 CSS
+    const layout = layoutTextBox(this.textLayoutInput(object));
     const surface = createHtmlTextSurface(
       {
         text: object.text,
         html: object.html,
         width: object.width,
         height: object.height,
-        fontSize: object.fontSize,
+        fontSize: layout.fontPx,
         font: object.font,
         bold: object.bold,
         align: object.align,
         color: object.color,
         lineHeight: object.lineHeight,
         density: size.density,
+        italic: object.italic,
+        underline: object.underline,
+        letterSpacing: object.letterSpacing,
+        paragraphSpacing: object.paragraphSpacing,
+        indent: object.indent,
+        writingMode: object.writingMode,
+        listType: object.listType,
+        listLevel: object.listLevel,
+        padding: object.padding,
+        outlineColor: object.outlineColor,
+        outlineWidth: object.outlineWidth,
+        shadowColor: object.shadowColor,
+        shadowBlur: object.shadowBlur,
+        shadowX: object.shadowX,
+        shadowY: object.shadowY,
+        gradientFrom: object.gradientFrom,
+        gradientTo: object.gradientTo,
+        gradientAngle: object.gradientAngle,
+        background: object.background,
       },
       (canvas) => this.paintTextCanvas(canvas, object),
       () => this.onTextSurfacePainted(object, node, key),
@@ -1582,6 +1640,28 @@ export class SceneManager {
     if (!surface) return this.renderTextCanvas(object);
     node.textSurface = { key, surface };
     return surface.canvas;
+  }
+
+  /** 组装进阶排版输入：把文本对象的排版字段集中到一处，避免两处路径取值不一致 */
+  private textLayoutInput(object: TextObject) {
+    return {
+      text: object.text,
+      width: object.width,
+      height: object.height,
+      fontSize: object.fontSize,
+      font: object.font,
+      bold: object.bold,
+      italic: object.italic,
+      lineHeight: object.lineHeight,
+      letterSpacing: object.letterSpacing,
+      paragraphSpacing: object.paragraphSpacing,
+      indent: object.indent,
+      listType: object.listType,
+      listLevel: object.listLevel,
+      writingMode: object.writingMode,
+      padding: object.padding,
+      autoFit: object.autoFit,
+    };
   }
 
   /**
@@ -1626,11 +1706,16 @@ export class SceneManager {
   }
 
   /**
-   * 用 Canvas 2D 手绘文字。
+   * 用 Canvas 2D 手绘文字（进阶版）。
    *
    * 既是无 HTML-in-Canvas 时的正式路径，也是 HTML 绘制完成前的占位内容：
    * 挤出轮廓需要立刻读到像素，因此不能等异步绘制。
-   * 画布尺寸决定像素密度，字号与留白按同一密度放大，排版结果与逻辑像素一致。
+   *
+   * 与基础版本的差别：
+   * - 统一 `ctx.scale(density)` 后全部用「世界单位」绘制，参数与对象字段一一对应；
+   * - 排版交给 textLayout（段间距 / 首行缩进 / 列表 / 竖排 / 自动字号）；
+   * - 补齐描边、投影、渐变填充与背景色块。
+   * 注意 ctx.shadowBlur / shadowOffset 不受 CTM 缩放影响，必须乘以 density。
    */
   private paintTextCanvas(canvas: HTMLCanvasElement, object: TextObject) {
     const ctx = canvas.getContext('2d');
@@ -1638,17 +1723,165 @@ export class SceneManager {
     const density = canvas.width / Math.max(1, object.width);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    const layout = layoutText(object.text, object.width, object.fontSize, object.font, object.bold, object.lineHeight);
-    const fontPx = object.fontSize * density;
-    ctx.font = fontCss(object.font, object.fontSize, object.bold, density);
-    ctx.fillStyle = object.color;
+    ctx.scale(density, density);
     ctx.textBaseline = 'alphabetic';
-    const lineHeightPx = fontPx * object.lineHeight;
-    const paddingTop = fontPx * 0.3;
-    ctx.textAlign = object.align === 'center' ? 'center' : object.align === 'right' ? 'right' : 'left';
-    const x = object.align === 'center' ? canvas.width / 2 : object.align === 'right' ? canvas.width : 0;
-    layout.lines.forEach((line, index) => {
-      ctx.fillText(line, x, paddingTop + fontPx * 0.8 + index * lineHeightPx);
+
+    const layout = layoutTextBox(this.textLayoutInput(object));
+    const fontPx = layout.fontPx;
+    const contentWidth = layout.contentWidth;
+
+    // 背景色块：铺满对象框，文字按 padding 内缩
+    if (object.background) {
+      ctx.fillStyle = object.background;
+      ctx.fillRect(0, 0, object.width, object.height);
+    }
+
+    // 文字填充：纯色或渐变（沿角度穿过对象框中心取色）
+    ctx.fillStyle = this.textFillStyle(ctx, object);
+    // 投影 / 描边状态在这条路径上统一设置一次，后续 fill / stroke 共用
+    if (this.textShadowActive(object)) {
+      ctx.shadowColor = object.shadowColor!;
+      ctx.shadowBlur = (object.shadowBlur ?? 0) * density;
+      ctx.shadowOffsetX = (object.shadowX ?? 0) * density;
+      ctx.shadowOffsetY = (object.shadowY ?? 0) * density;
+    }
+    const outlineOn = Boolean(object.outlineColor) && (object.outlineWidth ?? 0) > 0;
+    if (outlineOn) {
+      ctx.strokeStyle = object.outlineColor!;
+      ctx.lineWidth = object.outlineWidth!;
+    }
+    const stack = FONT_STACKS[object.font] ?? FONT_STACKS.sans;
+    ctx.font = `${object.italic ? 'italic ' : ''}${object.bold ? '700' : '400'} ${fontPx}px ${stack}`;
+
+    if (layout.vertical) {
+      this.paintVerticalText(ctx, object, layout, outlineOn);
+      return;
+    }
+
+    // 字间距：Chromium 支持 ctx.letterSpacing，缺失时退回逐字符绘制
+    const letterSpacing = object.letterSpacing ?? 0;
+    let perChar = false;
+    if (letterSpacing) {
+      const spacingAware = ctx as CanvasRenderingContext2D & { letterSpacing?: string };
+      if ('letterSpacing' in spacingAware) spacingAware.letterSpacing = `${letterSpacing}px`;
+      else perChar = true;
+    }
+
+    const underline = Boolean(object.underline);
+    for (const para of layout.paragraphs) {
+      para.lines.forEach((line, index) => {
+        // 首行基线：0.3em 上留白 + 0.8em 字形高度，与基础排版保持一致
+        const baseline = layout.padding + fontPx * 0.3 + para.top + index * layout.lineHeightPx + fontPx * 0.8;
+        if (!line) return;
+        // 对齐：列表缩进只影响可用的正文宽度，标记画在缩进区右侧
+        let textX = layout.padding + para.indent;
+        if (object.align === 'center') textX = layout.padding + para.indent + (contentWidth - para.indent) / 2;
+        else if (object.align === 'right') textX = layout.padding + contentWidth;
+        const lineWidth = this.measureTextWidth(ctx, line, letterSpacing);
+        const drawX = object.align === 'center' ? textX - lineWidth / 2 : object.align === 'right' ? textX - lineWidth : textX;
+        if (perChar) this.fillTextByChar(ctx, line, drawX, baseline, letterSpacing, outlineOn);
+        else {
+          ctx.textAlign = 'left';
+          ctx.fillText(line, drawX, baseline);
+          if (outlineOn) ctx.strokeText(line, drawX, baseline);
+        }
+        if (underline) {
+          // 下划线用矩形绘制：渐变文字也能沿用同一填充，且不参与投影
+          ctx.save();
+          ctx.shadowColor = 'transparent';
+          ctx.shadowBlur = 0;
+          ctx.fillStyle = this.textFillStyle(ctx, object);
+          ctx.fillRect(drawX, baseline + fontPx * 0.12, lineWidth, Math.max(1, fontPx * 0.06));
+          ctx.restore();
+        }
+        if (para.marker && index === 0) {
+          ctx.textAlign = 'right';
+          ctx.fillText(para.marker, textX - fontPx * 0.15, baseline);
+          if (outlineOn) ctx.strokeText(para.marker, textX - fontPx * 0.15, baseline);
+          ctx.textAlign = 'left';
+        }
+      });
+    }
+  }
+
+  /** 文字填充色：有渐变端点时生成线性渐变，否则用纯色 */
+  private textFillStyle(ctx: CanvasRenderingContext2D, object: TextObject): string | CanvasGradient {
+    if (!object.gradientFrom || !object.gradientTo) return object.color;
+    const angle = ((object.gradientAngle ?? 90) * Math.PI) / 180;
+    const cx = object.width / 2;
+    const cy = object.height / 2;
+    const radius = Math.hypot(object.width, object.height) / 2;
+    const dx = Math.cos(angle) * radius;
+    const dy = Math.sin(angle) * radius;
+    const gradient = ctx.createLinearGradient(cx - dx, cy - dy, cx + dx, cy + dy);
+    gradient.addColorStop(0, object.gradientFrom);
+    gradient.addColorStop(1, object.gradientTo);
+    return gradient;
+  }
+
+  /** 是否设置了有效的文字投影 */
+  private textShadowActive(object: TextObject): boolean {
+    if (!object.shadowColor) return false;
+    return (object.shadowBlur ?? 0) > 0 || Math.abs(object.shadowX ?? 0) > 0 || Math.abs(object.shadowY ?? 0) > 0;
+  }
+
+  /** 量取一行文本宽度；字间距按「字符之间」补偿 */
+  private measureTextWidth(ctx: CanvasRenderingContext2D, text: string, letterSpacing: number): number {
+    const base = ctx.measureText(text).width;
+    if (!letterSpacing) return base;
+    return base + Math.max(0, Array.from(text).length - 1) * letterSpacing;
+  }
+
+  /** 逐字符绘制（浏览器不支持 ctx.letterSpacing 时使用），保证字间距仍然生效 */
+  private fillTextByChar(
+    ctx: CanvasRenderingContext2D,
+    text: string,
+    startX: number,
+    baseline: number,
+    letterSpacing: number,
+    outlineOn: boolean,
+  ) {
+    let x = startX;
+    ctx.textAlign = 'left';
+    for (const ch of Array.from(text)) {
+      ctx.fillText(ch, x, baseline);
+      if (outlineOn) ctx.strokeText(ch, x, baseline);
+      x += ctx.measureText(ch).width + letterSpacing;
+    }
+  }
+
+  /**
+   * 竖排绘制：每列自上而下、列从右向左。
+   *
+   * 逐个字符绘制并在局部坐标系里反向旋转，让汉字与拉丁字形保持直立；
+   * 字符步进取 1.02em，行高则作为列间距。
+   */
+  private paintVerticalText(
+    ctx: CanvasRenderingContext2D,
+    object: TextObject,
+    layout: TextLayoutResult,
+    outlineOn: boolean,
+  ) {
+    const fontPx = layout.fontPx;
+    const columnWidth = layout.columnWidth;
+    // 竖排时字间距决定每列的字符步进（在 1.02em 基础步进上叠加）
+    const charStep = fontPx * 1.02 + (object.letterSpacing ?? 0);
+    // 首列中心落在右侧内边距内；其余列依次向左推进
+    const firstColumnX = object.width - layout.padding - (columnWidth - fontPx) / 2;
+    const startY = layout.padding + fontPx * 0.3 + fontPx * 0.8;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'alphabetic';
+    layout.columns.forEach((column, index) => {
+      const x = firstColumnX - index * columnWidth;
+      let y = startY;
+      for (const ch of Array.from(column)) {
+        // 中文字形保持直立、自上而下推进，不随列旋转（与演示文稿的竖排一致）
+        if (ch.trim()) {
+          ctx.fillText(ch, x, y);
+          if (outlineOn) ctx.strokeText(ch, x, y);
+        }
+        y += charStep;
+      }
     });
   }
 
@@ -1986,7 +2219,13 @@ export class SceneManager {
 
   /**
    * 构建图片 / SVG 内容。
-   * contain：按比例把图片缩进对象框内；cover：克隆纹理并通过 repeat / offset 居中裁切。
+   *
+   * 两条路径：
+   * - SVG：沿用「共享纹理 + contain / cover 的 UV 裁切」，矢量图不需要调色与蒙版；
+   * - 位图：先把裁剪、适配、调色、蒙版、边框、投影、翻转合成到一张离屏画布，
+   *   再把画布作为纹理贴在平面（或四角变形的网格）上。合成看起来比改 UV 麻烦，
+   *   但投影与边框只能在像素层做，而且一次合成换来后续零成本的重绘与缩放。
+   *
    * 素材未就绪或加载失败时使用占位纹理，保证节点始终有可见内容。
    */
   private buildImage(group: THREE.Group, object: ImageObject | SvgObject, node: ObjectNode) {
@@ -1999,58 +2238,271 @@ export class SceneManager {
       }
       this.ensureImage(node, object);
     }
-    const loaded = node.imageState?.status === 'loaded' && node.imageState.texture;
-    let texture: THREE.Texture = this.placeholderTexture;
-    let drawWidth = object.width;
-    let drawHeight = object.height;
-    let clone: THREE.Texture | null = null;
+    const source = node.imageState?.status === 'loaded' ? node.imageState.texture : null;
 
-    if (loaded) {
-      const source = node.imageState!.texture!;
+    // 素材未就绪：占位纹理按 contain 比例摆放，避免占位块被拉变形
+    if (!source) {
       const imageAspect = object.naturalWidth / object.naturalHeight || 1;
-      if (object.fit === 'contain') {
-        // contain：保持图片比例，等比缩放到对象框内（可能留白）
-        const boxAspect = object.width / object.height;
-        if (imageAspect >= boxAspect) {
-          drawWidth = object.width;
-          drawHeight = object.width / imageAspect;
-        } else {
-          drawHeight = object.height;
-          drawWidth = object.height * imageAspect;
-        }
-        texture = source;
-      } else {
-        // cover：直接复用共享纹理不能改 repeat，必须克隆一份给当前节点独占
-        clone = source.clone();
-        clone.needsUpdate = true;
-        clone.wrapS = THREE.ClampToEdgeWrapping;
-        clone.wrapT = THREE.ClampToEdgeWrapping;
-        // 通过缩小 UV 采样范围并居中偏移，实现「填满对象框、超出部分裁掉」
-        const boxAspect = object.width / object.height;
-        if (imageAspect >= boxAspect) {
-          const repeatX = boxAspect / imageAspect;
-          clone.repeat.set(repeatX, 1);
-          clone.offset.set((1 - repeatX) / 2, 0);
-        } else {
-          const repeatY = imageAspect / boxAspect;
-          clone.repeat.set(1, repeatY);
-          clone.offset.set(0, (1 - repeatY) / 2);
-        }
-        texture = clone;
-        node.ownedTextures.push(clone);
-      }
+      let drawWidth = object.width;
+      let drawHeight = object.height;
+      const boxAspect = object.width / object.height;
+      if (imageAspect >= boxAspect) drawHeight = object.width / imageAspect;
+      else drawWidth = object.height * imageAspect;
+      const material = new THREE.MeshBasicMaterial({
+        map: this.placeholderTexture,
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      });
+      group.add(new THREE.Mesh(new THREE.PlaneGeometry(drawWidth, drawHeight), material));
+      node.materials.push(material);
+      return;
     }
 
+    if (object.type === 'image') {
+      const bitmap = source.image as CanvasImageSource | undefined;
+      const composed = bitmap ? this.composeImage(object, bitmap) : null;
+      if (composed) {
+        const texture = this.textureFromCanvas(composed, node);
+        const material = new THREE.MeshBasicMaterial({
+          map: texture,
+          transparent: true,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        });
+        const geometry = object.perspective
+          ? this.perspectiveGeometry(object)
+          : new THREE.PlaneGeometry(object.width, object.height);
+        group.add(new THREE.Mesh(geometry, material));
+        node.materials.push(material);
+        return;
+      }
+      // 合成失败（极少数环境拿不到 image 位图）时退回原始纹理直贴
+      const material = new THREE.MeshBasicMaterial({
+        map: source,
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+      });
+      group.add(new THREE.Mesh(new THREE.PlaneGeometry(object.width, object.height), material));
+      node.materials.push(material);
+      return;
+    }
+
+    // SVG：contain 等比缩进对象框，cover 用纹理 clone 的 repeat / offset 居中裁切
+    let texture: THREE.Texture = source;
+    let drawWidth = object.width;
+    let drawHeight = object.height;
+    const imageAspect = object.naturalWidth / object.naturalHeight || 1;
+    const boxAspect = object.width / object.height;
+    if (object.fit === 'contain') {
+      if (imageAspect >= boxAspect) {
+        drawWidth = object.width;
+        drawHeight = object.width / imageAspect;
+      } else {
+        drawHeight = object.height;
+        drawWidth = object.height * imageAspect;
+      }
+    } else {
+      const clone = source.clone();
+      clone.needsUpdate = true;
+      clone.wrapS = THREE.ClampToEdgeWrapping;
+      clone.wrapT = THREE.ClampToEdgeWrapping;
+      if (imageAspect >= boxAspect) {
+        const repeatX = boxAspect / imageAspect;
+        clone.repeat.set(repeatX, 1);
+        clone.offset.set((1 - repeatX) / 2, 0);
+      } else {
+        const repeatY = imageAspect / boxAspect;
+        clone.repeat.set(1, repeatY);
+        clone.offset.set(0, (1 - repeatY) / 2);
+      }
+      texture = clone;
+      node.ownedTextures.push(clone);
+    }
     const material = new THREE.MeshBasicMaterial({
       map: texture,
       transparent: true,
       depthWrite: false,
       side: THREE.DoubleSide,
     });
-    const geometry = new THREE.PlaneGeometry(drawWidth, drawHeight);
-    const mesh = new THREE.Mesh(geometry, material);
-    group.add(mesh);
+    group.add(new THREE.Mesh(new THREE.PlaneGeometry(drawWidth, drawHeight), material));
     node.materials.push(material);
+  }
+
+  /** 调色滤镜串：只拼接非零项，避免为「全部为 0」的对象也付滤镜开销 */
+  private imageFilter(object: ImageObject): string {
+    const parts: string[] = [];
+    const brightness = object.brightness ?? 0;
+    const contrast = object.contrast ?? 0;
+    const saturation = object.saturation ?? 0;
+    const grayscale = object.grayscale ?? 0;
+    const blur = object.blur ?? 0;
+    if (brightness) parts.push(`brightness(${Math.max(0, 1 + brightness / 100)})`);
+    if (contrast) parts.push(`contrast(${Math.max(0, 1 + contrast / 100)})`);
+    if (saturation) parts.push(`saturate(${Math.max(0, 1 + saturation / 100)})`);
+    if (grayscale) parts.push(`grayscale(${Math.max(0, Math.min(100, grayscale)) / 100})`);
+    if (blur > 0) parts.push(`blur(${blur}px)`);
+    return parts.join(' ');
+  }
+
+  /**
+   * 把图片合成为一张可直接贴图的画布。
+   *
+   * 处理顺序：裁剪取景 → 适配（contain / cover）→ 翻转 → 调色 → 蒙版裁切 → 边框 → 投影。
+   * 投影必须先画（作为底层），边框最后画（覆盖在蒙版边沿），否则会被蒙版裁掉。
+   *
+   * @param object 图片对象（裁剪 / 调色 / 蒙版 / 边框 / 投影参数都在这里）
+   * @param image  已加载的位图（HTMLImageElement / ImageBitmap）
+   * @returns 合成画布；无法取到 2D 上下文时返回 null，由调用方退回原始纹理
+   */
+  private composeImage(object: ImageObject, image: CanvasImageSource): HTMLCanvasElement | null {
+    // 纹理密度跟随对象尺寸，最高 2 倍、单边不超过 4096，避免超大对象吃满显存
+    const density = Math.min(2, 4096 / Math.max(1, object.width), 4096 / Math.max(1, object.height));
+    const width = Math.max(1, Math.round(object.width * density));
+    const height = Math.max(1, Math.round(object.height * density));
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+
+    // 原图尺寸优先用对象记录的元数据，缺失时退回位图自身尺寸
+    const natural = image as { naturalWidth?: number; naturalHeight?: number; width?: number; height?: number };
+    const imgW = Math.max(1, object.naturalWidth || natural.naturalWidth || Number(natural.width) || width);
+    const imgH = Math.max(1, object.naturalHeight || natural.naturalHeight || Number(natural.height) || height);
+    const crop = object.crop ?? { x: 0, y: 0, width: 1, height: 1 };
+    const sx = Math.max(0, Math.min(imgW - 1, crop.x * imgW));
+    const sy = Math.max(0, Math.min(imgH - 1, crop.y * imgH));
+    const sw = Math.max(1, Math.min(imgW - sx, crop.width * imgW));
+    const sh = Math.max(1, Math.min(imgH - sy, crop.height * imgH));
+
+    // 适配：contain 完整显示（留白），cover 铺满（超出部分被画布边界裁掉）
+    const cropAspect = sw / sh;
+    const boxAspect = width / height;
+    let drawW = width;
+    let drawH = height;
+    let drawX = 0;
+    let drawY = 0;
+    const contained = cropAspect >= boxAspect;
+    if (object.fit === 'contain') {
+      if (contained) {
+        drawH = width / cropAspect;
+        drawY = (height - drawH) / 2;
+      } else {
+        drawW = height * cropAspect;
+        drawX = (width - drawW) / 2;
+      }
+    } else if (contained) {
+      drawW = height * cropAspect;
+      drawX = (width - drawW) / 2;
+    } else {
+      drawH = width / cropAspect;
+      drawY = (height - drawH) / 2;
+    }
+
+    // 蒙版路径：以画布为单位构造，inset 用于把描边收进画面内
+    const borderWidth = Math.max(0, object.borderWidth ?? 0);
+    const radius = Math.max(
+      0,
+      Math.min(object.cornerRadius ?? 0, object.width / 2, object.height / 2) * density,
+    );
+    const clampRadius = (value: number, w: number, h: number) => Math.max(0, Math.min(value, w / 2, h / 2));
+    const traceMask = (context: CanvasRenderingContext2D, inset: number, onlyRadius = radius) => {
+      const w = Math.max(1, width - inset * 2);
+      const h = Math.max(1, height - inset * 2);
+      if (object.mask === 'circle') {
+        context.beginPath();
+        context.ellipse(inset + w / 2, inset + h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
+        return;
+      }
+      const r = clampRadius(object.mask === 'roundedRect' ? onlyRadius : onlyRadius, w, h);
+      context.beginPath();
+      context.moveTo(inset + r, inset);
+      context.lineTo(inset + w - r, inset);
+      context.quadraticCurveTo(inset + w, inset, inset + w, inset + r);
+      context.lineTo(inset + w, inset + h - r);
+      context.quadraticCurveTo(inset + w, inset + h, inset + w - r, inset + h);
+      context.lineTo(inset + r, inset + h);
+      context.quadraticCurveTo(inset, inset + h, inset, inset + h - r);
+      context.lineTo(inset, inset + r);
+      context.quadraticCurveTo(inset, inset, inset + r, inset);
+      context.closePath();
+    };
+
+    // 1) 投影：先按蒙版形状铺一层，再让图片盖住它
+    const shadowActive =
+      Boolean(object.shadowColor) &&
+      ((object.shadowBlur ?? 0) > 0 || Math.abs(object.shadowX ?? 0) > 0 || Math.abs(object.shadowY ?? 0) > 0);
+    if (shadowActive) {
+      ctx.save();
+      ctx.shadowColor = object.shadowColor!;
+      ctx.shadowBlur = (object.shadowBlur ?? 0) * density;
+      ctx.shadowOffsetX = (object.shadowX ?? 0) * density;
+      ctx.shadowOffsetY = (object.shadowY ?? 0) * density;
+      ctx.fillStyle = object.shadowColor!;
+      const inset = borderWidth * density / 2;
+      traceMask(ctx, inset);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // 2) 图片本体：蒙版裁切 + 调色 + 翻转
+    ctx.save();
+    traceMask(ctx, borderWidth * density / 2);
+    ctx.clip();
+    const filter = this.imageFilter(object);
+    if (filter) ctx.filter = filter;
+    ctx.translate(drawX + drawW / 2, drawY + drawH / 2);
+    ctx.scale(object.flipX ? -1 : 1, object.flipY ? -1 : 1);
+    ctx.drawImage(image, sx, sy, sw, sh, -drawW / 2, -drawH / 2, drawW, drawH);
+    ctx.restore();
+
+    // 3) 边框：沿同一蒙版路径描边，线宽按密度换算
+    if (object.borderColor && borderWidth > 0) {
+      ctx.save();
+      ctx.strokeStyle = object.borderColor;
+      ctx.lineWidth = borderWidth * density;
+      traceMask(ctx, borderWidth * density / 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    return canvas;
+  }
+
+  /**
+   * 四角自由变形几何：在 PlaneGeometry 的网格上按四角做双线性插值位移。
+   *
+   * 为什么不用四边形：一个四边形只有两个三角形，纹理在两个三角形内是仿射变换，
+   * 透视稍大就会在斜边上出现折痕；细分成 12x12 网格后视觉上连续，且 UV 原样复用。
+   * 坐标换算：平面几何 Y 轴向上，而数据里的角点按「Y 向下」归一化，故取反。
+   */
+  private perspectiveGeometry(object: ImageObject): THREE.BufferGeometry {
+    const geometry = new THREE.PlaneGeometry(object.width, object.height, 12, 12);
+    const corners = object.perspective;
+    if (!corners) return geometry;
+    const attr = geometry.getAttribute('position') as THREE.BufferAttribute;
+    for (let index = 0; index < attr.count; index += 1) {
+      const x = attr.getX(index);
+      const y = attr.getY(index);
+      const u = x / object.width + 0.5;
+      const v = 0.5 - y / object.height;
+      const nx =
+        (1 - u) * (1 - v) * corners.tl.x +
+        u * (1 - v) * corners.tr.x +
+        u * v * corners.br.x +
+        (1 - u) * v * corners.bl.x;
+      const ny =
+        (1 - u) * (1 - v) * corners.tl.y +
+        u * (1 - v) * corners.tr.y +
+        u * v * corners.br.y +
+        (1 - u) * v * corners.bl.y;
+      attr.setXY(index, (nx - 0.5) * object.width, (0.5 - ny) * object.height);
+    }
+    attr.needsUpdate = true;
+    geometry.computeBoundingSphere();
+    return geometry;
   }
 
   /**
@@ -2400,7 +2852,10 @@ export class SceneManager {
       lastFrame: -1,
     };
     node.lottie = runtime;
-    const data = parseLottieSource(object.src);
+    // 表达式烘焙只服务于没有 JS 引擎的 GPU 后端：
+    // canvas 后端自带 lottie-web 表达式引擎，保持喂原始数据，避免烘焙插值改变既有画面。
+    const data =
+      backend.id === LOTTIE_BACKEND_CANVAS ? parseLottieSource(object.src) : parseLottieForRender(object.src);
     runtime.data = data;
     if (!data) {
       runtime.status = 'error';
@@ -2426,7 +2881,7 @@ export class SceneManager {
     runtime: LottieRuntime,
     object: LottieObject,
     backend: LottieBackend,
-    data: NonNullable<ReturnType<typeof parseLottieSource>>,
+    data: NonNullable<ReturnType<typeof parseLottieForRender>>,
     width: number,
     height: number,
   ) {
@@ -2476,7 +2931,9 @@ export class SceneManager {
           runtime.texture = null;
           runtime.canvas = null;
           const fallback = resolveLottieBackend(LOTTIE_BACKEND_CANVAS);
-          this.startLottie(node, runtime, object, fallback, data, width, height);
+          // canvas 后端用自己的表达式引擎，回退时换回原始数据（烘焙只是一层副作用数据）
+          const original = parseLottieSource(object.src) ?? data;
+          this.startLottie(node, runtime, object, fallback, original, width, height);
           return;
         }
         runtime.status = 'error';
@@ -2622,6 +3079,28 @@ export class SceneManager {
       return;
     }
 
+    this.mountChartRenderer(node, object, runtime, renderer);
+  }
+
+  /**
+   * 用插件渲染器挂载图表的绘制循环。
+   *
+   * 之所以从 ensureChart 里抽出来，是因为演示时需要「重播」入场动画：
+   * 重播复用同一张画布与纹理，只重新执行渲染器，避免画面上闪出占位文案。
+   *
+   * @param node     图表节点
+   * @param object   最新的图表对象数据
+   * @param runtime  该节点已创建的图表运行时（画布必须已经存在）
+   * @param renderer 插件提供的渲染器
+   */
+  private mountChartRenderer(
+    node: ObjectNode,
+    object: ChartObject,
+    runtime: ChartRuntime,
+    renderer: ChartRenderer,
+  ) {
+    const canvas = runtime.canvas;
+    if (!canvas) return;
     void renderer(canvas, {
       spec: object.spec,
       animate: object.animate,
@@ -2658,6 +3137,38 @@ export class SceneManager {
         runtime.dirty = true;
         this.callbacks.onImageError(node.objectId, `图表渲染失败：${runtime.error}`);
       });
+  }
+
+  /**
+   * 重播所有图表的入场动画（演示开始 / 翻页时调用）。
+   *
+   * 背景：图表渲染器只在挂载那一刻播放布局与节点入场动画，之后逐帧拷贝就停下来以节省 CPU；
+   * 编辑阶段早已播完，观众进入演示时看到的是静止画面。这里把渲染实例重启一次，
+   * 让布局展开、节点淡入重新发生，等于给每一页补上「图表动画」。
+   *
+   * 约束：
+   * - 关闭了「布局动画」的图表保持静止，不做无意义的重新挂载；
+   * - 隐藏对象、渲染失败、或仍在首次挂载中的图表直接跳过，避免打断首播或出现空画面；
+   * - 复用画布与纹理，只在首帧到达后覆盖旧画面，因此不会闪出「正在渲染」占位。
+   */
+  replayChartAnimations() {
+    for (const node of this.nodes.values()) {
+      const object = node.data;
+      if (object.type !== 'chart') continue;
+      const chart = object as ChartObject;
+      if (!chart.animate) continue;
+      if (!node.group.visible) continue;
+      const runtime = node.chart;
+      // handle 为空说明首次挂载还没完成，它自己的入场动画正在播，无需插手
+      if (!runtime || !runtime.handle || !runtime.canvas) continue;
+      if (runtime.status === 'error') continue;
+      const renderer = resolveChartPlugin(chart.plugin)?.render;
+      if (!renderer) continue;
+      runtime.handle.destroy();
+      runtime.handle = null;
+      runtime.status = 'loading';
+      this.mountChartRenderer(node, chart, runtime, renderer);
+    }
   }
 
   /** 在图表画布上绘制居中的提示文案（加载中 / 失败），背景保持透明以便透出作品底色。 */
@@ -3196,6 +3707,14 @@ export class SceneManager {
   }
 
   /**
+   * 对外暴露「一个屏幕像素等于多少世界单位」。
+   * Stage 用它把「吸附阈值（像素）」换算成世界阈值，保证不同缩放下的手感一致。
+   */
+  pixelToWorld(pixels: number): number {
+    return this.unitsPerPixel() * pixels;
+  }
+
+  /**
    * 按当前视角维护参考网格。
    * 网格只用于编辑模式；步长随缩放自适应，并在缓存键未变化时跳过重建。
    */
@@ -3399,13 +3918,22 @@ export class SceneManager {
     const hits = raycaster.intersectObjects(roots, true);
     for (const hit of hits) {
       let current: THREE.Object3D | null = hit.object;
+      let id: string | undefined;
       while (current) {
-        if (current.userData.nodeRoot) return current.userData.objectId as string;
+        if (current.userData.nodeRoot) {
+          id = current.userData.objectId as string;
+          break;
+        }
         current = current.parent;
       }
       // 兜底：内容组内部直接带有 objectId 时也能命中
-      const id = hit.object.userData.objectId as string | undefined;
-      if (id) return id;
+      if (!id) id = hit.object.userData.objectId as string | undefined;
+      if (!id) continue;
+      // 锁定对象不参与画布拾取：只能从内容列表里选中，避免误拖
+      if (this.nodes.get(id)?.data.locked) continue;
+      // 隐藏对象同样不参与拾取：画面上看不到的东西不能被点到
+      if (this.nodes.get(id)?.data.visible === false) continue;
+      return id;
     }
     return null;
   }
@@ -3459,6 +3987,8 @@ export class SceneManager {
     const primary = this.selectedIds[0];
     const node = primary ? this.nodes.get(primary) : null;
     if (!node) return null;
+    // 锁定对象不显示可拖拽的缩放点
+    if (node.data.locked) return null;
     const rect = this.renderer.domElement.getBoundingClientRect();
     const px = clientX - rect.left;
     const py = clientY - rect.top;
@@ -3477,6 +4007,8 @@ export class SceneManager {
     const bottom = top + height;
     const ids: string[] = [];
     for (const node of this.nodes.values()) {
+      // 锁定对象同样不参与框选
+      if (node.data.locked) continue;
       const projected = this.projectRect(node.objectId);
       if (!projected) continue;
       if (

@@ -394,6 +394,16 @@ function updateObjects(args: Record<string, unknown>): AiToolOutcome {
     'opacity', 'visible', 'text', 'fontSize', 'font', 'bold', 'align', 'color',
     'lineHeight', 'depth3d', 'depth3dMode', 'htmlInCanvas', 'fill', 'stroke', 'strokeWidth', 'fit', 'loop',
     'volume', 'muted', 'speed', 'autoRotate', 'rotateSpeed',
+    // 排版 / 装饰 / 列表 / 自动字号
+    'italic', 'underline', 'letterSpacing', 'paragraphSpacing', 'indent', 'writingMode',
+    'listType', 'listLevel', 'padding', 'autoFit', 'outlineColor', 'outlineWidth',
+    'shadowColor', 'shadowBlur', 'shadowX', 'shadowY', 'gradientFrom', 'gradientTo',
+    'gradientAngle', 'background',
+    // 图片裁剪 / 蒙版 / 调色 / 边框投影 / 翻转
+    'crop', 'mask', 'cornerRadius', 'brightness', 'contrast', 'saturation', 'grayscale', 'blur',
+    'borderColor', 'borderWidth', 'flipX', 'flipY',
+    // 锁定与编组
+    'locked', 'group',
   ];
   const patch: Record<string, unknown> = {};
   for (const key of allowed) {

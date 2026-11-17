@@ -62,7 +62,16 @@ export type IconName =
   | 'fisheye'
   | 'svg'
   | 'plug'
-  | 'gear';
+  | 'gear'
+  | 'front'
+  | 'toBack'
+  | 'layerUp'
+  | 'layerDown'
+  | 'group'
+  | 'ungroup'
+  | 'crop'
+  | 'flipH'
+  | 'flipV';
 
 interface IconProps extends SVGProps<SVGSVGElement> {
   /** 要渲染的图标名，必须是 IconName 中的值。 */
@@ -237,6 +246,35 @@ const paths: Record<IconName, ReactNode> = {
       <path d="M9 3v5M15 3v5M6 8h12v3a6 6 0 0 1-12 0zM12 17v4" />
     </>
   ),
+  front: (
+    <>
+      <rect x="3.5" y="3.5" width="12" height="12" rx="1.5" />
+      <path d="M8.5 20.5h12v-12" />
+    </>
+  ),
+  toBack: (
+    <>
+      <rect x="3.5" y="3.5" width="12" height="12" rx="1.5" />
+      <path d="M8.5 8.5v12h12" />
+    </>
+  ),
+  layerUp: <path d="M12 20V5m0 0-6 6m6-6 6 6" />,
+  layerDown: <path d="M12 4v15m0 0-6-6m6 6 6-6" />,
+  group: (
+    <>
+      <rect x="3.5" y="3.5" width="9" height="9" rx="1" />
+      <rect x="11.5" y="11.5" width="9" height="9" rx="1" />
+    </>
+  ),
+  ungroup: (
+    <>
+      <rect x="3.5" y="3.5" width="9" height="9" rx="1" />
+      <path d="M11.5 20.5h9v-9" />
+    </>
+  ),
+  crop: <path d="M7 3v14h14M17 21V7H3" />,
+  flipH: <path d="M12 3.5v17M4 20l6-4V8zM20 20l-6-4V8z" />,
+  flipV: <path d="M3.5 12h17M20 4l-4 6H8zM20 20l-4-6H8z" />,
 };
 
 /**

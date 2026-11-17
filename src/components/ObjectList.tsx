@@ -45,6 +45,8 @@ interface ObjectListProps {
   onRangeSelect: (ids: string[]) => void;
   /** 切换对象可见性。 */
   onToggleVisible: (id: string, visible: boolean) => void;
+  /** 切换对象锁定（锁定后画布上不可点选与拖拽）。 */
+  onToggleLock: (id: string) => void;
   /** 拖拽重排：把 sourceId 移到 targetId 所在图层。 */
   onReorder: (sourceId: string, targetId: string) => void;
   /** 新增文本。 */
@@ -95,6 +97,7 @@ export function ObjectList({
   onSelect,
   onRangeSelect,
   onToggleVisible,
+  onToggleLock,
   onReorder,
   onAddText,
   onAddImage,
@@ -231,8 +234,31 @@ export function ObjectList({
                     <b>{object.name}</b>
                     <small>
                       {OBJECT_LABELS[object.type]} · Z {Math.round(object.z)}
+                      {object.group ? ' · 编组' : ''}
                     </small>
                   </span>
+                  {!readonly && (
+                    <span
+                      className={`obj-lock ${object.locked ? 'is-locked' : ''}`}
+                      role="button"
+                      tabIndex={0}
+                      aria-label={object.locked ? `解锁 ${object.name}` : `锁定 ${object.name}`}
+                      title={object.locked ? '解锁' : '锁定'}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onToggleLock(object.id);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          onToggleLock(object.id);
+                        }
+                      }}
+                    >
+                      <Icon name={object.locked ? 'lock' : 'unlock'} size={14} />
+                    </span>
+                  )}
                   {readonly ? (
                     <span className="obj-eye-static" title={object.visible ? '可见' : '隐藏'}>
                       <Icon name={object.visible ? 'eye' : 'eyeOff'} size={14} />

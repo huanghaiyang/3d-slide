@@ -44,6 +44,7 @@ import {
 import { viewCenterAtZ } from './camera';
 import { layoutText } from './text';
 import { richTextHeight } from './richText';
+import { textBoxSize } from './textLayout';
 import { defaultImageObject } from './validate';
 
 /**
@@ -466,22 +467,43 @@ export function createSvgObject(
 /**
  * 按当前文本内容与排版参数计算对象高度。
  *
- * 富文本按块内字号倍率逐块折行累加（标题等放大块会自然占更高），
- * 纯文本退回 text.layoutText 的测量结果。
+ * 三条规则：
+ * - autoFit（自动字号）打开时高度由用户固定，排版时由渲染层收缩字号；
+ * - 富文本按块内字号倍率逐块折行累加（标题等放大块会自然占更高），并叠加内边距；
+ * - 纯文本走 textLayout 的进阶排版（字间距 / 段间距 / 缩进 / 列表 / 竖排）。
  *
  * @param obj   文本对象
  * @param width 可选行宽，默认取对象自身宽度（用于计算换行后的总高度）
  * @returns 排版高度，且不小于 LIMITS.minSize，避免空文本产生零高度
  *
- * 纯计算、无副作用；字体度量依赖 text / richText 的测量实现。
+ * 纯计算、无副作用；字体度量依赖 textLayout / richText 的测量实现。
  */
 export function autoTextHeight(obj: TextObject, width = obj.width): number {
+  if (obj.autoFit) return Math.max(LIMITS.minSize, obj.height);
+  const padding = obj.padding ?? 0;
   if (obj.html) {
-    const height = richTextHeight(obj.html, width, obj.fontSize, obj.font, obj.bold, obj.lineHeight);
-    return Math.max(LIMITS.minSize, height);
+    const height = richTextHeight(obj.html, Math.max(8, width - padding * 2), obj.fontSize, obj.font, obj.bold, obj.lineHeight);
+    // 富文本按块排版，段间距已经在块内折算；这里只补内边距与上下 0.3em 留白
+    return Math.max(LIMITS.minSize, height + padding * 2);
   }
-  const layout = layoutText(obj.text, width, obj.fontSize, obj.font, obj.bold, obj.lineHeight);
-  return Math.max(LIMITS.minSize, layout.height);
+  const size = textBoxSize({
+    text: obj.text,
+    width,
+    height: obj.height,
+    fontSize: obj.fontSize,
+    font: obj.font,
+    bold: obj.bold,
+    italic: obj.italic,
+    lineHeight: obj.lineHeight,
+    letterSpacing: obj.letterSpacing,
+    paragraphSpacing: obj.paragraphSpacing,
+    indent: obj.indent,
+    listType: obj.listType,
+    listLevel: obj.listLevel,
+    writingMode: obj.writingMode,
+    padding,
+  });
+  return Math.max(LIMITS.minSize, obj.writingMode === 'vertical' ? obj.height : size.height);
 }
 
 /**

@@ -16,6 +16,7 @@ import { unzipSync } from 'fflate';
 import type { AnimationConfigWithData, AnimationItem } from 'lottie-web';
 import { LIMITS } from './constants';
 import { formatBytes } from './image';
+import { bakeLottieExpressions, hasLottieExpressions, type BakeReport } from './lottieExpressions';
 
 /**
  * 按文件名扩展名判断是否为 Lottie 文件。
@@ -120,6 +121,65 @@ export function parseLottieSource(src: string): LottieDocument | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * 渲染前的解析缓存。
+ *
+ * 表达式烘焙是一次 CPU 工作（逐帧求值），而切换渲染后端、调整尺寸都会重建后端实例
+ * 并重新解析同一份 src；缓存最近的解析结果可以避免重复烘焙。
+ * 条数取小值：Lottie 文档本身可能带上内联图片，缓存过多会明显抬高内存。
+ */
+const RENDER_CACHE_LIMIT = 3;
+/** src -> 解析结果与烘焙报告；报告只用于面板提示，可与文档一起缓存 */
+const renderDocumentCache = new Map<string, { document: LottieDocument; report: BakeReport | null }>();
+
+/**
+ * 读取某份 Lottie 的表达式烘焙报告。
+ *
+ * 只查缓存，不会触发新的烘焙：报告由渲染路径（parseLottieForRender）在对象加载时写入，
+ * 面板打开时通常已经存在。返回 null 表示这份动画还没被渲染过。
+ */
+export function lottieBakeReport(src: string): BakeReport | null {
+  return renderDocumentCache.get(src)?.report ?? null;
+}
+
+/**
+ * 解析 Lottie 并烘焙表达式，返回可以直接交给没有 JS 引擎的 GPU 后端的数据。
+ *
+ * 只用于 GPU 后端（shader / webgl）：canvas 后端继续使用 parseLottieSource，
+ * 由 lottie-web 自带的表达式引擎求值，既有画面不会被烘焙插值改变。
+ *
+ * 策略：只有「所有表达式属性都烘焙成功」时才替换数据。
+ * 只要有一条表达式保留（跨图层引用、预合成内部、文本图层等），就交回原文档，
+ * 让 shader 后端继续显式报错回退 canvas——
+ * 宁可少一条 GPU 路径，也不把可能算错的动画静默渲染出来。
+ *
+ * @param src data URL 或 JSON 文本
+ * @returns 烘焙后的文档（无可烘焙表达式时等同原文档）；解析失败返回 null
+ */
+export function parseLottieForRender(src: string): LottieDocument | null {
+  const cached = renderDocumentCache.get(src);
+  if (cached) return cached.document;
+  const document = parseLottieSource(src);
+  if (!document) return null;
+  let resolved = document;
+  let report: BakeReport | null = null;
+  try {
+    report = bakeLottieExpressions(document);
+    if (report.changed && report.skipped === 0 && !hasLottieExpressions(report.document)) {
+      resolved = report.document;
+    }
+  } catch (error) {
+    // 烘焙属于增强能力，异常不应阻止动画本身打开
+    console.warn('Lottie 表达式烘焙失败，回退到原始数据', error);
+  }
+  renderDocumentCache.set(src, { document: resolved, report });
+  if (renderDocumentCache.size > RENDER_CACHE_LIMIT) {
+    const oldest = renderDocumentCache.keys().next().value;
+    if (oldest) renderDocumentCache.delete(oldest);
+  }
+  return resolved;
 }
 
 /**

@@ -79,6 +79,34 @@ export type TextAlign = 'left' | 'center' | 'right';
 export type Text3dMode = 'raised' | 'recessed';
 /** 图片等资源在对象框内的填充方式：contain 完整显示、cover 裁切铺满。 */
 export type ImageFit = 'contain' | 'cover';
+/** 文字书写方向：horizontal 横排（默认）、vertical 竖排（从右向左分列）。 */
+export type WritingMode = 'horizontal' | 'vertical';
+/** 文本段落列表装饰：无、项目符号、自动编号。 */
+export type ListType = 'none' | 'bullet' | 'number';
+/** 图片蒙版形状：无、圆形、圆角矩形。 */
+export type ImageMask = 'none' | 'circle' | 'roundedRect';
+
+/** 二维点（图片四个角的自由变形偏移用）。 */
+export interface Point2 {
+  x: number;
+  y: number;
+}
+
+/** 图片四角自由变形：每个角相对对象框的归一化偏移（0–1，原点左上）。 */
+export interface ImagePerspective {
+  tl: Point2;
+  tr: Point2;
+  br: Point2;
+  bl: Point2;
+}
+
+/** 图片裁剪窗口：相对原图的比例（0–1），x / y 为左上角。 */
+export interface ImageCrop {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
 /** 可播放媒体类型：视频或音频。 */
 export type MediaKind = 'video' | 'audio';
 /** 3D 模型文件格式；决定渲染层使用哪个加载器（glTF / OBJ / FBX 等）。 */
@@ -112,6 +140,16 @@ interface ObjectBase {
   /** 0–100 */
   opacity: number;
   visible: boolean;
+  /**
+   * 是否锁定：锁定后画布上不可点选 / 拖拽 / 微调，只能从内容列表里选中再解锁。
+   * 缺省（undefined / false）表示未锁定。
+   */
+  locked?: boolean;
+  /**
+   * 编组 id：同一组的对象共享同一个字符串，点选任一成员即选中整组。
+   * 缺省表示不属于任何编组。渲染不关心编组，只在选择与拖拽时按组展开。
+   */
+  group?: string;
 }
 
 /** 文本对象：以字体栅格化后贴在 3D 平面上，支持可选挤出厚度。 */
@@ -146,6 +184,55 @@ export interface TextObject extends ObjectBase {
    * 缺省为 true；关闭后按纯文本走 Canvas 2D 手绘，富文本样式不再呈现。
    */
   htmlInCanvas?: boolean;
+
+  // —— 排版（PPT / WPS 常用）——
+  /** 斜体。 */
+  italic?: boolean;
+  /** 下划线。 */
+  underline?: boolean;
+  /** 字间距（世界单位，可为负）。 */
+  letterSpacing?: number;
+  /** 段间距：每段之后额外增加的空白（世界单位）。 */
+  paragraphSpacing?: number;
+  /** 首行缩进（世界单位）。 */
+  indent?: number;
+  /** 书写方向；vertical 为竖排（从右向左分列）。 */
+  writingMode?: WritingMode;
+  /** 段落列表装饰。 */
+  listType?: ListType;
+  /** 列表层级（0–3）：层级越高缩进越大，符号 / 编号形式随之变化。 */
+  listLevel?: number;
+
+  // —— 装饰样式 ——
+  /** 文字描边颜色；为空表示不描边。 */
+  outlineColor?: string;
+  /** 文字描边宽度（世界单位）。 */
+  outlineWidth?: number;
+  /** 文字投影颜色；为空表示无投影。 */
+  shadowColor?: string;
+  /** 投影模糊半径（世界单位）。 */
+  shadowBlur?: number;
+  /** 投影水平偏移。 */
+  shadowX?: number;
+  /** 投影垂直偏移。 */
+  shadowY?: number;
+  /** 渐变色起始色；与 gradientTo 同时存在时按渐变填充文字。 */
+  gradientFrom?: string;
+  /** 渐变色结束色。 */
+  gradientTo?: string;
+  /** 渐变角度（度，0 为从左到右）。 */
+  gradientAngle?: number;
+  /** 背景色块颜色；为空表示无背景。 */
+  background?: string;
+  /** 背景色块内边距（世界单位），文字整体向内缩。 */
+  padding?: number;
+
+  // —— 自动字号 ——
+  /**
+   * 自动字号适配：开启后对象高度不再随内容自动增长（按设定高度固定），
+   * 渲染时把字号向下收缩到刚好放进框内，框内不发生溢出裁切。
+   */
+  autoFit?: boolean;
 }
 
 /** 图片对象：src 通常是 dataURL 或 blob URL，渲染为带材质的平面。 */
@@ -161,6 +248,48 @@ export interface ImageObject extends ObjectBase {
   naturalWidth: number;
   /** 图片原始像素高度。 */
   naturalHeight: number;
+
+  // —— 裁剪与蒙版 ——
+  /** 裁剪窗口（相对原图的比例）；缺省表示使用整张原图。 */
+  crop?: ImageCrop;
+  /** 蒙版形状；缺省 none。 */
+  mask?: ImageMask;
+  /** 圆角半径（世界单位），mask = roundedRect 时生效。 */
+  cornerRadius?: number;
+
+  // —— 调色 ——
+  /** 亮度调整，-100 ~ 100（0 为原始）。 */
+  brightness?: number;
+  /** 对比度调整，-100 ~ 100。 */
+  contrast?: number;
+  /** 饱和度调整，-100 ~ 100。 */
+  saturation?: number;
+  /** 灰度程度，0 ~ 100。 */
+  grayscale?: number;
+  /** 模糊半径（相对纹理像素，0 ~ 40）。 */
+  blur?: number;
+
+  // —— 边框与投影 ——
+  /** 描边颜色；为空表示无描边。 */
+  borderColor?: string;
+  /** 描边宽度（世界单位）。 */
+  borderWidth?: number;
+  /** 投影颜色；为空表示无投影。 */
+  shadowColor?: string;
+  /** 投影模糊半径（世界单位）。 */
+  shadowBlur?: number;
+  /** 投影水平偏移。 */
+  shadowX?: number;
+  /** 投影垂直偏移。 */
+  shadowY?: number;
+
+  // —— 翻转与自由变形 ——
+  /** 水平镜像。 */
+  flipX?: boolean;
+  /** 垂直镜像。 */
+  flipY?: boolean;
+  /** 四角自由变形（透视）；缺省表示保持矩形。 */
+  perspective?: ImagePerspective;
 }
 
 /** 形状对象：由渲染层按 shape 用 Canvas / 几何体绘制，path 类型使用 points 描边。 */

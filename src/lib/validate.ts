@@ -117,10 +117,12 @@ function normalizeBase(raw: Record<string, unknown>): {
   rotationY: number;
   opacity: number;
   visible: boolean;
+  locked: boolean;
+  group?: string;
 } {
   if (typeof raw.id !== 'string' || !raw.id) throw new Error('对象缺少 id');
   if (typeof raw.name !== 'string' || !raw.name.trim()) throw new Error('对象缺少名称');
-  return {
+  const base = {
     id: raw.id,
     name: raw.name.slice(0, LIMITS.objectNameChars),
     x: clamp(num(raw.x, 0), -LIMITS.coord, LIMITS.coord),
@@ -133,7 +135,26 @@ function normalizeBase(raw: Record<string, unknown>): {
     rotationY: clamp(num(raw.rotationY, 0), LIMITS.minRotation, LIMITS.maxRotation),
     opacity: clamp(num(raw.opacity, 100), 0, 100),
     visible: bool(raw.visible, true),
+    // 锁定与编组只影响编辑交互；缺失时按「未锁定、无编组」处理
+    locked: bool(raw.locked, false),
+  } as {
+    id: string;
+    name: string;
+    x: number;
+    y: number;
+    z: number;
+    width: number;
+    height: number;
+    rotation: number;
+    rotationX: number;
+    rotationY: number;
+    opacity: number;
+    visible: boolean;
+    locked: boolean;
+    group?: string;
   };
+  if (typeof raw.group === 'string' && raw.group.trim()) base.group = raw.group.trim().slice(0, 64);
+  return base;
 }
 
 /**
@@ -172,9 +193,24 @@ function normalizeObject(raw: unknown, warnings: string[]): SlideObject {
         if (!text.trim()) text = rich.text;
       }
     }
-    const height = html
-      ? richTextHeight(html, base.width, fontSize, font, bold, lineHeight)
-      : layoutText(text, base.width, fontSize, font, bold, lineHeight).height;
+    // 排版参数：缺省值必须与渲染侧一致，否则「导入后看起来变了」
+    const italic = bool(r.italic, false);
+    const underline = bool(r.underline, false);
+    const letterSpacing = clamp(num(r.letterSpacing, 0), LIMITS.minLetterSpacing, LIMITS.maxLetterSpacing);
+    const paragraphSpacing = clamp(num(r.paragraphSpacing, 0), 0, LIMITS.maxParagraphSpacing);
+    const indent = clamp(num(r.indent, 0), 0, LIMITS.maxIndent);
+    const padding = clamp(num(r.padding, 0), 0, LIMITS.maxTextPadding);
+    const listType = r.listType === 'bullet' || r.listType === 'number' ? r.listType : 'none';
+    const listLevel = clamp(num(r.listLevel, 0), 0, LIMITS.maxListLevel);
+    const writingMode = r.writingMode === 'vertical' ? 'vertical' : 'horizontal';
+    const autoFit = bool(r.autoFit, false);
+    // 自动字号与竖排都由用户固定框高（内容不足时也不会回弹），只有普通横排才重算高度
+    const height =
+      autoFit || writingMode === 'vertical'
+        ? base.height
+        : html
+          ? richTextHeight(html, base.width, fontSize, font, bold, lineHeight)
+          : layoutText(text, base.width, fontSize, font, bold, lineHeight).height;
     const object: TextObject = {
       ...base,
       type: 'text',
@@ -188,7 +224,34 @@ function normalizeObject(raw: unknown, warnings: string[]): SlideObject {
       depth3d: clamp(num(r.depth3d, 0), 0, LIMITS.maxTextDepth),
       depth3dMode: r.depth3dMode === 'recessed' ? 'recessed' : 'raised',
       height: Math.max(LIMITS.minSize, height),
+      italic,
+      underline,
+      letterSpacing,
+      paragraphSpacing,
+      indent,
+      writingMode,
+      listType: listType as TextObject['listType'],
+      listLevel,
+      padding,
+      autoFit,
     };
+    // 装饰字段：只有存在有效值时才写入，避免给简单文本堆一堆空字段
+    if (str(r.outlineColor, '')) object.outlineColor = str(r.outlineColor, '');
+    const outlineWidth = clamp(num(r.outlineWidth, 0), 0, LIMITS.maxTextOutline);
+    if (outlineWidth > 0) object.outlineWidth = outlineWidth;
+    if (str(r.shadowColor, '')) object.shadowColor = str(r.shadowColor, '');
+    const shadowBlur = clamp(num(r.shadowBlur, 0), 0, LIMITS.maxTextShadowBlur);
+    if (shadowBlur > 0) object.shadowBlur = shadowBlur;
+    const shadowX = clamp(num(r.shadowX, 0), -LIMITS.maxShadowOffset, LIMITS.maxShadowOffset);
+    const shadowY = clamp(num(r.shadowY, 0), -LIMITS.maxShadowOffset, LIMITS.maxShadowOffset);
+    if (shadowX !== 0) object.shadowX = shadowX;
+    if (shadowY !== 0) object.shadowY = shadowY;
+    if (str(r.gradientFrom, '')) object.gradientFrom = str(r.gradientFrom, '');
+    if (str(r.gradientTo, '')) object.gradientTo = str(r.gradientTo, '');
+    if (object.gradientFrom && object.gradientTo) {
+      object.gradientAngle = clamp(num(r.gradientAngle, 90), -360, 360);
+    }
+    if (str(r.background, '')) object.background = str(r.background, '');
     if (html) object.html = html;
     // 只有显式关闭才记录 false，缺省（undefined）表示启用 HTML-in-Canvas
     if (r.htmlInCanvas === false) object.htmlInCanvas = false;
@@ -198,7 +261,7 @@ function normalizeObject(raw: unknown, warnings: string[]): SlideObject {
     const base = normalizeBase(r);
     const src = str(r.src, '');
     if (!src) warnings.push(`图片「${base.name}」缺少素材，已以占位图导入`);
-    return {
+    const object: ImageObject = {
       ...base,
       type: 'image',
       src,
@@ -207,6 +270,60 @@ function normalizeObject(raw: unknown, warnings: string[]): SlideObject {
       naturalWidth: Math.max(1, num(r.naturalWidth, 1600)),
       naturalHeight: Math.max(1, num(r.naturalHeight, 900)),
     };
+    // 裁剪：保留合法取景框，宽高为相对原图的比例
+    const cropRaw = r.crop as Record<string, unknown> | undefined;
+    if (cropRaw && typeof cropRaw === 'object') {
+      const width = clamp(num(cropRaw.width, 1), 0.01, 1);
+      const height = clamp(num(cropRaw.height, 1), 0.01, 1);
+      object.crop = {
+        x: clamp(num(cropRaw.x, 0), 0, 1 - width),
+        y: clamp(num(cropRaw.y, 0), 0, 1 - height),
+        width,
+        height,
+      };
+    }
+    // 蒙版与调色：非法值一律回落到「无效果」，避免导入后画面异常
+    object.mask = r.mask === 'circle' || r.mask === 'roundedRect' ? r.mask : 'none';
+    const cornerRadius = clamp(num(r.cornerRadius, 0), 0, LIMITS.maxImageRadius);
+    if (cornerRadius > 0) object.cornerRadius = cornerRadius;
+    const brightness = clamp(num(r.brightness, 0), -100, 100);
+    const contrast = clamp(num(r.contrast, 0), -100, 100);
+    const saturation = clamp(num(r.saturation, 0), -100, 100);
+    const grayscale = clamp(num(r.grayscale, 0), 0, 100);
+    const blur = clamp(num(r.blur, 0), 0, LIMITS.maxImageBlur);
+    if (brightness !== 0) object.brightness = brightness;
+    if (contrast !== 0) object.contrast = contrast;
+    if (saturation !== 0) object.saturation = saturation;
+    if (grayscale > 0) object.grayscale = grayscale;
+    if (blur > 0) object.blur = blur;
+    // 边框与投影
+    if (str(r.borderColor, '')) object.borderColor = str(r.borderColor, '');
+    const borderWidth = clamp(num(r.borderWidth, 0), 0, LIMITS.maxImageBorder);
+    if (borderWidth > 0) object.borderWidth = borderWidth;
+    if (str(r.shadowColor, '')) object.shadowColor = str(r.shadowColor, '');
+    const shadowBlur = clamp(num(r.shadowBlur, 0), 0, LIMITS.maxImageShadowBlur);
+    if (shadowBlur > 0) object.shadowBlur = shadowBlur;
+    const shadowX = clamp(num(r.shadowX, 0), -LIMITS.maxShadowOffset, LIMITS.maxShadowOffset);
+    const shadowY = clamp(num(r.shadowY, 0), -LIMITS.maxShadowOffset, LIMITS.maxShadowOffset);
+    if (shadowX !== 0) object.shadowX = shadowX;
+    if (shadowY !== 0) object.shadowY = shadowY;
+    if (bool(r.flipX, false)) object.flipX = true;
+    if (bool(r.flipY, false)) object.flipY = true;
+    // 四角自由变形：四个角点都归一化在 0~1
+    const perspectiveRaw = r.perspective as Record<string, unknown> | undefined;
+    if (perspectiveRaw && typeof perspectiveRaw === 'object') {
+      const point = (value: unknown) => {
+        const p = value as Record<string, unknown> | undefined;
+        return { x: clamp(num(p?.x, 0), 0, 1), y: clamp(num(p?.y, 0), 0, 1) };
+      };
+      object.perspective = {
+        tl: point(perspectiveRaw.tl),
+        tr: point(perspectiveRaw.tr),
+        br: point(perspectiveRaw.br),
+        bl: point(perspectiveRaw.bl),
+      };
+    }
+    return object;
   }
   if (type === 'svg') {
     const base = normalizeBase(r);

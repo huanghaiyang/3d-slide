@@ -42,6 +42,7 @@ import { FONT_LABELS, MODEL_FORMAT_LABELS, OBJECT_LABELS, SHAPE_LABELS } from '.
 // 图表属性面板由插件提供，核心只负责按对象上的 plugin 字段解析
 import { resolveChartPlugin } from '../plugins/registry';
 import { LOTTIE_BACKEND_CANVAS, listLottieBackends } from '../lib/lottieBackends';
+import { lottieBakeReport } from '../lib/lottie';
 import { Icon } from './Icon';
 import { Section, TextValueField } from './inspectorKit';
 import { ColorField, NumberField, Segmented, Switch } from './ui';
@@ -331,6 +332,223 @@ function TextFields({ object }: { object: TextObject }) {
             onCommit={(value) => updateObject(object.id, { lineHeight: value }, key('lineHeight'))}
           />
         </div>
+        <div className="prop-row">
+          <span className="field-label">斜体</span>
+          <Switch
+            checked={Boolean(object.italic)}
+            label="文本斜体"
+            onChange={(checked) => updateObject(object.id, { italic: checked })}
+          />
+        </div>
+        <div className="prop-row">
+          <span className="field-label">下划线</span>
+          <Switch
+            checked={Boolean(object.underline)}
+            label="文本下划线"
+            onChange={(checked) => updateObject(object.id, { underline: checked })}
+          />
+        </div>
+      </Section>
+      <Section title="排版">
+        <div className="prop-row">
+          <span className="field-label">书写方向</span>
+          <Segmented
+            value={object.writingMode ?? 'horizontal'}
+            ariaLabel="书写方向"
+            options={[
+              { value: 'horizontal', label: '横排' },
+              { value: 'vertical', label: '竖排' },
+            ]}
+            onChange={(writingMode) => updateObject(object.id, { writingMode })}
+          />
+        </div>
+        <SliderRow
+          label="字间距"
+          value={object.letterSpacing ?? 0}
+          min={LIMITS.minLetterSpacing}
+          max={LIMITS.maxLetterSpacing}
+          step={1}
+          unit="px"
+          onChange={(letterSpacing) => updateObject(object.id, { letterSpacing }, key('letterSpacing'))}
+        />
+        <SliderRow
+          label="段间距"
+          value={object.paragraphSpacing ?? 0}
+          min={0}
+          max={LIMITS.maxParagraphSpacing}
+          step={2}
+          unit="px"
+          onChange={(paragraphSpacing) => updateObject(object.id, { paragraphSpacing }, key('paragraphSpacing'))}
+        />
+        <SliderRow
+          label="首行缩进"
+          value={object.indent ?? 0}
+          min={0}
+          max={LIMITS.maxIndent}
+          step={2}
+          unit="px"
+          onChange={(indent) => updateObject(object.id, { indent }, key('indent'))}
+        />
+        <SliderRow
+          label="内边距"
+          value={object.padding ?? 0}
+          min={0}
+          max={LIMITS.maxTextPadding}
+          step={2}
+          unit="px"
+          onChange={(padding) => updateObject(object.id, { padding }, key('padding'))}
+        />
+        <div className="prop-row">
+          <span className="field-label">自动字号</span>
+          <Switch
+            checked={Boolean(object.autoFit)}
+            label="自动缩小字号适配框高"
+            onChange={(autoFit) => updateObject(object.id, { autoFit })}
+          />
+        </div>
+        {(object.autoFit || object.writingMode === 'vertical') && (
+          <div className="prop-row">
+            <span className="field-label">框高</span>
+            <NumberField
+              value={object.height}
+              min={LIMITS.minSize}
+              max={LIMITS.maxSize}
+              step={1}
+              unit="px"
+              ariaLabel="文本框高度"
+              onCommit={(height) => updateObject(object.id, { height }, key('height'))}
+            />
+          </div>
+        )}
+        <span className="field-hint">
+          {object.autoFit
+            ? '自动字号：框高固定，内容超出时逐级缩小字号直到装进框内。'
+            : object.writingMode === 'vertical'
+              ? '竖排：框高固定作为每列长度，从右向左分列；宽度不足时字号会收缩。'
+              : '未开启自动字号时，文本高度随行数自动增长。'}
+        </span>
+      </Section>
+      <Section title="列表与编号">
+        <div className="prop-row">
+          <span className="field-label">类型</span>
+          <Segmented
+            value={object.listType ?? 'none'}
+            ariaLabel="项目符号类型"
+            options={[
+              { value: 'none', label: '无' },
+              { value: 'bullet', label: '项目符号' },
+              { value: 'number', label: '自动编号' },
+            ]}
+            onChange={(listType) => updateObject(object.id, { listType })}
+          />
+        </div>
+        {(object.listType === 'bullet' || object.listType === 'number') && (
+          <div className="prop-row">
+            <span className="field-label">层级</span>
+            <Segmented
+              value={String(object.listLevel ?? 0)}
+              ariaLabel="列表层级"
+              options={[
+                { value: '0', label: '1 级' },
+                { value: '1', label: '2 级' },
+                { value: '2', label: '3 级' },
+                { value: '3', label: '4 级' },
+              ]}
+              onChange={(level) => updateObject(object.id, { listLevel: Number(level) })}
+            />
+          </div>
+        )}
+        <span className="field-hint">每个段落（换行分隔）各自带一个标记；编号按段落顺序自动递增。</span>
+      </Section>
+      <Section title="装饰">
+        <ColorField
+          label="描边颜色"
+          value={object.outlineColor ?? '#000000'}
+          ariaLabel="文字描边颜色"
+          onChange={(outlineColor) => updateObject(object.id, { outlineColor }, key('outlineColor'))}
+        />
+        <SliderRow
+          label="描边宽度"
+          value={object.outlineWidth ?? 0}
+          min={0}
+          max={LIMITS.maxTextOutline}
+          step={0.5}
+          unit="px"
+          onChange={(outlineWidth) => updateObject(object.id, { outlineWidth }, key('outlineWidth'))}
+        />
+        <ColorField
+          label="投影颜色"
+          value={object.shadowColor ?? '#000000'}
+          ariaLabel="文字投影颜色"
+          onChange={(shadowColor) => updateObject(object.id, { shadowColor }, key('shadowColor'))}
+        />
+        <SliderRow
+          label="投影模糊"
+          value={object.shadowBlur ?? 0}
+          min={0}
+          max={LIMITS.maxTextShadowBlur}
+          step={1}
+          unit="px"
+          onChange={(shadowBlur) => updateObject(object.id, { shadowBlur }, key('shadowBlur'))}
+        />
+        <SliderRow
+          label="投影偏移 X"
+          value={object.shadowX ?? 0}
+          min={-LIMITS.maxShadowOffset}
+          max={LIMITS.maxShadowOffset}
+          step={1}
+          onChange={(shadowX) => updateObject(object.id, { shadowX }, key('shadowX'))}
+        />
+        <SliderRow
+          label="投影偏移 Y"
+          value={object.shadowY ?? 0}
+          min={-LIMITS.maxShadowOffset}
+          max={LIMITS.maxShadowOffset}
+          step={1}
+          onChange={(shadowY) => updateObject(object.id, { shadowY }, key('shadowY'))}
+        />
+        <ColorField
+          label="渐变起点"
+          value={object.gradientFrom ?? object.color}
+          ariaLabel="渐变起点颜色"
+          onChange={(gradientFrom) => updateObject(object.id, { gradientFrom }, key('gradientFrom'))}
+        />
+        <ColorField
+          label="渐变终点"
+          value={object.gradientTo ?? object.color}
+          ariaLabel="渐变终点颜色"
+          onChange={(gradientTo) => updateObject(object.id, { gradientTo }, key('gradientTo'))}
+        />
+        <SliderRow
+          label="渐变角度"
+          value={object.gradientAngle ?? 90}
+          min={-180}
+          max={180}
+          step={5}
+          unit="°"
+          onChange={(gradientAngle) => updateObject(object.id, { gradientAngle }, key('gradientAngle'))}
+        />
+        <div className="prop-row">
+          <span className="field-label">清除渐变</span>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => updateObject(object.id, { gradientFrom: undefined, gradientTo: undefined })}
+          >
+            <Icon name="reset" size={14} /> 恢复纯色
+          </button>
+        </div>
+        <ColorField
+          label="背景色块"
+          value={object.background ?? '#000000'}
+          ariaLabel="文字背景色块"
+          onChange={(background) => updateObject(object.id, { background }, key('background'))}
+        />
+        <div className="prop-row">
+          <span className="field-label">清除背景</span>
+          <button className="btn btn-ghost btn-sm" onClick={() => updateObject(object.id, { background: undefined })}>
+            <Icon name="reset" size={14} /> 透明背景
+          </button>
+        </div>
       </Section>
       <Section title="3D 文本">
         <SliderRow
@@ -447,6 +665,260 @@ function ImageFields({ object, onReplaceImage }: { object: ImageObject; onReplac
           />
         </div>
         <span className="field-hint">关闭锁定后，可在上方分别调整宽高。</span>
+      </Section>
+      <ImageEffectsFields object={object} />
+    </>
+  );
+}
+
+/**
+ * 图片效果：可视化裁剪、蒙版、调色、边框投影、翻转与四角变形。
+ *
+ * 裁剪用相对原图的比例（0–1）表示，因此缩放对象框不会改变取景内容；
+ * 「可视化裁剪」与「四角变形」只切换 Stage 上的浮层，具体拖拽在 Stage 内完成。
+ */
+function ImageEffectsFields({ object }: { object: ImageObject }) {
+  const updateObject = useDeckStore((state) => state.updateObject);
+  const setObjectEditMode = useDeckStore((state) => state.setObjectEditMode);
+  const editMode = useDeckStore((state) => state.objectEditMode);
+  const key = (field: string) => `${object.id}:${field}`;
+  // 裁剪缺省为「整张图」：读取时统一补齐，写回时永远写完整四个值
+  const crop = object.crop ?? { x: 0, y: 0, width: 1, height: 1 };
+  const cropPercent = (value: number) => Math.round(value * 100);
+  const setCrop = (patch: Partial<typeof crop>, field: string) => {
+    const width = Math.max(0.01, Math.min(1, patch.width ?? crop.width));
+    const height = Math.max(0.01, Math.min(1, patch.height ?? crop.height));
+    updateObject(
+      object.id,
+      {
+        crop: {
+          x: Math.max(0, Math.min(1 - width, patch.x ?? crop.x)),
+          y: Math.max(0, Math.min(1 - height, patch.y ?? crop.y)),
+          width,
+          height,
+        },
+      },
+      key(field),
+    );
+  };
+
+  return (
+    <>
+      <Section title="裁剪与蒙版">
+        <div className="button-row">
+          <button
+            className={`btn ${editMode === 'crop' ? 'btn-primary' : 'btn-light'} btn-sm`}
+            onClick={() => setObjectEditMode(editMode === 'crop' ? 'none' : 'crop')}
+          >
+            <Icon name="crop" size={14} /> {editMode === 'crop' ? '退出裁剪' : '可视化裁剪'}
+          </button>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => updateObject(object.id, { crop: undefined })}
+          >
+            <Icon name="reset" size={14} /> 重置裁剪
+          </button>
+        </div>
+        <SliderRow
+          label="裁剪 X"
+          value={cropPercent(crop.x)}
+          min={0}
+          max={100 - cropPercent(crop.width)}
+          step={1}
+          unit="%"
+          onChange={(value) => setCrop({ x: value / 100 }, 'cropX')}
+        />
+        <SliderRow
+          label="裁剪 Y"
+          value={cropPercent(crop.y)}
+          min={0}
+          max={100 - cropPercent(crop.height)}
+          step={1}
+          unit="%"
+          onChange={(value) => setCrop({ y: value / 100 }, 'cropY')}
+        />
+        <SliderRow
+          label="裁剪宽度"
+          value={cropPercent(crop.width)}
+          min={1}
+          max={100 - cropPercent(crop.x)}
+          step={1}
+          unit="%"
+          onChange={(value) => setCrop({ width: value / 100 }, 'cropW')}
+        />
+        <SliderRow
+          label="裁剪高度"
+          value={cropPercent(crop.height)}
+          min={1}
+          max={100 - cropPercent(crop.y)}
+          step={1}
+          unit="%"
+          onChange={(value) => setCrop({ height: value / 100 }, 'cropH')}
+        />
+        <div className="prop-row">
+          <span className="field-label">蒙版</span>
+          <Segmented
+            value={object.mask ?? 'none'}
+            ariaLabel="图片蒙版"
+            options={[
+              { value: 'none', label: '无' },
+              { value: 'circle', label: '圆形' },
+              { value: 'roundedRect', label: '圆角' },
+            ]}
+            onChange={(mask) => updateObject(object.id, { mask })}
+          />
+        </div>
+        {(object.mask === 'roundedRect' || (object.mask ?? 'none') === 'none') && (
+          <SliderRow
+            label="圆角半径"
+            value={object.cornerRadius ?? 0}
+            min={0}
+            max={LIMITS.maxImageRadius}
+            step={2}
+            unit="px"
+            onChange={(cornerRadius) => updateObject(object.id, { cornerRadius }, key('cornerRadius'))}
+          />
+        )}
+        <span className="field-hint">圆形蒙版以对象框的短边为直径居中裁切；圆角半径按对象框尺寸裁剪。</span>
+      </Section>
+      <Section title="调色">
+        <SliderRow
+          label="亮度"
+          value={object.brightness ?? 0}
+          min={-100}
+          max={100}
+          step={1}
+          onChange={(brightness) => updateObject(object.id, { brightness }, key('brightness'))}
+        />
+        <SliderRow
+          label="对比度"
+          value={object.contrast ?? 0}
+          min={-100}
+          max={100}
+          step={1}
+          onChange={(contrast) => updateObject(object.id, { contrast }, key('contrast'))}
+        />
+        <SliderRow
+          label="饱和度"
+          value={object.saturation ?? 0}
+          min={-100}
+          max={100}
+          step={1}
+          onChange={(saturation) => updateObject(object.id, { saturation }, key('saturation'))}
+        />
+        <SliderRow
+          label="灰度"
+          value={object.grayscale ?? 0}
+          min={0}
+          max={100}
+          step={1}
+          unit="%"
+          onChange={(grayscale) => updateObject(object.id, { grayscale }, key('grayscale'))}
+        />
+        <SliderRow
+          label="模糊"
+          value={object.blur ?? 0}
+          min={0}
+          max={LIMITS.maxImageBlur}
+          step={0.5}
+          unit="px"
+          onChange={(blur) => updateObject(object.id, { blur }, key('blur'))}
+        />
+        <div className="button-row">
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() =>
+              updateObject(
+                object.id,
+                { brightness: 0, contrast: 0, saturation: 0, grayscale: 0, blur: 0 },
+                key('filters'),
+              )
+            }
+          >
+            <Icon name="reset" size={14} /> 重置调色
+          </button>
+        </div>
+      </Section>
+      <Section title="边框与投影">
+        <ColorField
+          label="边框颜色"
+          value={object.borderColor ?? '#FFFFFF'}
+          ariaLabel="图片边框颜色"
+          onChange={(borderColor) => updateObject(object.id, { borderColor }, key('borderColor'))}
+        />
+        <SliderRow
+          label="边框宽度"
+          value={object.borderWidth ?? 0}
+          min={0}
+          max={LIMITS.maxImageBorder}
+          step={0.5}
+          unit="px"
+          onChange={(borderWidth) => updateObject(object.id, { borderWidth }, key('borderWidth'))}
+        />
+        <ColorField
+          label="投影颜色"
+          value={object.shadowColor ?? '#000000'}
+          ariaLabel="图片投影颜色"
+          onChange={(shadowColor) => updateObject(object.id, { shadowColor }, key('shadowColor'))}
+        />
+        <SliderRow
+          label="投影模糊"
+          value={object.shadowBlur ?? 0}
+          min={0}
+          max={LIMITS.maxImageShadowBlur}
+          step={1}
+          unit="px"
+          onChange={(shadowBlur) => updateObject(object.id, { shadowBlur }, key('shadowBlur'))}
+        />
+        <SliderRow
+          label="投影偏移 X"
+          value={object.shadowX ?? 0}
+          min={-LIMITS.maxShadowOffset}
+          max={LIMITS.maxShadowOffset}
+          step={1}
+          onChange={(shadowX) => updateObject(object.id, { shadowX }, key('shadowX'))}
+        />
+        <SliderRow
+          label="投影偏移 Y"
+          value={object.shadowY ?? 0}
+          min={-LIMITS.maxShadowOffset}
+          max={LIMITS.maxShadowOffset}
+          step={1}
+          onChange={(shadowY) => updateObject(object.id, { shadowY }, key('shadowY'))}
+        />
+      </Section>
+      <Section title="翻转与变形">
+        <div className="button-row">
+          <button
+            className={`btn ${object.flipX ? 'btn-primary' : 'btn-light'} btn-sm`}
+            onClick={() => updateObject(object.id, { flipX: !object.flipX })}
+          >
+            <Icon name="flipH" size={14} /> 水平翻转
+          </button>
+          <button
+            className={`btn ${object.flipY ? 'btn-primary' : 'btn-light'} btn-sm`}
+            onClick={() => updateObject(object.id, { flipY: !object.flipY })}
+          >
+            <Icon name="flipV" size={14} /> 垂直翻转
+          </button>
+        </div>
+        <div className="button-row">
+          <button
+            className={`btn ${editMode === 'perspective' ? 'btn-primary' : 'btn-light'} btn-sm`}
+            onClick={() => setObjectEditMode(editMode === 'perspective' ? 'none' : 'perspective')}
+          >
+            <Icon name="grid" size={14} /> 四角变形
+          </button>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => updateObject(object.id, { perspective: undefined })}
+          >
+            <Icon name="reset" size={14} /> 重置变形
+          </button>
+        </div>
+        <span className="field-hint">
+          开启四角变形后，在画布上拖动图片四角的圆点，把矩形拉成梯形 / 平行四边形（内容随之透视变形）。
+        </span>
       </Section>
     </>
   );
@@ -843,6 +1315,10 @@ function LottieFields({
   const backends = listLottieBackends();
   const activeBackend = object.renderer ?? LOTTIE_BACKEND_CANVAS;
   const activeHint = backends.find((backend) => backend.id === activeBackend)?.hint ?? '';
+  // 表达式烘焙状态：GPU 后端没有 JS 引擎，只有「全部烘焙成功」的动画才能留在 GPU 管线
+  const bakeReport = lottieBakeReport(object.src);
+  const bakeDone = Boolean(bakeReport && bakeReport.changed && bakeReport.skipped === 0);
+  const bakePartial = Boolean(bakeReport && bakeReport.skipped > 0);
   return (
     <>
       <Section title="Lottie 动画">
@@ -902,6 +1378,17 @@ function LottieFields({
           </select>
         </div>
         <span className="field-hint">{activeHint}</span>
+        {bakeDone && (
+          <span className="field-hint">
+            GPU 后端就绪：{bakeReport?.baked} 个 After Effects 表达式属性已逐帧烘焙为关键帧。
+          </span>
+        )}
+        {bakePartial && (
+          <span className="field-hint">
+            GPU 后端会回退到 canvas：{bakeReport?.skipped} 个表达式属性无法烘焙
+            {bakeReport?.messages[0] ? `（${bakeReport.messages[0]}）` : ''}。
+          </span>
+        )}
         <span className="field-hint">Lottie 支持导入 .json / .lottie 动画文件，编辑与演示时实时播放。</span>
       </Section>
       {error && (
@@ -971,6 +1458,11 @@ function ObjectPanel({
   const retryImage = useDeckStore((state) => state.retryImage);
   const removeObject = useDeckStore((state) => state.removeObject);
   const moveObjectLayer = useDeckStore((state) => state.moveObjectLayer);
+  const bringToFront = useDeckStore((state) => state.bringToFront);
+  const sendToBack = useDeckStore((state) => state.sendToBack);
+  const stepForward = useDeckStore((state) => state.stepForward);
+  const stepBackward = useDeckStore((state) => state.stepBackward);
+  const toggleLock = useDeckStore((state) => state.toggleLock);
   const requestFocus = useDeckStore((state) => state.requestFocus);
   // 按 z 从大到小排序，得到从最上层到最下层的展示顺序；layerIndex 用于判断能否上移 / 下移。
   const sorted = [...deck.objects].sort((a, b) => b.z - a.z);
@@ -1130,32 +1622,68 @@ function ObjectPanel({
               onChange={(visible) => updateObject(object.id, { visible })}
             />
           </div>
+          <div className="prop-row">
+            <span className="field-label">锁定</span>
+            <Switch
+              checked={Boolean(object.locked)}
+              label="锁定对象"
+              onChange={() => toggleLock([object.id])}
+            />
+          </div>
           <div className="button-row">
             <button
               className="btn btn-light btn-sm"
+              disabled={layerIndex <= 0}
+              onClick={() => bringToFront([object.id])}
+            >
+              <Icon name="front" size={14} /> 置顶
+            </button>
+            <button
+              className="btn btn-light btn-sm"
+              disabled={layerIndex >= sorted.length - 1}
+              onClick={() => sendToBack([object.id])}
+            >
+              <Icon name="toBack" size={14} /> 置底
+            </button>
+          </div>
+          <div className="button-row">
+            <button
+              className="btn btn-light btn-sm"
+              disabled={layerIndex <= 0}
+              onClick={() => stepForward([object.id])}
+            >
+              <Icon name="layerUp" size={14} /> 上移一层
+            </button>
+            <button
+              className="btn btn-light btn-sm"
+              disabled={layerIndex >= sorted.length - 1}
+              onClick={() => stepBackward([object.id])}
+            >
+              <Icon name="layerDown" size={14} /> 下移一层
+            </button>
+          </div>
+          <div className="button-row">
+            <button
+              className="btn btn-ghost btn-sm"
               disabled={layerIndex <= 0}
               onClick={() => {
                 const target = sorted[layerIndex - 1];
                 if (target) moveObjectLayer(object.id, target.id);
               }}
             >
-              上移图层
+              按目标插入（上）
             </button>
             <button
               className="btn btn-light btn-sm"
-              disabled={layerIndex >= sorted.length - 1}
-              onClick={() => {
-                const target = sorted[layerIndex + 1];
-                if (target) moveObjectLayer(object.id, target.id);
-              }}
+              onClick={() => requestFocus(object.id)}
             >
-              下移图层
-            </button>
-            <button className="btn btn-ghost btn-sm" onClick={() => requestFocus(object.id)}>
               <Icon name="focus" size={14} /> 聚焦
             </button>
           </div>
-          <span className="field-hint">隐藏的对象仍保存在空间中，演示时完全不渲染。</span>
+          <span className="field-hint">
+            隐藏的对象仍保存在空间中，演示时完全不渲染；锁定后画布上无法点选与框选，只能在内容列表里选中。
+            {object.group && ' 该对象属于一个编组：在画布上点选任一成员会选中整组。'}
+          </span>
         </Section>
 
         <Section title="对象">
@@ -1292,8 +1820,15 @@ function MultiPanel({ deck, ids, readonly }: { deck: Deck; ids: string[]; readon
   const updateObject = useDeckStore((state) => state.updateObject);
   const removeObjects = useDeckStore((state) => state.removeObjects);
   const selectObjects = useDeckStore((state) => state.selectObjects);
+  const groupObjects = useDeckStore((state) => state.groupObjects);
+  const ungroupObjects = useDeckStore((state) => state.ungroupObjects);
+  const toggleLock = useDeckStore((state) => state.toggleLock);
+  const unlockAll = useDeckStore((state) => state.unlockAll);
   const objects = deck.objects.filter((object) => ids.includes(object.id));
   if (objects.length === 0) return null;
+  // 只要有一个成员仍未加锁，按钮就显示为「锁定」（点击后整批加锁）
+  const anyUnlocked = objects.some((object) => !object.locked);
+  const anyGrouped = objects.some((object) => object.group);
   // 选中集合的整体包围盒：由每个对象中心 ± 宽高的一半推导。
   const bounds = {
     minX: Math.min(...objects.map((object) => object.x - object.width / 2)),
@@ -1426,6 +1961,38 @@ function MultiPanel({ deck, ids, readonly }: { deck: Deck; ids: string[]; readon
               }
             }}
           />
+        </Section>
+        <Section title="编组与锁定">
+          <div className="button-row">
+            <button
+              className="btn btn-light btn-sm"
+              disabled={objects.length < 2}
+              onClick={() => groupObjects(objects.map((object) => object.id))}
+            >
+              <Icon name="group" size={14} /> 编组 (Ctrl+G)
+            </button>
+            <button
+              className="btn btn-light btn-sm"
+              disabled={!anyGrouped}
+              onClick={() => ungroupObjects(objects.map((object) => object.id))}
+            >
+              <Icon name="ungroup" size={14} /> 解组
+            </button>
+          </div>
+          <div className="button-row">
+            <button className="btn btn-light btn-sm" onClick={() => toggleLock(objects.map((object) => object.id))}>
+              <Icon name={anyUnlocked ? 'lock' : 'unlock'} size={14} />
+              {anyUnlocked ? '锁定选中' : '解除锁定'}
+            </button>
+            <button className="btn btn-ghost btn-sm" onClick={() => unlockAll()}>
+              <Icon name="unlock" size={14} /> 解锁全部
+            </button>
+          </div>
+          <span className="field-hint">
+            {anyGrouped
+              ? '选中对象含编组成员：解组会一并解除整组的编组关系。'
+              : '编组后点选任一成员会选中整组，移动与对齐都按组处理。'}
+          </span>
         </Section>
         <Section title="批量操作">
           <div className="button-row">

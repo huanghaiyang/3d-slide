@@ -87,6 +87,31 @@ export const LIMITS = {
   maxRotation: 180,
   /** 文本 3D 挤出厚度上限（世界单位）。 */
   maxTextDepth: 600,
+  /** 字间距范围（世界单位，可为负以收紧排版）。 */
+  minLetterSpacing: -20,
+  maxLetterSpacing: 200,
+  /** 段间距上限（世界单位）。 */
+  maxParagraphSpacing: 400,
+  /** 首行缩进上限（世界单位）。 */
+  maxIndent: 400,
+  /** 文本内边距上限（背景色块与文字之间）。 */
+  maxTextPadding: 200,
+  /** 文字描边宽度上限。 */
+  maxTextOutline: 40,
+  /** 文字投影模糊上限。 */
+  maxTextShadowBlur: 120,
+  /** 文字 / 图片投影偏移绝对值上限。 */
+  maxShadowOffset: 200,
+  /** 列表层级上限（0–3）。 */
+  maxListLevel: 3,
+  /** 图片圆角半径上限。 */
+  maxImageRadius: 2000,
+  /** 图片描边宽度上限。 */
+  maxImageBorder: 40,
+  /** 图片投影模糊上限。 */
+  maxImageShadowBlur: 200,
+  /** 图片模糊半径上限（纹理像素）。 */
+  maxImageBlur: 40,
   /** 自由路径最多采样点数；存储时用 2 个数字表示一个点，故实际数组上限为 2 倍。 */
   maxPathPoints: 2000,
   /** 最小行高倍率。 */

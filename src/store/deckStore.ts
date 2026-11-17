@@ -61,8 +61,7 @@ import { SHAPE_LABELS } from '../types';
 // 图表插件注册中心：插入图表与编辑数据时按对象上的 plugin 字段解析能力。
 import { resolveChartPlugin } from '../plugins/registry';
 
-/** 对象局部更新补丁：只携带需要修改的字段，未出现的字段保持原值。 */
-type ObjectPatch = Partial<SlideObject>;
+/** 对象局部更新补丁：只携带需要修改的字段，未出现的字段保持原值。 */type ObjectPatch = Partial<SlideObject>;
 
 /**
  * 编辑器全局状态与可用操作的定义。
@@ -194,6 +193,47 @@ interface DeckStore {
   moveObjectLayer: (sourceId: string, targetId: string) => void;
   /** 结束一次连续修改的历史合并窗口，使下一次修改必然成为独立历史。 */
   endHistoryCoalesce: () => void;
+
+  // —— 剪贴板与快捷编辑 ——
+  /** 复制对象到内部剪贴板（深拷贝），返回复制成功的数量。 */
+  copyObjects: (ids: string[]) => number;
+  /** 粘贴内部剪贴板内容：生成新 id、整体偏移、置顶，并选中新对象。 */
+  pasteClipboard: () => string[];
+  /** 内部剪贴板是否有可粘贴的对象（用于决定 Ctrl+V 是粘贴对象还是新建文本）。 */
+  hasObjectClipboard: () => boolean;
+  /** 再制（Ctrl+D）：复制并粘贴，一次历史。 */
+  duplicateObjects: (ids: string[]) => string[];
+  /** 方向键微调：按世界坐标位移，并合并成一次历史。 */
+  nudgeObjects: (ids: string[], dx: number, dy: number) => void;
+
+  // —— 层级 ——
+  bringToFront: (ids: string[]) => void;
+  sendToBack: (ids: string[]) => void;
+  stepForward: (ids: string[]) => void;
+  stepBackward: (ids: string[]) => void;
+
+  // —— 编组 ——
+  /** 编组：给选中对象写入同一个 group id；不足两个对象时返回 null。 */
+  groupObjects: (ids: string[]) => string | null;
+  /** 解组：清掉这些对象及其组内成员的 group 字段。 */
+  ungroupObjects: (ids: string[]) => void;
+
+  // —— 锁定与批量可见性 ——
+  /** 切换锁定状态（以主选中对象为准，整批统一设置）。 */
+  toggleLock: (ids: string[]) => void;
+  /** 批量设置可见性。 */
+  setObjectsVisible: (ids: string[], visible: boolean) => void;
+  /** 解锁全部对象。 */
+  unlockAll: () => void;
+
+  // —— 画布上的可视化编辑模式 ——
+  /**
+   * 选中对象的可视化编辑模式：裁剪框 / 四角变形 / 无。
+   * 只影响 Stage 上的浮层显示，不写入 deck，属于纯视图状态。
+   */
+  objectEditMode: 'none' | 'crop' | 'perspective';
+  /** 切换可视化编辑模式（切换到无或更换对象时浮层自动消失）。 */
+  setObjectEditMode: (mode: 'none' | 'crop' | 'perspective') => void;
 
   // —— 帧管理 ——
   /** 以当前视角捕获一个新帧，并选中它。 */
@@ -415,6 +455,10 @@ function normalizeEditedObject(object: SlideObject, patch: ObjectPatch): SlideOb
   next.rotationY = clampNumber(next.rotationY ?? 0, LIMITS.minRotation, LIMITS.maxRotation, 0);
   // 不透明度限制在 0~100
   next.opacity = clampNumber(next.opacity, 0, 100, object.opacity);
+  // 锁定只是交互标记，归一成布尔值；空字符串的编组等于没有编组
+  next.locked = Boolean(next.locked);
+  if (typeof next.group === 'string' && next.group.trim()) next.group = next.group.trim().slice(0, 64);
+  else delete next.group;
 
   if (next.type === 'text') {
     // 文本：限制字数与字号 / 行高 / 3D 厚度，并根据内容自动计算高度
@@ -436,6 +480,23 @@ function normalizeEditedObject(object: SlideObject, patch: ObjectPatch): SlideOb
       delete text.html;
     }
     if (text.htmlInCanvas !== undefined) text.htmlInCanvas = text.htmlInCanvas !== false;
+    // —— 排版 ——
+    text.italic = Boolean(text.italic);
+    text.underline = Boolean(text.underline);
+    text.autoFit = Boolean(text.autoFit);
+    text.writingMode = text.writingMode === 'vertical' ? 'vertical' : 'horizontal';
+    text.listType = text.listType === 'bullet' || text.listType === 'number' ? text.listType : 'none';
+    text.listLevel = clampNumber(text.listLevel ?? 0, 0, LIMITS.maxListLevel, 0);
+    text.letterSpacing = clampNumber(text.letterSpacing ?? 0, LIMITS.minLetterSpacing, LIMITS.maxLetterSpacing, 0);
+    text.paragraphSpacing = clampNumber(text.paragraphSpacing ?? 0, 0, LIMITS.maxParagraphSpacing, 0);
+    text.indent = clampNumber(text.indent ?? 0, 0, LIMITS.maxIndent, 0);
+    text.padding = clampNumber(text.padding ?? 0, 0, LIMITS.maxTextPadding, 0);
+    // —— 装饰 ——
+    text.outlineWidth = clampNumber(text.outlineWidth ?? 0, 0, LIMITS.maxTextOutline, 0);
+    text.shadowBlur = clampNumber(text.shadowBlur ?? 0, 0, LIMITS.maxTextShadowBlur, 0);
+    text.shadowX = clampNumber(text.shadowX ?? 0, -LIMITS.maxShadowOffset, LIMITS.maxShadowOffset, 0);
+    text.shadowY = clampNumber(text.shadowY ?? 0, -LIMITS.maxShadowOffset, LIMITS.maxShadowOffset, 0);
+    text.gradientAngle = clampNumber(text.gradientAngle ?? 0, -360, 360, 0);
     text.height = autoTextHeight(text);
   } else if (next.type === 'chart') {
     // 图表：数据必须交给对应插件重新规范化，防止孤立边 / 重复节点进入场景
@@ -456,6 +517,45 @@ function normalizeEditedObject(object: SlideObject, patch: ObjectPatch): SlideOb
       if (widthChanged && !heightChanged) image.height = image.width / ratio;
       else if (heightChanged && !widthChanged) image.width = image.height * ratio;
     }
+    // —— 裁剪：宽高至少留 1%，并保证取景框不越出原图 ——
+    if (image.crop) {
+      const cropWidth = clampNumber(image.crop.width, 0.01, 1, 1);
+      const cropHeight = clampNumber(image.crop.height, 0.01, 1, 1);
+      image.crop = {
+        x: clampNumber(image.crop.x, 0, 1 - cropWidth, 0),
+        y: clampNumber(image.crop.y, 0, 1 - cropHeight, 0),
+        width: cropWidth,
+        height: cropHeight,
+      };
+    }
+    // —— 蒙版 / 圆角 ——
+    image.mask = image.mask === 'circle' || image.mask === 'roundedRect' ? image.mask : 'none';
+    image.cornerRadius = clampNumber(image.cornerRadius ?? 0, 0, LIMITS.maxImageRadius, 0);
+    // —— 调色 ——
+    image.brightness = clampNumber(image.brightness ?? 0, -100, 100, 0);
+    image.contrast = clampNumber(image.contrast ?? 0, -100, 100, 0);
+    image.saturation = clampNumber(image.saturation ?? 0, -100, 100, 0);
+    image.grayscale = clampNumber(image.grayscale ?? 0, 0, 100, 0);
+    image.blur = clampNumber(image.blur ?? 0, 0, LIMITS.maxImageBlur, 0);
+    // —— 边框与投影 ——
+    image.borderWidth = clampNumber(image.borderWidth ?? 0, 0, LIMITS.maxImageBorder, 0);
+    image.shadowBlur = clampNumber(image.shadowBlur ?? 0, 0, LIMITS.maxImageShadowBlur, 0);
+    image.shadowX = clampNumber(image.shadowX ?? 0, -LIMITS.maxShadowOffset, LIMITS.maxShadowOffset, 0);
+    image.shadowY = clampNumber(image.shadowY ?? 0, -LIMITS.maxShadowOffset, LIMITS.maxShadowOffset, 0);
+    // —— 四角变形：每个角点都限制在 0~1，避免拉出画布后纹理无限延伸 ——
+    if (image.perspective) {
+      const clampPoint = (point: { x: number; y: number }) => ({
+        x: clampNumber(point.x, 0, 1, 0),
+        y: clampNumber(point.y, 0, 1, 0),
+      });
+      const p = image.perspective;
+      image.perspective = {
+        tl: clampPoint(p.tl),
+        tr: clampPoint(p.tr),
+        br: clampPoint(p.br),
+        bl: clampPoint(p.bl),
+      };
+    }
   } else if (next.type === 'lottie') {
     // Lottie：速度裁剪到有效区间；后端 id 只保留合法字符串，空值表示默认 canvas 后端
     const lottie = next as LottieObject;
@@ -464,6 +564,80 @@ function normalizeEditedObject(object: SlideObject, patch: ObjectPatch): SlideOb
       typeof lottie.renderer === 'string' ? lottie.renderer.trim().slice(0, 32) || undefined : undefined;
   }
   return next;
+}
+
+/**
+ * 按编组展开选择集合。
+ *
+ * 编组只是对象上的一个软标记（同组共享 group 字符串），渲染完全不关心；
+ * 选中其中任意一个成员时把整组成员一起选上，移动 / 编组 / 锁定才符合直觉。
+ *
+ * @param deck 当前作品
+ * @param ids  原始选中集合
+ * @returns 展开后的对象 id 集合（无编组时原样返回）
+ */
+function expandGroups(deck: Deck | null, ids: string[]): string[] {
+  if (!deck || ids.length === 0) return ids;
+  const groups = new Set<string>();
+  for (const id of ids) {
+    const group = deck.objects.find((object) => object.id === id)?.group;
+    if (group) groups.add(group);
+  }
+  if (groups.size === 0) return ids;
+  const expanded = new Set(ids);
+  for (const object of deck.objects) {
+    if (object.group && groups.has(object.group)) expanded.add(object.id);
+  }
+  return [...expanded];
+}
+
+/** 内部对象剪贴板：只在本标签页内生效，不写入系统剪贴板 */
+interface ObjectClipboard {
+  /** 深拷贝后的对象快照（保持 z 升序，粘贴时顺序不会倒置） */
+  objects: SlideObject[];
+  /** 已粘贴次数，用于每次粘贴递增的偏移 */
+  pastes: number;
+}
+
+let objectClipboard: ObjectClipboard | null = null;
+
+/** 每次粘贴 / 再制相对上次的位移（世界单位） */
+const CLIPBOARD_SHIFT = 24;
+
+/**
+ * 生成一批对象副本。
+ *
+ * 规则与 PowerPoint 对齐：
+ * - 每个对象换新 id，组内成员共享新的 group id（副本自成一组的，不并入原组）；
+ * - 名称追加「副本」，超出字数上限则截断；
+ * - 整体平移 (dx, dy)，并裁剪到坐标范围；
+ * - z 值按顺序排在现有对象之上。
+ *
+ * @param deck    当前作品（用于计算层级与名称）
+ * @param objects 需要复制的对象（调用方保证已深拷贝）
+ * @param dx      水平位移
+ * @param dy      垂直位移
+ * @returns 新对象数组（尚未写入 deck）
+ */
+function buildCopies(deck: Deck, objects: SlideObject[], dx: number, dy: number): SlideObject[] {
+  const groupMap = new Map<string, string>();
+  let z = nextDepth(deck.objects);
+  return objects.map((object) => {
+    const copy = structuredClone(object) as SlideObject;
+    copy.id = crypto.randomUUID();
+    copy.x = clampNumber(copy.x + dx, -LIMITS.coord, LIMITS.coord, copy.x + dx);
+    copy.y = clampNumber(copy.y + dy, -LIMITS.coord, LIMITS.coord, copy.y + dy);
+    copy.z = z;
+    z += 1;
+    copy.name = `${object.name} 副本`.slice(0, LIMITS.objectNameChars);
+    // 编组映射：同一次复制的组内成员仍然同组，但组 id 必须换新
+    if (object.group) {
+      const mapped = groupMap.get(object.group) ?? crypto.randomUUID();
+      groupMap.set(object.group, mapped);
+      copy.group = mapped;
+    }
+    return copy;
+  });
 }
 
 export const useDeckStore = create<DeckStore>((set, get) => {
@@ -538,6 +712,7 @@ export const useDeckStore = create<DeckStore>((set, get) => {
     selectedIds: [],
     selectedFrameId: null,
     currentFrameId: null,
+    objectEditMode: 'none' as const,
     readonly: false,
     loading: false,
     loadError: null,
@@ -687,26 +862,29 @@ export const useDeckStore = create<DeckStore>((set, get) => {
         set({ selectedObjectId: null, selectedIds: [] });
         return;
       }
-      set({ selectedObjectId: id, selectedIds: [id], selectedFrameId: null });
+      // 编组成员点选其一即整组选中，主选中仍是被点的那个
+      const selection = expandGroups(get().deck, [id]);
+      set({ selectedObjectId: id, selectedIds: selection, selectedFrameId: null, objectEditMode: 'none' });
     },
 
     // 多选：先去重；空数组等价于清空选择，否则以第一个 id 作为主选中
     selectObjects: (ids) => {
-      const unique = [...new Set(ids)];
+      const unique = expandGroups(get().deck, [...new Set(ids)]);
       if (unique.length === 0) {
-        set({ selectedObjectId: null, selectedIds: [], selectedFrameId: null });
+        set({ selectedObjectId: null, selectedIds: [], selectedFrameId: null, objectEditMode: 'none' });
         return;
       }
-      set({ selectedObjectId: unique[0], selectedIds: unique, selectedFrameId: null });
+      set({ selectedObjectId: unique[0], selectedIds: unique, selectedFrameId: null, objectEditMode: 'none' });
     },
 
-    // Shift / Ctrl 点选：已选中则从集合中移除，未选中则追加
+    // Shift / Ctrl 点选：已选中则从集合中移除，未选中则追加（编组整组进出）
     toggleObjectSelection: (id) => {
       const state = get();
       if (!state.deck) return;
+      const members = expandGroups(state.deck, [id]);
       const exists = state.selectedIds.includes(id);
       if (exists) {
-        const next = state.selectedIds.filter((item) => item !== id);
+        const next = state.selectedIds.filter((item) => !members.includes(item));
         set({
           selectedIds: next,
           // 移除后可能没有选中项了，取剩余集合的第一个
@@ -714,8 +892,8 @@ export const useDeckStore = create<DeckStore>((set, get) => {
           selectedFrameId: null,
         });
       } else {
-        const next = [...state.selectedIds, id];
-        set({ selectedIds: next, selectedObjectId: next[0], selectedFrameId: null });
+        const next = [...new Set([...state.selectedIds, ...members])];
+        set({ selectedIds: next, selectedObjectId: next[0], selectedFrameId: null, objectEditMode: 'none' });
       }
     },
 
@@ -1157,6 +1335,239 @@ export const useDeckStore = create<DeckStore>((set, get) => {
           }),
         };
       });
+    },
+
+    // ==================== 剪贴板与快捷编辑 ====================
+
+    /**
+     * 复制对象到内部剪贴板。
+     *
+     * 用内部剪贴板而不是系统剪贴板：图片 / 视频 / 模型都是 src 引用，
+     * 系统剪贴板只适合文本，把这些对象转成序列化 HTML 反而更容易出错。
+     */
+    copyObjects: (ids) => {
+      const deck = get().deck;
+      if (!deck || ids.length === 0) return 0;
+      // z 升序：粘贴后仍保持原先后压顺序
+      const objects = deck.objects
+        .filter((object) => ids.includes(object.id))
+        .sort((a, b) => a.z - b.z);
+      if (objects.length === 0) return 0;
+      objectClipboard = { objects: structuredClone(objects) as SlideObject[], pastes: 0 };
+      return objects.length;
+    },
+
+    // 粘贴内部剪贴板：生成新 id、偏移、置顶，并选中新对象
+    pasteClipboard: () => {
+      const deck = get().deck;
+      if (!deck || !objectClipboard) return [];
+      if (deck.objects.length + objectClipboard.objects.length > LIMITS.objects) return [];
+      objectClipboard.pastes += 1;
+      const shift = CLIPBOARD_SHIFT * objectClipboard.pastes;
+      const copies = buildCopies(deck, objectClipboard.objects, shift, shift);
+      const applied = applyDeck((current) => ({ ...current, objects: [...current.objects, ...copies] }));
+      if (!applied) return [];
+      set({ selectedObjectId: copies[0]?.id ?? null, selectedIds: copies.map((copy) => copy.id), selectedFrameId: null });
+      return copies.map((copy) => copy.id);
+    },
+
+    hasObjectClipboard: () => Boolean(objectClipboard && objectClipboard.objects.length > 0),
+
+    // 再制（Ctrl+D）：不改动剪贴板，直接在原对象附近生成副本
+    duplicateObjects: (ids) => {
+      const deck = get().deck;
+      if (!deck || ids.length === 0) return [];
+      const objects = deck.objects.filter((object) => ids.includes(object.id)).sort((a, b) => a.z - b.z);
+      if (objects.length === 0) return [];
+      if (deck.objects.length + objects.length > LIMITS.objects) return [];
+      const copies = buildCopies(deck, objects, CLIPBOARD_SHIFT, CLIPBOARD_SHIFT);
+      const applied = applyDeck((current) => ({ ...current, objects: [...current.objects, ...copies] }));
+      if (!applied) return [];
+      set({ selectedObjectId: copies[0]?.id ?? null, selectedIds: copies.map((copy) => copy.id), selectedFrameId: null });
+      return copies.map((copy) => copy.id);
+    },
+
+    // 方向键微调：同一批对象连续微调合并为一步历史，便于长按后一次撤销
+    nudgeObjects: (ids, dx, dy) => {
+      if (ids.length === 0 || (dx === 0 && dy === 0)) return;
+      applyDeck(
+        (deck) => ({
+          ...deck,
+          objects: deck.objects.map((object) => {
+            if (!ids.includes(object.id)) return object;
+            return {
+              ...object,
+              x: clampNumber(object.x + dx, -LIMITS.coord, LIMITS.coord, object.x),
+              y: clampNumber(object.y + dy, -LIMITS.coord, LIMITS.coord, object.y),
+            };
+          }),
+        }),
+        { historyKey: `nudge:${ids.join(',')}` },
+      );
+    },
+
+    // ==================== 层级 ====================
+
+    bringToFront: (ids) => {
+      if (ids.length === 0) return;
+      applyDeck((deck) => {
+        const sorted = [...deck.objects].sort((a, b) => a.z - b.z);
+        const zValues = sorted.map((object) => object.z);
+        const rest = sorted.filter((object) => !ids.includes(object.id));
+        const front = sorted.filter((object) => ids.includes(object.id));
+        const nextOrder = [...rest, ...front];
+        const order = new Map(nextOrder.map((object, index) => [object.id, index]));
+        return {
+          ...deck,
+          objects: deck.objects.map((object) => {
+            const index = order.get(object.id);
+            return index === undefined ? object : { ...object, z: zValues[index] };
+          }),
+        };
+      });
+    },
+
+    sendToBack: (ids) => {
+      if (ids.length === 0) return;
+      applyDeck((deck) => {
+        const sorted = [...deck.objects].sort((a, b) => a.z - b.z);
+        const zValues = sorted.map((object) => object.z);
+        const rest = sorted.filter((object) => !ids.includes(object.id));
+        const back = sorted.filter((object) => ids.includes(object.id));
+        const nextOrder = [...back, ...rest];
+        const order = new Map(nextOrder.map((object, index) => [object.id, index]));
+        return {
+          ...deck,
+          objects: deck.objects.map((object) => {
+            const index = order.get(object.id);
+            return index === undefined ? object : { ...object, z: zValues[index] };
+          }),
+        };
+      });
+    },
+
+    // 上移一层 / 下移一层：在排序序列里依次与相邻未选中对象交换位置
+    stepForward: (ids) => {
+      if (ids.length === 0) return;
+      applyDeck(
+        (deck) => {
+          const sorted = [...deck.objects].sort((a, b) => a.z - b.z);
+          const zValues = sorted.map((object) => object.z);
+          const selected = new Set(ids);
+          // 从后往前扫：靠前的选中对象先让位，避免互相顶替
+          for (let index = sorted.length - 2; index >= 0; index -= 1) {
+            if (selected.has(sorted[index].id) && !selected.has(sorted[index + 1].id)) {
+              [sorted[index], sorted[index + 1]] = [sorted[index + 1], sorted[index]];
+            }
+          }
+          const order = new Map(sorted.map((object, index) => [object.id, index]));
+          return {
+            ...deck,
+            objects: deck.objects.map((object) => {
+              const index = order.get(object.id);
+              return index === undefined ? object : { ...object, z: zValues[index] };
+            }),
+          };
+        },
+        { historyKey: `layer:${ids.join(',')}` },
+      );
+    },
+
+    stepBackward: (ids) => {
+      if (ids.length === 0) return;
+      applyDeck(
+        (deck) => {
+          const sorted = [...deck.objects].sort((a, b) => a.z - b.z);
+          const zValues = sorted.map((object) => object.z);
+          const selected = new Set(ids);
+          for (let index = 1; index < sorted.length; index += 1) {
+            if (selected.has(sorted[index].id) && !selected.has(sorted[index - 1].id)) {
+              [sorted[index], sorted[index - 1]] = [sorted[index - 1], sorted[index]];
+            }
+          }
+          const order = new Map(sorted.map((object, index) => [object.id, index]));
+          return {
+            ...deck,
+            objects: deck.objects.map((object) => {
+              const index = order.get(object.id);
+              return index === undefined ? object : { ...object, z: zValues[index] };
+            }),
+          };
+        },
+        { historyKey: `layer:${ids.join(',')}` },
+      );
+    },
+
+    // ==================== 编组 ====================
+
+    groupObjects: (ids) => {
+      const deck = get().deck;
+      if (!deck) return null;
+      const members = expandGroups(deck, ids);
+      if (members.length < 2) return null;
+      const group = crypto.randomUUID();
+      const applied = applyDeck((current) => ({
+        ...current,
+        objects: current.objects.map((object) =>
+          members.includes(object.id) ? { ...object, group } : object,
+        ),
+      }));
+      return applied ? group : null;
+    },
+
+    ungroupObjects: (ids) => {
+      const deck = get().deck;
+      if (!deck || ids.length === 0) return;
+      // 解组要覆盖整组：只点一个成员也应把整组的编组关系拿掉
+      const members = new Set(expandGroups(deck, ids));
+      applyDeck((current) => ({
+        ...current,
+        objects: current.objects.map((object) => {
+          if (!members.has(object.id) || !object.group) return object;
+          const next = { ...object };
+          delete next.group;
+          return next;
+        }),
+      }));
+    },
+
+    // ==================== 锁定与批量可见性 ====================
+
+    toggleLock: (ids) => {
+      const deck = get().deck;
+      if (!deck || ids.length === 0) return;
+      const members = expandGroups(deck, ids);
+      // 以主选中对象当前状态为准：只要它还开着锁，就把整批加锁
+      const primary = deck.objects.find((object) => object.id === ids[0]);
+      const nextLocked = !primary?.locked;
+      applyDeck((current) => ({
+        ...current,
+        objects: current.objects.map((object) =>
+          members.includes(object.id) ? { ...object, locked: nextLocked } : object,
+        ),
+      }));
+    },
+
+    setObjectsVisible: (ids, visible) => {
+      if (ids.length === 0) return;
+      applyDeck((deck) => ({
+        ...deck,
+        objects: deck.objects.map((object) =>
+          ids.includes(object.id) ? { ...object, visible } : object,
+        ),
+      }));
+    },
+
+    unlockAll: () => {
+      applyDeck((deck) => ({
+        ...deck,
+        objects: deck.objects.map((object) => (object.locked ? { ...object, locked: false } : object)),
+      }));
+    },
+
+    // 可视化编辑模式：纯视图状态，不进历史也不触发保存
+    setObjectEditMode: (mode) => {
+      set({ objectEditMode: mode });
     },
 
     // 结束历史合并窗口：例如拖拽结束后调用，确保下一次修改单独成为一步历史
